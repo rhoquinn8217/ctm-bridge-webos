@@ -28,6 +28,7 @@
 #include "lvgl.h"
 #include "draw/sdl/lv_draw_sdl.h"
 #include "ui_common.h"
+#include "ui_live.h"       /* CTMS live stream view */
 #include "ctm_monitor.h"   /* D8 device detection (live connect/disconnect) */
 
 
@@ -402,6 +403,12 @@ static void refresh_timer_cb(lv_timer_t *timer)
     refresh_devices();
 }
 
+static void live_button_cb(lv_event_t *event)
+{
+    (void)event;
+    ui_live_open();
+}
+
 static void refresh_button_cb(lv_event_t *event)
 {
     (void)event;
@@ -448,6 +455,8 @@ static void set_key(uint32_t key)
     g_key_pending = true;
 }
 
+static uint32_t g_back_down_ms; /* BACK press start while the live view is up */
+
 static void handle_sdl_event(const SDL_Event *event)
 {
     switch (event->type) {
@@ -485,13 +494,36 @@ static void handle_sdl_event(const SDL_Event *event)
                 case SDLK_BACKSPACE:
                 case SDLK_ESCAPE:
                 case SDLK_q:
-                    g_running = false;
-                    break;
 #ifdef SDLK_AC_BACK
                 case SDLK_AC_BACK:
-                    g_running = false;
-                    break;
 #endif
+                    /* live view: BACK held long returns to the controller
+                     * screen (handled on KEYUP); short press is ignored and
+                     * the app never quits from live. */
+                    if (ui_live_active()) {
+                        if (!event->key.repeat && g_back_down_ms == 0)
+                            g_back_down_ms = SDL_GetTicks();
+                    } else {
+                        g_running = false;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case SDL_KEYUP:
+            switch (event->key.keysym.sym) {
+                case SDLK_BACKSPACE:
+                case SDLK_ESCAPE:
+                case SDLK_q:
+#ifdef SDLK_AC_BACK
+                case SDLK_AC_BACK:
+#endif
+                    if (ui_live_active() && g_back_down_ms != 0 &&
+                        SDL_GetTicks() - g_back_down_ms >= 700)
+                        ui_live_close();
+                    g_back_down_ms = 0;
+                    break;
                 default:
                     break;
             }
@@ -512,7 +544,12 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
 
     if (lv_disp_flush_is_last(disp_drv)) {
         SDL_SetRenderTarget(g_renderer, NULL);
-        SDL_SetRenderDrawColor(g_renderer, 17, 22, 26, 255);
+        /* live view: clear fully transparent so the NDL video plane below the
+         * app surface shows through; otherwise the usual opaque background */
+        if (ui_live_active())
+            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 0);
+        else
+            SDL_SetRenderDrawColor(g_renderer, 17, 22, 26, 255);
         SDL_RenderClear(g_renderer);
         SDL_SetTextureBlendMode(g_texture, SDL_BLENDMODE_BLEND);
         SDL_RenderCopy(g_renderer, g_texture, NULL, NULL);
@@ -598,6 +635,9 @@ static void build_ui(int width, int height)
     lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(g_status_label, lv_color_hex(0xaab6bf), 0);
     lv_obj_align(g_status_label, LV_ALIGN_RIGHT_MID, -350, 0);
+
+    lv_obj_t *live_label = make_button(header, "Show Live", live_button_cb);
+    lv_obj_set_pos(lv_obj_get_parent(live_label), width - 490, 14);
 
     lv_obj_t *refresh_label = make_button(header, "Refresh", refresh_button_cb);
     lv_obj_set_pos(lv_obj_get_parent(refresh_label), width - 330, 14);
@@ -685,6 +725,7 @@ static void build_ui(int width, int height)
 
     lv_group_t *group = lv_group_create();
     lv_group_set_default(group);
+    lv_group_add_obj(group, lv_obj_get_parent(live_label));
     lv_group_add_obj(group, lv_obj_get_parent(refresh_label));
     lv_group_add_obj(group, lv_obj_get_parent(g_debug_button_label));
 }

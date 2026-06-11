@@ -10,7 +10,9 @@
 
 #define LV_COLOR_DEPTH 32
 #define LV_COLOR_16_SWAP 0
-#define LV_COLOR_SCREEN_TRANSP 0
+/* 1: screens may have per-pixel alpha -- required for the live view, where the
+ * UI surface must be transparent so the NDL video plane below shows through */
+#define LV_COLOR_SCREEN_TRANSP 1
 #define LV_COLOR_CHROMA_KEY lv_color_hex(0x00ff00)
 
 #define LV_MEM_CUSTOM 1

@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
+# webOS NDL DirectMedia (video decode). Linked like ss4s's webos5 backend;
+# the runtime lib (libNDL_directmedia.so.1) is present on the TV.
+pkg_check_modules(NDL_DIRECTMEDIA REQUIRED NDL_directmedia)
 
 # --- Vendored ENet (github.com/lsalzman/enet v1.3.18) -------------------------
 # Additive ENet/UDP transport. Built as a small static lib and linked into the
@@ -143,12 +146,16 @@ target_link_libraries(ctmcore PUBLIC pthread m ctm_enet)
 add_executable(ctm_bridge_lvgl_ui
   src/app/ui_app.c
   src/app/ui_common.c
+  src/app/ui_live.c
   src/app/ui_window_common.c
   src/app/ui_window_generic.c
   src/app/ui_window_ds4.c
   src/app/ui_window_ds5.c
   src/app/ui_window_xbox.c
   src/app/ui_window_steam_puck.c
+  src/stream/stream_client.c
+  src/stream/ndl_player.c
+  src/stream/screensaver.c
 )
 
 target_include_directories(ctm_bridge_lvgl_ui PRIVATE
@@ -157,11 +164,14 @@ target_include_directories(ctm_bridge_lvgl_ui PRIVATE
   src/shared
   src/controllers
   src/monitor
+  src/stream
   ${SDL2_INCLUDE_DIRS}
+  ${NDL_DIRECTMEDIA_INCLUDE_DIRS}
   "${LVGL_ROOT}"
   "${LVGL_ROOT}/src"
   "${ENET_ROOT}/include"
 )
+target_compile_definitions(ctm_bridge_lvgl_ui PRIVATE NDL_DIRECTMEDIA_API_VERSION=2)
 target_compile_options(ctm_bridge_lvgl_ui PRIVATE
   ${SDL2_CFLAGS_OTHER}
 )
@@ -173,6 +183,7 @@ target_link_libraries(ctm_bridge_lvgl_ui PRIVATE
   ctm_lvgl
   ctm_enet
   ${SDL2_LIBRARIES}
+  ${NDL_DIRECTMEDIA_LIBRARIES}
 )
 
 install(FILES deploy/webos/appinfo.json DESTINATION .)
