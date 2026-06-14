@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 static pthread_t g_thread;
@@ -24,6 +25,15 @@ static char g_app_id[64];
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static stream_cursor_state g_cursor;
 static stream_stats g_stats;
+static double g_t0;        /* local ms at first video frame */
+static int64_t g_pts0 = -1; /* its pts (us) */
+
+static double mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
 
 static bool recv_all(int s, void *p, size_t len)
 {
@@ -72,12 +82,22 @@ static void read_loop(int s)
                 handle_info((const CtmsStreamInfo *)payload);
             break;
         case CTMS_VIDEO_FRAME:
-            /* pts: encoder frame index -> microseconds at 60 fps */
-            ndl_player_feed(payload, h.payloadLen, (long long)h.pts * 1000000ll / 60ll);
-            pthread_mutex_lock(&g_mtx);
-            g_stats.frames++;
-            g_stats.bytes += h.payloadLen;
-            pthread_mutex_unlock(&g_mtx);
+            /* pts is real capture time in microseconds (true cadence; frames
+             * are only produced when the desktop changes).
+             * Diagnostic: when /tmp/ctm-nofeed exists, skip the NDL feed so
+             * the overlay fps shows the pure network+parse rate. */
+            if (access("/tmp/ctm-nofeed", F_OK) != 0)
+                ndl_player_feed(payload, h.payloadLen, (long long)h.pts);
+            {
+                const double now = mono_ms();
+                if (g_pts0 < 0) { g_pts0 = (int64_t)h.pts; g_t0 = now; }
+                const double lag = (now - g_t0) - (double)((int64_t)h.pts - g_pts0) / 1000.0;
+                pthread_mutex_lock(&g_mtx);
+                g_stats.frames++;
+                g_stats.bytes += h.payloadLen;
+                g_stats.lagMs = lag;
+                pthread_mutex_unlock(&g_mtx);
+            }
             break;
         case CTMS_CURSOR_POS:
             if (h.payloadLen >= sizeof(CtmsCursorPos)) {
@@ -164,6 +184,7 @@ bool stream_client_start(const char *host, int port, const char *app_id)
         return false;
     }
     memset(&g_stats, 0, sizeof(g_stats));
+    g_pts0 = -1;
     g_run = true;
     if (pthread_create(&g_thread, NULL, run, NULL) != 0) {
         g_run = false;

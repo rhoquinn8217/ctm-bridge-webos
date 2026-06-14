@@ -53,7 +53,8 @@ bool ndl_player_load(const CtmsStreamInfo *info)
     di.video.width = info->width;
     di.video.height = info->height;
     di.video.type = (info->codec == 2) ? NDL_VIDEO_TYPE_AV1 : NDL_VIDEO_TYPE_H265;
-    di.audio.type = 0; /* video only */
+    di.video.unknown1 = info->fps; /* framerate hint (unnamed in the header) */
+    di.audio.type = 0;             /* video only */
     ctm_dbg("ndl_load: codec=%u %dx%d hdr=%d -> NDL_DirectMediaLoad", di.video.type, di.video.width, di.video.height, info->isHDR);
     int rc = NDL_DirectMediaLoad(&di, load_cb);
     ctm_dbg("ndl_load: NDL_DirectMediaLoad rc=%d", rc);
@@ -92,6 +93,14 @@ void ndl_player_feed(const void *es, unsigned size, long long pts_us)
     int rc = NDL_DirectVideoPlay((void *)es, size, pts_us);
     if (rc != 0)
         snprintf(g_err, sizeof(g_err), "NDL_DirectVideoPlay = %d: %s", rc, NDL_DirectMediaGetError());
+}
+
+int ndl_player_render_buffer(void)
+{
+    if (!g_loaded) return -1;
+    int len = -1;
+    if (NDL_DirectVideoGetRenderBufferLength(&len) != 0) return -1;
+    return len;
 }
 
 void ndl_player_unload(void)

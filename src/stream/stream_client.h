@@ -25,6 +25,10 @@ typedef struct stream_stats {
     int width, height;
     bool isHDR;
     uint64_t frames, bytes;
+    /* lag of frame arrival vs the stream's own clock (pts), ms: how much
+     * later than "live" we are relative to the first received frame.
+     * Includes network + sender queueing; rises => falling behind. */
+    double lagMs;
 } stream_stats;
 
 bool stream_client_start(const char *host, int port, const char *app_id);

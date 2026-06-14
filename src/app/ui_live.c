@@ -23,6 +23,9 @@ static lv_img_dsc_t g_cursor_dsc;
 
 bool ui_live_active(void) { return g_live_scr != NULL; }
 
+static uint64_t g_prev_frames, g_prev_bytes;
+static uint32_t g_prev_ms;
+
 static void live_tick(lv_timer_t *t)
 {
     (void)t;
@@ -30,13 +33,24 @@ static void live_tick(lv_timer_t *t)
 
     stream_stats st;
     stream_client_get_stats(&st);
-    char buf[160];
-    snprintf(buf, sizeof(buf), "%s | %s %dx%d %s | f=%llu | long BACK: exit",
-             st.connected ? "connected" : "connecting...",
-             st.codec == 2 ? "AV1" : "HEVC", st.width, st.height,
-             st.isHDR ? "HDR" : "SDR",
-             (unsigned long long)st.frames);
-    lv_label_set_text(g_live_status, buf);
+
+    /* refresh the text twice a second; rates from the deltas */
+    const uint32_t now = lv_tick_get();
+    if (now - g_prev_ms >= 500) {
+        const double dt = (now - g_prev_ms) / 1000.0;
+        const double fps = (double)(st.frames - g_prev_frames) / dt;
+        const double mbps = (double)(st.bytes - g_prev_bytes) * 8.0 / 1e6 / dt;
+        g_prev_frames = st.frames; g_prev_bytes = st.bytes; g_prev_ms = now;
+        char buf[224];
+        snprintf(buf, sizeof(buf),
+                 "%s | %s %dx%d %s | %.1f fps  %.1f Mb/s  lag %+.0f ms  buf %d | f=%llu | long BACK: exit",
+                 st.connected ? "connected" : "connecting...",
+                 st.codec == 2 ? "AV1" : "HEVC", st.width, st.height,
+                 st.isHDR ? "HDR" : "SDR",
+                 fps, mbps, st.lagMs, ndl_player_render_buffer(),
+                 (unsigned long long)st.frames);
+        lv_label_set_text(g_live_status, buf);
+    }
 
     stream_cursor_state cur;
     const bool shape_changed = stream_client_get_cursor(&cur, &g_shape_gen);
@@ -97,6 +111,8 @@ void ui_live_open(void)
     lv_img_set_size_mode(g_cursor_img, LV_IMG_SIZE_MODE_REAL);
 
     g_shape_gen = 0;
+    g_prev_frames = g_prev_bytes = 0;
+    g_prev_ms = lv_tick_get();
     g_live_timer = lv_timer_create(live_tick, 16, NULL);
     lv_scr_load(g_live_scr);
     log_append("live: started");
