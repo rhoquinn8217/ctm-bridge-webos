@@ -10,6 +10,7 @@ bool ndl_player_init(const char *app_id); /* dlopen + NDL_DirectMediaInit */
 bool ndl_player_load(const CtmsStreamInfo *info);
 bool ndl_player_loaded(void);
 void ndl_player_feed(const void *es, unsigned size, long long pts_us);
+void ndl_player_feed_audio(const void *opus, unsigned size, long long pts_us);
 int ndl_player_render_buffer(void); /* frames queued in NDL's renderer, -1 unknown */
 void ndl_player_unload(void);
 void ndl_player_quit(void);

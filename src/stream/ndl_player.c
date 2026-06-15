@@ -19,9 +19,23 @@ static char g_err[256];
 const char *ndl_player_error(void) { return g_err; }
 bool ndl_player_loaded(void) { return g_loaded; }
 
+/* Probe (option c): NDL hands us decode/display events through this callback.
+ * We don't yet know which event ids carry a display timestamp, so log every
+ * one to /tmp/ctmbridge-live.log and inspect. If any event fires per displayed
+ * frame with a usable clock, that becomes the real t3 (shown) we can't get
+ * otherwise -- NDL exposes no display-time query. Throttled so a per-frame
+ * event can't flood the log. */
 static void load_cb(int type, long long numValue, const char *strValue)
 {
-    (void)type; (void)numValue; (void)strValue;
+    static long long n;
+    static int last_type = -1;
+    /* always log a type the first time we see it, then 1-in-120 after */
+    if (type != last_type || (n % 120) == 0) {
+        ctm_dbg("ndl_cb: type=%d num=%lld str=%s (#%lld)",
+                type, numValue, strValue ? strValue : "(null)", n);
+        last_type = type;
+    }
+    n++;
 }
 
 bool ndl_player_init(const char *app_id)
@@ -54,7 +68,14 @@ bool ndl_player_load(const CtmsStreamInfo *info)
     di.video.height = info->height;
     di.video.type = (info->codec == 2) ? NDL_VIDEO_TYPE_AV1 : NDL_VIDEO_TYPE_H265;
     di.video.unknown1 = info->fps; /* framerate hint (unnamed in the header) */
-    di.audio.type = 0;             /* video only */
+    if (info->hasAudio) {
+        di.audio.opus.type = NDL_AUDIO_TYPE_OPUS;
+        di.audio.opus.channels = info->audioChannels ? info->audioChannels : 2;
+        di.audio.opus.sampleRate = (info->audioRate ? info->audioRate : 48000) / 1000.0; /* kHz */
+        di.audio.opus.streamHeader = NULL; /* NDL infers from packets (like ss4s) */
+    } else {
+        di.audio.type = 0;         /* video only */
+    }
     ctm_dbg("ndl_load: codec=%u %dx%d hdr=%d -> NDL_DirectMediaLoad", di.video.type, di.video.width, di.video.height, info->isHDR);
     int rc = NDL_DirectMediaLoad(&di, load_cb);
     ctm_dbg("ndl_load: NDL_DirectMediaLoad rc=%d", rc);
@@ -101,6 +122,14 @@ int ndl_player_render_buffer(void)
     int len = -1;
     if (NDL_DirectVideoGetRenderBufferLength(&len) != 0) return -1;
     return len;
+}
+
+void ndl_player_feed_audio(const void *opus, unsigned size, long long pts_us)
+{
+    if (!g_loaded) return;
+    int rc = NDL_DirectAudioPlay((void *)opus, size, pts_us);
+    if (rc != 0)
+        snprintf(g_err, sizeof(g_err), "NDL_DirectAudioPlay = %d: %s", rc, NDL_DirectMediaGetError());
 }
 
 void ndl_player_unload(void)

@@ -634,7 +634,7 @@ static void build_ui(int width, int height)
     lv_label_set_text(g_status_label, "starting");
     lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(g_status_label, lv_color_hex(0xaab6bf), 0);
-    lv_obj_align(g_status_label, LV_ALIGN_RIGHT_MID, -350, 0);
+    lv_obj_set_pos(g_status_label, 28, 46);   /* left, just under the title (was right, under Refresh) */
 
     lv_obj_t *live_label = make_button(header, "Show Live", live_button_cb);
     lv_obj_set_pos(lv_obj_get_parent(live_label), width - 490, 14);

@@ -32,22 +32,40 @@ static void live_tick(lv_timer_t *t)
     if (!g_live_scr) return;
 
     stream_stats st;
-    stream_client_get_stats(&st);
+    stream_client_get_stats(&st);   /* current snapshot; the cursor below needs st.width */
 
-    /* refresh the text twice a second; rates from the deltas */
+    /* refresh once a second; enc/host/net are averaged over the window by
+     * flush_stats (not the last frame's value); rates from the count deltas. */
     const uint32_t now = lv_tick_get();
-    if (now - g_prev_ms >= 500) {
+    if (now - g_prev_ms >= 1000) {
+        stream_client_flush_stats(&st);   /* re-fetch with the window averages */
         const double dt = (now - g_prev_ms) / 1000.0;
         const double fps = (double)(st.frames - g_prev_frames) / dt;
         const double mbps = (double)(st.bytes - g_prev_bytes) * 8.0 / 1e6 / dt;
         g_prev_frames = st.frames; g_prev_bytes = st.bytes; g_prev_ms = now;
-        char buf[224];
+        const int rbuf = ndl_player_render_buffer();
+        /* real one-way frame transport (host tSend + NTP clock offset); fall back
+         * to the rtt/2 control-path floor until a frame-measured value exists. */
+        const double net = (st.netMs > 0.0) ? st.netMs : (st.synced ? st.rttMs / 2.0 : 0.0);
+        /* TV decode latency: NDL v2 has no per-frame display event (only state
+         * callbacks), so -- exactly like Moonlight's NDL backend -- this is
+         * render-queue depth x the MEASURED inter-frame interval, computed per
+         * frame on the receiver and averaged over the window. Display buffering,
+         * not isolated decode compute. */
+        const double decbuf = st.decMs;
+        /* g2g (present->display), t0-anchored: (arrival+offset - t0) + dec, computed
+         * per frame on the receiver -- no leg gap. Falls back to host+net+dec until
+         * the clock offset is known. Still a lower bound (arrival->photons scanout
+         * lives inside NDL with no display-time API). */
+        const double g2g = (st.g2gMs > 0.0) ? st.g2gMs : (st.hostMs + net + decbuf);
+        char buf[320];
         snprintf(buf, sizeof(buf),
-                 "%s | %s %dx%d %s | %.1f fps  %.1f Mb/s  lag %+.0f ms  buf %d | f=%llu | long BACK: exit",
+                 "%s | %s %dx%d %s | %.1f fps  %.1f Mb/s\n"
+                 "enc %.2f  dec(buf) %.2f  host %.2f  net %.2f  g2g\xE2\x89\xA5 %.2f ms  (submit %.3f rtt %.2f buf %d) | f=%llu | long BACK: exit",
                  st.connected ? "connected" : "connecting...",
-                 st.codec == 2 ? "AV1" : "HEVC", st.width, st.height,
-                 st.isHDR ? "HDR" : "SDR",
-                 fps, mbps, st.lagMs, ndl_player_render_buffer(),
+                 st.codec == 2 ? "AV1" : "HEVC", st.width, st.height, st.isHDR ? "HDR" : "SDR",
+                 fps, mbps,
+                 st.encMs, decbuf, st.hostMs, net, g2g, st.submitMs, st.rttMs, rbuf,
                  (unsigned long long)st.frames);
         lv_label_set_text(g_live_status, buf);
     }
