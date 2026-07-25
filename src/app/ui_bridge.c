@@ -6,6 +6,7 @@
 
 #include "ctm_state.h"
 #include "ctm_bridge_protocol.h"
+#include "ctm_hostmouse.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -26,7 +27,7 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
     memset(&settings, 0, sizeof(settings));
     settings.kind = TV_BRIDGE_KIND_HID;
     settings.audio_mode = TV_BRIDGE_AUDIO_AUTO;
-    settings.latency_ms = 48;
+    settings.latency_ms = 60;
     settings.haptics_gain_centi = 100;
     settings.headset_volume_percent = 100;
     settings.speaker_volume_percent = 100;
@@ -352,8 +353,61 @@ void stop_session(const char *key)
     g_session_count--;
 }
 
+/* --- TV pointer -> host mouse (synthetic device; no hidraw) ---------------
+ * Tracked separately from g_sessions (which is controller-typed): our own
+ * BRIDGE_START/STOP around the ctm_hostmouse synthesizer. Kind MUST be "hid":
+ * the agent whitelists BRIDGE_START kinds and only "hid" reaches the "auto"
+ * dynamic-profile path that builds the device from the descriptor the
+ * synthesizer sends in HELLO (unknown kinds are rejected, not auto-routed). */
+static bool g_tv_pointer_active;
+static char g_tv_pointer_busid[32];
+
+bool ctm_tv_pointer_plug(void)
+{
+    if (g_tv_pointer_active) return true;
+    if (!g_agent_online && !discover_agent_once()) {
+        log_append("TV pointer: Windows agent not found");
+        return false;
+    }
+    static unsigned seq;
+    int port = next_bridge_port();
+    snprintf(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "ctm-mouse-%u", ++seq);
+    char cmd[160], response[256];
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
+    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
+        log_append("TV pointer: agent bridge start failed: %s", response);
+        return false;
+    }
+    if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
+        log_append("TV pointer: synthesizer start failed");
+        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_tv_pointer_busid);
+        (void)send_agent_command(cmd, response, sizeof(response));
+        return false;
+    }
+    g_tv_pointer_active = true;
+    log_append("TV pointer bridged to host (busid=%s port=%d)", g_tv_pointer_busid, port);
+    return true;
+}
+
+void ctm_tv_pointer_unplug(void)
+{
+    if (!g_tv_pointer_active) return;
+    ctm_hostmouse_unplug();
+    char cmd[160], response[256];
+    snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_tv_pointer_busid);
+    (void)send_agent_command(cmd, response, sizeof(response));
+    g_tv_pointer_active = false;
+    log_append("TV pointer released; control returned to TV");
+}
+
+bool ctm_tv_pointer_active(void)
+{
+    return g_tv_pointer_active;
+}
+
 void release_local_sessions_on_exit(void)
 {
+    ctm_tv_pointer_unplug();
     for (int i = 0; i < g_session_count; ++i) {
         if (g_sessions[i].controller) {
             ctm_controller_plug_out(g_sessions[i].controller);
@@ -494,6 +548,16 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     log_append("controller started kind=%s node=%s busid=%s host=%s port=%d",
                kind, dev->node, busid, g_agent_host, port);
     return true;
+}
+
+/* The TV's own Magic Remote (e.g. "LGE MR24"): its row IS the TV-pointer
+ * bridge. The raw hidraw relay would forward the LG-vendor descriptor that
+ * Windows rejects (code 10), so plug/unplug of this row must drive the
+ * ctm_hostmouse synthesizer instead — see plug_button_cb/auto_plug_devices. */
+bool item_is_tv_remote(const logical_device_t *item)
+{
+    if (!item) return false;
+    return strncmp(item->name, "LGE ", 4) == 0 || strstr(item->name, "MR2") != NULL;
 }
 
 /* Plug the whole device using its first hidraw node (the default). When: the

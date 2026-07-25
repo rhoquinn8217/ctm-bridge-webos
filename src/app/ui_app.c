@@ -30,9 +30,11 @@
 #include "ui_common.h"
 #include "ui_live.h"       /* CTMS live stream view */
 #include "ctm_monitor.h"   /* D8 device detection (live connect/disconnect) */
+#include "ctm_hostmouse.h" /* TV pointer -> host mouse feed */
 
 
 static void render_device_list(void);
+static void ui_request_refresh(void);
 
 /* D8 device-detection monitor: runs on its own thread; its callback logs each
  * change and flags the UI to re-scan promptly, so the list is live. */
@@ -102,7 +104,18 @@ static void plug_button_cb(lv_event_t *event)
 
     logical_device_t *item = &g_devices.items[index];
     bool requested_state = !item->plugged;
-    if (requested_state) {
+    if (item_is_tv_remote(item)) {
+        /* The remote's row toggles the TV-pointer synthesizer (never the raw
+         * relay); its state is live, not persisted. */
+        if (requested_state) {
+            if (!ctm_tv_pointer_plug()) {
+                update_details();
+                return;
+            }
+        } else {
+            ctm_tv_pointer_unplug();
+        }
+    } else if (requested_state) {
         if (!plug_in_item(item)) {
             update_details();
             return;
@@ -113,7 +126,8 @@ static void plug_button_cb(lv_event_t *event)
     }
 
     item->plugged = requested_state;
-    set_plug_key(item->key, item->plugged);
+    if (!item_is_tv_remote(item))
+        set_plug_key(item->key, item->plugged);
     g_selected_index = index;
     snprintf(g_selected_key, sizeof(g_selected_key), "%s", item->key);
 
@@ -122,6 +136,7 @@ static void plug_button_cb(lv_event_t *event)
     }
     update_row_styles();
     update_details();
+    ui_request_refresh();
 }
 
 static void expand_button_cb(lv_event_t *event)
@@ -325,6 +340,15 @@ static void refresh_devices(void)
     build_logical_devices(&g_scan, &g_devices);
     publish_bt_macs();
 
+    /* The remote's row mirrors the LIVE TV-pointer state (never the persisted
+     * plug keys) — a Back-hold release shows up on the next tick, and a stale
+     * "plugged" from a previous run can't strand the row. */
+    for (int i = 0; i < g_devices.count; ++i) {
+        if (item_is_tv_remote(&g_devices.items[i])) {
+            g_devices.items[i].plugged = ctm_tv_pointer_active();
+        }
+    }
+
     /* Stage 1: capture the puck's USB enumeration once, at physical presence,
      * so it's cached and ready before any bridge Plug in. */
     {
@@ -338,6 +362,10 @@ static void refresh_devices(void)
         }
         if (!puck_present) g_puck_enum.valid = 0;
     }
+
+    /* After the puck enum capture (a plug needs it cached) and before the
+     * list-signature render, so plugged states drawn this tick are current. */
+    ctm_autoplug_tick();
 
     int selected = -1;
     if (g_selected_key[0]) {
@@ -403,6 +431,17 @@ static void refresh_timer_cb(lv_timer_t *timer)
     refresh_devices();
 }
 
+static lv_timer_t *g_refresh_timer;
+
+/* Make the next lv_timer_handler() pass run refresh_devices() NOW instead of
+ * waiting out the 2 s period. Deferred (not a direct call) so it is safe from
+ * inside LVGL event callbacks whose widgets the re-render would delete. Call
+ * after any state event: plug/unplug, pointer bridge/release, agent change. */
+static void ui_request_refresh(void)
+{
+    if (g_refresh_timer) lv_timer_ready(g_refresh_timer);
+}
+
 static void live_button_cb(lv_event_t *event)
 {
     (void)event;
@@ -455,10 +494,59 @@ static void set_key(uint32_t key)
     g_key_pending = true;
 }
 
-static uint32_t g_back_down_ms; /* BACK press start while the live view is up */
+static uint32_t g_back_down_ms; /* BACK press start (live view or pointer bridge) */
+
+/* Forward the current pointer state to the host when the TV pointer is bridged.
+ * webOS already smoothed it; we just scale to the surface and send. */
+static void feed_tv_pointer(int wheel)
+{
+    if (!ctm_tv_pointer_active()) return;
+    ctm_hostmouse_feed(g_pointer_x, g_pointer_y, g_display_w, g_display_h,
+                       g_pointer_buttons, wheel);
+}
+
+/* webOS remote scancodes. LG's RUNTIME SDL numbering differs from the
+ * community fork's headers: Back was MEASURED on this C2 as scancode 484
+ * (sym 0), while the fork says 482 — match both. EXIT (a held Back) is
+ * expected near 505 (fork value) but unmeasured on LG's SDL, so every
+ * unhandled remote key is logged ("key sc=... sym=...") to read the real
+ * value off the Debug panel. webOS RCU Back may deliver NO KEYUP — all
+ * back/exit decisions happen on KEYDOWN. */
+#define CTM_SC_BACK_FORK 482u
+#define CTM_SC_BACK_LG   484u
+#define CTM_SC_EXIT_FORK 505u
 
 static void handle_sdl_event(const SDL_Event *event)
 {
+    if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) {
+        unsigned sc = (unsigned)event->key.keysym.scancode;
+        if (sc == CTM_SC_BACK_FORK || sc == CTM_SC_BACK_LG) {
+            /* Short Back: local back only — closes the live view; never exits
+             * the app and never reaches the PC. */
+            if (event->type == SDL_KEYDOWN && !event->key.repeat && ui_live_active())
+                ui_live_close();
+            return;
+        }
+        if (sc == CTM_SC_EXIT_FORK) {
+            /* Back held: release the bridged pointer back to the TV; when the
+             * pointer isn't bridged this is the remote's way out of the app. */
+            if (event->type == SDL_KEYDOWN && !event->key.repeat) {
+                if (ctm_tv_pointer_active()) {
+                    ctm_tv_pointer_unplug();
+                    ui_request_refresh();
+                } else {
+                    g_running = false;
+                }
+            }
+            return;
+        }
+        /* Unknown remote keys (no printable sym): log once per press so the
+         * real LG scancodes can be read off the Debug panel. */
+        if (event->type == SDL_KEYDOWN && !event->key.repeat &&
+            (event->key.keysym.sym == 0 || sc >= 300u)) {
+            log_append("key sc=%u sym=0x%x", sc, (unsigned)event->key.keysym.sym);
+        }
+    }
     switch (event->type) {
         case SDL_QUIT:
             g_running = false;
@@ -466,16 +554,22 @@ static void handle_sdl_event(const SDL_Event *event)
         case SDL_MOUSEMOTION:
             g_pointer_x = event->motion.x;
             g_pointer_y = event->motion.y;
+            feed_tv_pointer(0);
             break;
         case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP: {
+            unsigned bit = (event->button.button == SDL_BUTTON_RIGHT) ? 0x2u :
+                           (event->button.button == SDL_BUTTON_MIDDLE) ? 0x4u : 0x1u;
+            bool down = (event->type == SDL_MOUSEBUTTONDOWN);
+            if (down) g_pointer_buttons |= bit; else g_pointer_buttons &= ~bit;
             g_pointer_x = event->button.x;
             g_pointer_y = event->button.y;
-            g_pointer_down = true;
+            g_pointer_down = (g_pointer_buttons & 0x1u) != 0;   /* left drives LVGL */
+            feed_tv_pointer(0);
             break;
-        case SDL_MOUSEBUTTONUP:
-            g_pointer_x = event->button.x;
-            g_pointer_y = event->button.y;
-            g_pointer_down = false;
+        }
+        case SDL_MOUSEWHEEL:
+            feed_tv_pointer(event->wheel.y);
             break;
         case SDL_KEYDOWN:
             switch (event->key.keysym.sym) {
@@ -497,10 +591,11 @@ static void handle_sdl_event(const SDL_Event *event)
 #ifdef SDLK_AC_BACK
                 case SDLK_AC_BACK:
 #endif
-                    /* live view: BACK held long returns to the controller
-                     * screen (handled on KEYUP); short press is ignored and
-                     * the app never quits from live. */
-                    if (ui_live_active()) {
+                    /* While the TV pointer is bridged, or the live view is up,
+                     * BACK is a long-press gesture (handled on KEYUP) — the app
+                     * never quits from those states on a short press. Pointer
+                     * bridge takes precedence so it can't be lost by accident. */
+                    if (ctm_tv_pointer_active() || ui_live_active()) {
                         if (!event->key.repeat && g_back_down_ms == 0)
                             g_back_down_ms = SDL_GetTicks();
                     } else {
@@ -519,9 +614,17 @@ static void handle_sdl_event(const SDL_Event *event)
 #ifdef SDLK_AC_BACK
                 case SDLK_AC_BACK:
 #endif
-                    if (ui_live_active() && g_back_down_ms != 0 &&
-                        SDL_GetTicks() - g_back_down_ms >= 700)
-                        ui_live_close();
+                    if (g_back_down_ms != 0) {
+                        uint32_t held = SDL_GetTicks() - g_back_down_ms;
+                        /* Pointer release wins if bridged: ~1.2 s restores TV. */
+                        if (ctm_tv_pointer_active()) {
+                            if (held >= 1200) {
+                                ctm_tv_pointer_unplug();
+                            }
+                        } else if (ui_live_active() && held >= 700) {
+                            ui_live_close();
+                        }
+                    }
                     g_back_down_ms = 0;
                     break;
                 default:
@@ -906,10 +1009,22 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    /* Own the remote's Back key (suppress the system "exit app" prompt and
+     * the hold-to-exit): LG's system SDL honors these access-policy hints —
+     * verified present in the C2's /usr/lib/libSDL2-2.0.so.0. Back then
+     * arrives as scancode 482, held-Back/EXIT as 505 (handle_sdl_event). */
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+
+#ifndef CTM_BUILD_NUMBER
+#define CTM_BUILD_NUMBER 0
+#endif
+    log_append("ctm-bridge build %d", (int)CTM_BUILD_NUMBER);
 
     lv_init();
 
@@ -920,6 +1035,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    g_display_w = width;
+    g_display_h = height;
     build_ui(width, height);
 
     static lv_indev_drv_t keypad_drv;
@@ -950,7 +1067,7 @@ int main(int argc, char **argv)
     }
     discover_agent_once();
     refresh_devices();
-    lv_timer_create(refresh_timer_cb, 2000, NULL);
+    g_refresh_timer = lv_timer_create(refresh_timer_cb, 2000, NULL);
     lv_timer_create(discovery_timer_cb, 2000, NULL);
     lv_timer_create(log_flush_timer_cb, 250, NULL);
     ctm_controller_set_log_sink(ui_controller_log);

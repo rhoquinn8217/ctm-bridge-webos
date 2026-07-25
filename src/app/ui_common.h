@@ -62,6 +62,8 @@ extern bool g_key_pending;
 extern int g_pointer_x;
 extern int g_pointer_y;
 extern bool g_pointer_down;
+extern unsigned g_pointer_buttons;   /* bit0 left, bit1 right, bit2 middle */
+extern int g_display_w, g_display_h; /* SDL surface size, for pointer scaling */
 
 /* ---- ui_common.c: UI-thread log flush (pushes the shared g_log buffer to the
  * on-screen console; the buffer + helpers live in ctm_state.c) ---- */

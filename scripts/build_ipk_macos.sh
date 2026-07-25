@@ -3,6 +3,16 @@ set -euo pipefail
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIST_DIR="$(cd "$SOURCE_DIR/.." && pwd)/dist"
+
+# Sequential build number: appinfo version is FROZEN, so regression artifacts
+# are numbered "name_version(N).ipk" in the workspace dist and N is stamped
+# into the app log ("ctm-bridge build N").
+BUILD_N=1
+existing="$(ls "$ROOT_DIST_DIR" 2>/dev/null | grep -E '^com\.local\.ctmbridge_.*\([0-9]+\)\.ipk$' | sed -E 's/.*\(([0-9]+)\)\.ipk/\1/' | sort -n | tail -1 || true)"
+if [[ -n "$existing" ]]; then
+  BUILD_N=$((existing + 1))
+fi
+echo "Build number: $BUILD_N"
 WORK_DIR="${WORK_DIR:-$SOURCE_DIR/build/webos-arm}"
 SDK="${SDK:-$HOME/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot}"
 TOOLCHAIN_FILE="${TOOLCHAIN_FILE:-$SDK/share/buildroot/toolchainfile.cmake}"
@@ -65,6 +75,7 @@ fi
 cmake -S "$WORK_DIR/src" -B "$WORK_DIR/build" \
   -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
   -DCTM_PREBUILT_LVGL="$ctm_prebuilt_lvgl" \
+  -DCTM_BUILD_NUMBER="$BUILD_N" \
   -DCMAKE_AR="$SDK/bin/arm-webos-linux-gnueabi-ar" \
   -DCMAKE_RANLIB="$SDK/bin/arm-webos-linux-gnueabi-ranlib"
 cmake --build "$WORK_DIR/build" --target package
@@ -75,7 +86,11 @@ if [[ -f "$WORK_DIR/build/libctm_lvgl.a" ]]; then
 fi
 
 mkdir -p "$ROOT_DIST_DIR"
-find "$WORK_DIR/src/dist" -maxdepth 1 -type f -name '*.ipk' -exec cp -f {} "$ROOT_DIST_DIR/" \;
+for f in "$WORK_DIR/src/dist"/*.ipk; do
+  name="$(basename "$f" .ipk)"
+  name="${name%_arm}"
+  cp -f "$f" "$ROOT_DIST_DIR/${name}(${BUILD_N}).ipk"
+done
 
-echo "IPK output:"
-find "$ROOT_DIST_DIR" -maxdepth 1 -type f -name 'com.local.ctmbridge_*_arm.ipk' -print
+echo "IPK output (build $BUILD_N):"
+find "$ROOT_DIST_DIR" -maxdepth 1 -type f -name 'com.local.ctmbridge_*.ipk' -print | sort

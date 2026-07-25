@@ -232,8 +232,17 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len);
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port);
 void stop_session(const char *key);
 void release_local_sessions_on_exit(void);
+/* TV pointer -> host mouse (synthetic; feeds webOS-smoothed pointer to the PC). */
+bool ctm_tv_pointer_plug(void);
+void ctm_tv_pointer_unplug(void);
+bool ctm_tv_pointer_active(void);
 const char *bridge_kind_for_item(const logical_device_t *item);
 bool plug_in_item(logical_device_t *item);
+bool item_is_tv_remote(const logical_device_t *item);
+
+/* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
+ * refresh after the device list is rebuilt. Once-per-key per process run. */
+void ctm_autoplug_tick(void);
 bool plug_in_node(logical_device_t *item, int scan_index);   /* bridge ONE chosen hidraw */
 void node_session_key(const logical_device_t *item, int scan_index, char *out, size_t out_len);
 

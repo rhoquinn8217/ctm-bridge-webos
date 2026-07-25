@@ -40,6 +40,8 @@ bool g_key_pending;
 int g_pointer_x;
 int g_pointer_y;
 bool g_pointer_down;
+unsigned g_pointer_buttons;
+int g_display_w, g_display_h;
 
 /* Flush the buffered log into the on-screen console. UI thread only (touches
  * LVGL); the mutex is held across the update so a concurrent log_append() on a

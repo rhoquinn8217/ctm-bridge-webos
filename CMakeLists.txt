@@ -120,10 +120,12 @@ endif()
 # embed is a later step.
 add_library(ctmcore STATIC
   src/app/ctm_state.c
+  src/app/ctm_autoplug.c
   src/app/ui_devices.c
   src/app/ui_bridge.c
   src/shared/ctm_hid.c
   src/shared/ctm_transport.c
+  src/shared/ctm_hostmouse.c
   src/shared/enet_transport.c
   src/controllers/controller_common.c
   src/controllers/controller_ds5.c
@@ -171,7 +173,8 @@ target_include_directories(ctm_bridge_lvgl_ui PRIVATE
   "${LVGL_ROOT}/src"
   "${ENET_ROOT}/include"
 )
-target_compile_definitions(ctm_bridge_lvgl_ui PRIVATE NDL_DIRECTMEDIA_API_VERSION=2)
+set(CTM_BUILD_NUMBER 0 CACHE STRING "Sequential build number (stamped into the app log; dist artifact suffix)")
+target_compile_definitions(ctm_bridge_lvgl_ui PRIVATE NDL_DIRECTMEDIA_API_VERSION=2 CTM_BUILD_NUMBER=${CTM_BUILD_NUMBER})
 target_compile_options(ctm_bridge_lvgl_ui PRIVATE
   ${SDL2_CFLAGS_OTHER}
 )
@@ -189,6 +192,7 @@ target_link_libraries(ctm_bridge_lvgl_ui PRIVATE
 install(FILES deploy/webos/appinfo.json DESTINATION .)
 install(FILES "${CMAKE_SOURCE_DIR}/icon.png" DESTINATION . OPTIONAL)
 install(FILES "${CMAKE_SOURCE_DIR}/icon_large.png" DESTINATION . OPTIONAL)
+install(FILES "${CMAKE_SOURCE_DIR}/splash.png" DESTINATION . OPTIONAL)
 install(FILES "${CMAKE_SOURCE_DIR}/assets/font.ttf" DESTINATION assets)
 install(TARGETS ctm_bridge_lvgl_ui DESTINATION bin)
 

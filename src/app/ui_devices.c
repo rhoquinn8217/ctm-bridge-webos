@@ -355,6 +355,17 @@ logical_device_t *find_or_add_logical_device(logical_result_t *logical, const de
         }
     }
 
+    /* Offline / not-connected devices surface with an empty name (they would
+     * render as "Unnamed HID device") — never list them; they can't be
+     * plugged anyway. */
+    {
+        char name_probe[64];
+        logical_name_for_device(dev, name_probe, sizeof(name_probe));
+        if (strcmp(name_probe, "Unnamed HID device") == 0) {
+            return NULL;
+        }
+    }
+
     if (logical->count >= MAX_DEVICES) {
         return NULL;
     }
