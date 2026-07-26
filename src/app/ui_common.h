@@ -76,6 +76,9 @@ lv_obj_t *detail_label(lv_obj_t *parent, const char *text, int x, int y, int w,
 int detail_add_identity(lv_obj_t *parent, const logical_device_t *item, int y, int width);
 int detail_add_audio_modes(lv_obj_t *parent, const tv_bridge_worker_settings_t *settings,
                            int y, int width);
+int detail_add_mode_row(lv_obj_t *parent, const tv_bridge_worker_settings_t *settings,
+                        int y, int width, const char *const *labels, const int *modes,
+                        int count);
 int detail_add_slider(lv_obj_t *parent, const char *label_text, int value, int min, int max,
                       int y, int width, int which);
 void build_generic_detail(lv_obj_t *parent, const logical_device_t *item, int width);

@@ -43,7 +43,12 @@ void audio_mode_cb(lv_event_t *event)
     if (!settings) return;
     settings->audio_mode = (tv_bridge_audio_mode_t)mode;
     apply_settings_to_session(item);
-    log_append("%s audio output %s", item->name, audio_mode_name(settings->audio_mode));
+    /* DS4 reuses BOTH as the Layout B "Split" route (speaker + headphone-L). */
+    const char *name = (settings->kind == TV_BRIDGE_KIND_DS4 &&
+                        settings->audio_mode == TV_BRIDGE_AUDIO_BOTH)
+                           ? "Split"
+                           : audio_mode_name(settings->audio_mode);
+    log_append("%s audio output %s", item->name, name);
     update_details();
 }
 
@@ -128,24 +133,17 @@ int detail_add_identity(lv_obj_t *parent, const logical_device_t *item, int y, i
     return y + 38;
 }
 
-int detail_add_audio_modes(lv_obj_t *parent, const tv_bridge_worker_settings_t *settings,
-                                  int y, int width)
+int detail_add_mode_row(lv_obj_t *parent, const tv_bridge_worker_settings_t *settings,
+                               int y, int width, const char *const *labels, const int *modes,
+                               int count)
 {
     detail_label(parent, "Audio output", 0, y, width, &lv_font_montserrat_16, lv_color_hex(0xf5f8fa));
     y += 30;
 
-    const char *labels[] = {"Auto", "Off", "Speaker", "Headset", "Both"};
-    const int modes[] = {
-        TV_BRIDGE_AUDIO_AUTO,
-        TV_BRIDGE_AUDIO_OFF,
-        TV_BRIDGE_AUDIO_SPEAKER,
-        TV_BRIDGE_AUDIO_HEADSET,
-        TV_BRIDGE_AUDIO_BOTH
-    };
     int gap = 8;
-    int button_w = (width - gap * 4) / 5;
+    int button_w = (width - gap * (count - 1)) / count;
     if (button_w < 70) button_w = 70;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < count; ++i) {
         bool selected = settings && settings->audio_mode == (tv_bridge_audio_mode_t)modes[i];
         lv_obj_t *button = lv_btn_create(parent);
         lv_obj_set_pos(button, i * (button_w + gap), y);
@@ -162,6 +160,20 @@ int detail_add_audio_modes(lv_obj_t *parent, const tv_bridge_worker_settings_t *
         lv_obj_center(label);
     }
     return y + 58;
+}
+
+int detail_add_audio_modes(lv_obj_t *parent, const tv_bridge_worker_settings_t *settings,
+                                  int y, int width)
+{
+    static const char *const labels[] = {"Auto", "Off", "Speaker", "Headset", "Both"};
+    static const int modes[] = {
+        TV_BRIDGE_AUDIO_AUTO,
+        TV_BRIDGE_AUDIO_OFF,
+        TV_BRIDGE_AUDIO_SPEAKER,
+        TV_BRIDGE_AUDIO_HEADSET,
+        TV_BRIDGE_AUDIO_BOTH
+    };
+    return detail_add_mode_row(parent, settings, y, width, labels, modes, 5);
 }
 
 int detail_add_slider(lv_obj_t *parent, const char *label_text, int value, int min, int max,
