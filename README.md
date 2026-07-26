@@ -1,7 +1,5 @@
 # CTM Bridge Test
 
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
-
 > **This is the one bridge project for the TV side** — both the standalone
 > webOS app *and* the embeddable core: the
 > [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
@@ -107,3 +105,11 @@ From Windows, attach a listed TV bus id:
 & "C:\Program Files\USBip\usbip.exe" list -r <tv-ip>
 & "C:\Program Files\USBip\usbip.exe" attach -r <tv-ip> -b <busid>
 ```
+
+## Support
+
+One person, late nights: controllers were just the start — native AMF
+streaming, a custom low-latency codec and a bigger webOS app are in the pipe.
+If CTM Bridge saved you some hassle, coffee speeds them up.
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
