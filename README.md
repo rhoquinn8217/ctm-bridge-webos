@@ -124,4 +124,4 @@ own app or fork, please overlay the CTM Bridge badge on your app's icon — the
 way the [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
 [moonlight-tv](https://github.com/CTM-Bridge/moonlight-tv) forks do:
 
-<a href="https://github.com/CTM-Bridge/ctm-bridge-webos/blob/main/icon_extra_large.png"><img src="https://raw.githubusercontent.com/CTM-Bridge/ctm-bridge-webos/main/icon_extra_large.png" width="96" alt="CTM Bridge badge"></a>
+<a href="https://github.com/CTM-Bridge/ctm-bridge-webos/blob/main/icon_extra_large.png"><img src="https://raw.githubusercontent.com/CTM-Bridge/ctm-bridge-webos/main/icon_extra_large.png" width="96" alt="CTM Bridge badge"></a>&nbsp;&nbsp;→&nbsp;&nbsp;<img src="https://raw.githubusercontent.com/CTM-Bridge/aurora-tv/main/deploy/webos/icon.png" width="96" alt="Aurora icon with the badge">&nbsp;<img src="https://raw.githubusercontent.com/CTM-Bridge/moonlight-tv/main/deploy/webos/icon.png" width="96" alt="Moonlight TV icon with the badge">
