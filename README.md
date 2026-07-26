@@ -1,5 +1,7 @@
 # CTM Bridge Test
 
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
+
 Native webOS POC app for the CTM TCP bridge.
 
 The package also installs `ctm_usbipd_webos`, a separate pure USB/IP exporter
