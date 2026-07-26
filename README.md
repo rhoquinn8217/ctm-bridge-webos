@@ -2,6 +2,14 @@
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
 
+> **This is the one bridge project for the TV side** — both the standalone
+> webOS app *and* the embeddable core: the
+> [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
+> [moonlight-tv](https://github.com/CTM-Bridge/moonlight-tv) forks compile
+> their `ctmbridge` lib straight from these sources. To build either fork,
+> clone this repo **as a sibling directory** (the forks' CMake default), or
+> point `-DCTM_BRIDGE_DIR=<path>` at it.
+
 Native webOS POC app for the CTM TCP bridge.
 
 The package also installs `ctm_usbipd_webos`, a separate pure USB/IP exporter
