@@ -113,3 +113,8 @@ From Windows, attach a listed TV bus id:
 & "C:\Program Files\USBip\usbip.exe" list -r <tv-ip>
 & "C:\Program Files\USBip\usbip.exe" attach -r <tv-ip> -b <busid>
 ```
+
+## License
+
+[GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
+Copyright (C) 2026 Ciprian Teodor Misaila.
