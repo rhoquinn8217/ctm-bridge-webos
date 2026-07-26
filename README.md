@@ -118,3 +118,10 @@ From Windows, attach a listed TV bus id:
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
 Copyright (C) 2026 Ciprian Teodor Misaila.
+
+Not a license term, just a friendly ask: if you integrate CTM Bridge into your
+own app or fork, please overlay the CTM Bridge badge on your app's icon — the
+way the [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
+[moonlight-tv](https://github.com/CTM-Bridge/moonlight-tv) forks do:
+
+<a href="https://github.com/CTM-Bridge/ctm-bridge-webos/blob/main/icon_extra_large.png"><img src="https://raw.githubusercontent.com/CTM-Bridge/ctm-bridge-webos/main/icon_extra_large.png" width="96" alt="CTM Bridge badge"></a>
