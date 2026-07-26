@@ -17,6 +17,7 @@
  * directly from the caller's thread through the thread-safe transport. */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +42,12 @@ bool ctm_hostmouse_connected(void);
  * bit2=middle; wheel_delta in detents (+ away from user). Coalesces motion,
  * accumulates wheel. No-op when not connected. */
 void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_delta);
+
+/* Feed a keyboard key (HID Keyboard/Keypad usage, e.g. 0x50 LeftArrow) up or
+ * down. The device's second report is a standard 6-key-rollover keyboard, so
+ * the remote's D-pad/OK arrive on the host as real key strokes. No-op when
+ * not connected; pressed set clears on reconnect (no stuck keys). */
+void ctm_hostmouse_feed_key(uint8_t hid_usage, bool down);
 
 /* Optional log sink (thread-safe on the caller's side); NULL = stderr only. */
 void ctm_hostmouse_set_logger(void (*sink)(const char *line));

@@ -54,10 +54,38 @@ static const uint8_t k_mouse_report_desc[] = {
     0x95, 0x01,        /*     Report Count (1) */
     0x81, 0x06,        /*     Input (Data,Var,Rel) */
     0xC0,              /*   End Collection */
+    0xC0,              /* End Collection */
+    /* Second top-level collection: a standard 6-key-rollover keyboard, so the
+     * remote's D-pad/OK (and future keys) reach the host as real key strokes.
+     * Report ID 2: [modifiers:u8][reserved:u8][keys:6 x u8 usage array]. */
+    0x05, 0x01,        /* Usage Page (Generic Desktop) */
+    0x09, 0x06,        /* Usage (Keyboard) */
+    0xA1, 0x01,        /* Collection (Application) */
+    0x85, 0x02,        /*   Report ID (2) */
+    0x05, 0x07,        /*   Usage Page (Keyboard/Keypad) */
+    0x19, 0xE0,        /*   Usage Minimum (LeftControl) */
+    0x29, 0xE7,        /*   Usage Maximum (Right GUI) */
+    0x15, 0x00,        /*   Logical Minimum (0) */
+    0x25, 0x01,        /*   Logical Maximum (1) */
+    0x75, 0x01,        /*   Report Size (1) */
+    0x95, 0x08,        /*   Report Count (8) */
+    0x81, 0x02,        /*   Input (Data,Var,Abs) -- modifiers */
+    0x75, 0x08,        /*   Report Size (8) */
+    0x95, 0x01,        /*   Report Count (1) */
+    0x81, 0x03,        /*   Input (Const,Var,Abs) -- reserved */
+    0x19, 0x00,        /*   Usage Minimum (0) */
+    0x29, 0x65,        /*   Usage Maximum (0x65) */
+    0x15, 0x00,        /*   Logical Minimum (0) */
+    0x25, 0x65,        /*   Logical Maximum (0x65) */
+    0x75, 0x08,        /*   Report Size (8) */
+    0x95, 0x06,        /*   Report Count (6) */
+    0x81, 0x00,        /*   Input (Data,Array,Abs) -- 6KRO key array */
     0xC0               /* End Collection */
 };
 
 #define HM_REPORT_LEN 7
+#define HM_KB_REPORT_LEN 9
+#define HM_KB_MAX_KEYS 6
 
 static struct {
     pthread_t thread;
@@ -72,6 +100,8 @@ static struct {
     /* last state sent, to suppress no-change reports */
     uint16_t last_x, last_y;
     uint8_t last_buttons;
+    /* pressed keyboard usages (report ID 2, 6KRO array) */
+    uint8_t keys[HM_KB_MAX_KEYS];
     void (*log_sink)(const char *line);
 } g_hm = { .state_mutex = PTHREAD_MUTEX_INITIALIZER };
 
@@ -97,9 +127,12 @@ static int hm_send_hello(void)
     memset(&caps, 0, sizeof(caps));
     caps.vendor_id = 0x1209;
     caps.product_id = 0xC7B1;
-    caps.version = 0x0100;
+    /* bcdDevice bumped with the keyboard collection: Windows caches parsed HID
+     * devnodes by VID/PID/bcdDevice, so a descriptor change must look like a
+     * new device revision or the old mouse-only parse can stick. */
+    caps.version = 0x0101;
     caps.bus = 3; /* present as USB: identity map, full-speed interrupt IN */
-    caps.input_report_len = HM_REPORT_LEN;
+    caps.input_report_len = HM_KB_REPORT_LEN; /* max of mouse(7)/keyboard(9) */
     caps.output_report_len = 0;
     caps.feature_report_len = 0;
     snprintf(caps.path, sizeof(caps.path), "virtual");
@@ -141,6 +174,7 @@ static void *hm_session_main(void *arg)
         pthread_mutex_lock(&g_hm.state_mutex);
         g_hm.connected = 1;
         g_hm.last_buttons = 0xFF; /* force first feed to send */
+        memset(g_hm.keys, 0, sizeof(g_hm.keys)); /* no stuck keys across links */
         pthread_mutex_unlock(&g_hm.state_mutex);
 
         for (;;) {
@@ -241,5 +275,44 @@ void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_
     if (ctm_transport_send_msg(&g_hm.xport, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK,
                                0, report, sizeof(report)) != 0) {
         hm_log("report send failed");
+    }
+}
+
+void ctm_hostmouse_feed_key(uint8_t hid_usage, bool down)
+{
+    if (!g_hm.connected || hid_usage == 0) return;
+
+    pthread_mutex_lock(&g_hm.state_mutex);
+    bool changed = false;
+    if (down) {
+        bool present = false;
+        int freeSlot = -1;
+        for (int i = 0; i < HM_KB_MAX_KEYS; ++i) {
+            if (g_hm.keys[i] == hid_usage) present = true;
+            else if (g_hm.keys[i] == 0 && freeSlot < 0) freeSlot = i;
+        }
+        if (!present && freeSlot >= 0) {
+            g_hm.keys[freeSlot] = hid_usage;
+            changed = true;
+        }
+    } else {
+        for (int i = 0; i < HM_KB_MAX_KEYS; ++i) {
+            if (g_hm.keys[i] == hid_usage) {
+                g_hm.keys[i] = 0;
+                changed = true;
+            }
+        }
+    }
+    uint8_t report[HM_KB_REPORT_LEN];
+    report[0] = 0x02; /* report ID */
+    report[1] = 0;    /* modifiers */
+    report[2] = 0;    /* reserved */
+    memcpy(report + 3, g_hm.keys, HM_KB_MAX_KEYS);
+    pthread_mutex_unlock(&g_hm.state_mutex);
+    if (!changed) return;
+
+    if (ctm_transport_send_msg(&g_hm.xport, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK,
+                               0, report, sizeof(report)) != 0) {
+        hm_log("key report send failed");
     }
 }

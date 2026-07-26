@@ -4,9 +4,11 @@
  * the host app's periodic device refresh, so pads connected mid-session get
  * plugged too. Each device key is attempted only once per process run — a
  * failed plug (or a manual Plug out) is never retried automatically; the
- * manual Plug in stays the fallback. Generic "hid" devices never auto-plug,
- * with one exception: the Magic Remote row auto-plugs as the TV-pointer
- * synthesizer (see item_is_tv_remote / ctm_tv_pointer_plug). */
+ * manual Plug in stays the fallback. Generic "hid" devices auto-plug only
+ * when they are a real mouse/keyboard (item_is_mouse_or_keyboard) or the
+ * Magic Remote row, which auto-plugs as the TV-pointer synthesizer
+ * (item_is_tv_remote / ctm_tv_pointer_plug); exotic vendor HID stays manual
+ * (unknown descriptors can code-10 on the host). */
 
 #include <stdio.h>
 #include <string.h>
@@ -26,7 +28,8 @@ void ctm_autoplug_tick(void)
         /* The once-per-key latch means a Back-hold pointer release is not
          * fought by auto-plug — the row's Plug in button re-bridges. */
         bool remote = item_is_tv_remote(item);
-        if (item->plugged || kind == NULL || (!remote && strcmp(kind, "hid") == 0)) {
+        if (item->plugged || kind == NULL ||
+            (!remote && strcmp(kind, "hid") == 0 && !item_is_mouse_or_keyboard(item))) {
             continue;
         }
         bool seen = false;

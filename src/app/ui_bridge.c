@@ -44,6 +44,10 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
     } else if (strcmp(kind, "ds4") == 0) {
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
+        /* ~75% of the 0x4F raw ceiling — the pad persists whatever volume was
+         * last written, so a sane audible default beats inheriting stale 0. */
+        settings.headset_volume_percent = 0x3b;
+        settings.speaker_volume_percent = 0x3b;
     }
     return settings;
 }
@@ -275,12 +279,24 @@ int session_index_for_key(const char *key)
     return -1;
 }
 
+/* TV-pointer session state lives OUTSIDE g_sessions (it is not a controller),
+ * so the port allocator must be told about its port explicitly — otherwise the
+ * first generic-HID plug reuses the pointer's port and its TCP session lands
+ * on the pointer's listener (agent bridge waits forever, device never
+ * enumerates on the host). */
+static bool g_tv_pointer_active;
+static char g_tv_pointer_busid[32];
+static int g_tv_pointer_port;
+
 int next_bridge_port(void)
 {
     int port = CTM_BRIDGE_BASE_PORT;
     for (;;) {
         bool used = false;
-        for (int i = 0; i < g_session_count; ++i) {
+        if (g_tv_pointer_active && port == g_tv_pointer_port) {
+            used = true;
+        }
+        for (int i = 0; !used && i < g_session_count; ++i) {
             if (g_sessions[i].port == port) {
                 used = true;
                 break;
@@ -358,9 +374,9 @@ void stop_session(const char *key)
  * BRIDGE_START/STOP around the ctm_hostmouse synthesizer. Kind MUST be "hid":
  * the agent whitelists BRIDGE_START kinds and only "hid" reaches the "auto"
  * dynamic-profile path that builds the device from the descriptor the
- * synthesizer sends in HELLO (unknown kinds are rejected, not auto-routed). */
-static bool g_tv_pointer_active;
-static char g_tv_pointer_busid[32];
+ * synthesizer sends in HELLO (unknown kinds are rejected, not auto-routed).
+ * State (g_tv_pointer_active/busid/port) is declared above next_bridge_port,
+ * which must skip the pointer's port. */
 
 bool ctm_tv_pointer_plug(void)
 {
@@ -384,6 +400,7 @@ bool ctm_tv_pointer_plug(void)
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
     }
+    g_tv_pointer_port = port;
     g_tv_pointer_active = true;
     log_append("TV pointer bridged to host (busid=%s port=%d)", g_tv_pointer_busid, port);
     return true;

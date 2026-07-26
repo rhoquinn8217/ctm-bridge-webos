@@ -239,6 +239,7 @@ bool ctm_tv_pointer_active(void);
 const char *bridge_kind_for_item(const logical_device_t *item);
 bool plug_in_item(logical_device_t *item);
 bool item_is_tv_remote(const logical_device_t *item);
+bool item_is_mouse_or_keyboard(const logical_device_t *item);
 
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */

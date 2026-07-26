@@ -719,3 +719,21 @@ void enumerate_devices(scan_result_t *result)
     }
 }
 
+/* A generic "hid" row that is a real mouse or keyboard (top-level HID usage
+ * page 1, usage 2/6 on any of its interfaces). These enumerate cleanly on the
+ * host via the dynamic identity profile, so they are safe to auto-plug —
+ * unlike exotic vendor collections (the MR24 raw-relay code-10 lesson). */
+bool item_is_mouse_or_keyboard(const logical_device_t *item)
+{
+    if (!item) return false;
+    for (int i = 0; i < item->device_count; ++i) {
+        int idx = item->device_indices[i];
+        if (idx < 0 || idx >= g_scan.count) continue;
+        const device_info_t *dev = &g_scan.devices[idx];
+        if (dev->usage_page == 1 && (dev->usage == 2 || dev->usage == 6)) {
+            return true;
+        }
+    }
+    return false;
+}
+

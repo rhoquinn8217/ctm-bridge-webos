@@ -505,6 +505,24 @@ static void feed_tv_pointer(int wheel)
                        g_pointer_buttons, wheel);
 }
 
+/* While the pointer is bridged the remote IS the PC's input device: D-pad/OK
+ * are sent to the host as keyboard taps (press+release per KEYDOWN, repeats
+ * included — LG SDL KEYUP delivery is unreliable, so held state could stick).
+ * Back/Exit never map here: they stay the TV-side escape hatch. Returns the
+ * HID Keyboard/Keypad usage, 0 = not a host key. */
+static uint8_t host_key_usage_for_sym(SDL_Keycode sym)
+{
+    switch (sym) {
+        case SDLK_UP: return 0x52;
+        case SDLK_DOWN: return 0x51;
+        case SDLK_LEFT: return 0x50;
+        case SDLK_RIGHT: return 0x4f;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER: return 0x28;
+        default: return 0;
+    }
+}
+
 /* webOS remote scancodes. LG's RUNTIME SDL numbering differs from the
  * community fork's headers: Back was MEASURED on this C2 as scancode 484
  * (sym 0), while the fork says 482 — match both. EXIT (a held Back) is
@@ -572,6 +590,14 @@ static void handle_sdl_event(const SDL_Event *event)
             feed_tv_pointer(event->wheel.y);
             break;
         case SDL_KEYDOWN:
+            if (ctm_tv_pointer_active()) {
+                uint8_t usage = host_key_usage_for_sym(event->key.keysym.sym);
+                if (usage != 0) {
+                    ctm_hostmouse_feed_key(usage, true);
+                    ctm_hostmouse_feed_key(usage, false);
+                    break;   /* host-bound: the local UI is pointer-driven meanwhile */
+                }
+            }
             switch (event->key.keysym.sym) {
                 case SDLK_UP: set_key(LV_KEY_UP); break;
                 case SDLK_DOWN: set_key(LV_KEY_DOWN); break;
