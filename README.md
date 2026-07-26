@@ -8,6 +8,14 @@
 > clone this repo **as a sibling directory** (the forks' CMake default), or
 > point `-DCTM_BRIDGE_DIR=<path>` at it.
 
+## Support
+
+One person, late nights: controllers were just the start — native AMF
+streaming, a custom low-latency codec and a bigger webOS app are in the pipe.
+If CTM Bridge saved you some hassle, coffee speeds them up.
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
+
 Native webOS POC app for the CTM TCP bridge.
 
 The package also installs `ctm_usbipd_webos`, a separate pure USB/IP exporter
@@ -105,11 +113,3 @@ From Windows, attach a listed TV bus id:
 & "C:\Program Files\USBip\usbip.exe" list -r <tv-ip>
 & "C:\Program Files\USBip\usbip.exe" attach -r <tv-ip> -b <busid>
 ```
-
-## Support
-
-One person, late nights: controllers were just the start — native AMF
-streaming, a custom low-latency codec and a bigger webOS app are in the pipe.
-If CTM Bridge saved you some hassle, coffee speeds them up.
-
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ciprianteodormisaila)
