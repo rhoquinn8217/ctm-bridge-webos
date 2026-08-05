@@ -192,8 +192,29 @@ void publish_bt_macs(void)
     pthread_mutex_unlock(&g_bt_mac_mutex);
 }
 
+/* Set the agent endpoint directly, skipping discovery. When: a host app that
+ * already knows where the agent is (e.g. moonlight, which is streaming from
+ * that same machine) can say so instead of relying on a broadcast probe, which
+ * cannot leave the local network. Passing NULL or "" clears it and restores
+ * discovery. */
+void ctm_bridge_set_agent_host(const char *host, int port)
+{
+    if (host && host[0]) {
+        snprintf(g_agent_host, sizeof(g_agent_host), "%s", host);
+    } else {
+        g_agent_host[0] = '\0';
+    }
+    g_agent_port = port > 0 ? port : CTM_AGENT_PORT;
+    g_agent_online = g_agent_host[0] != '\0';
+}
+
 bool discover_agent_once(void)
 {
+    /* Already told where the agent is: nothing to discover. */
+    if (g_agent_host[0]) {
+        g_agent_online = true;
+        return true;
+    }
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         return false;
