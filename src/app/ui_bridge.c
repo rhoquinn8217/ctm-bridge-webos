@@ -41,6 +41,13 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x41;
+    } else if (strcmp(kind, "ds5_usb") == 0) {
+        /* Wired: the host owns the output reports, so the audio fields are
+         * never patched here. Volume defaults match the BT arm so behaviour
+         * is unchanged for a listener that does not distinguish the two. */
+        settings.kind = TV_BRIDGE_KIND_DS5;
+        settings.headset_volume_percent = 0x4d;
+        settings.speaker_volume_percent = 0x41;
     } else if (strcmp(kind, "ds4") == 0) {
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
@@ -438,7 +445,8 @@ void release_local_sessions_on_exit(void)
 const char *bridge_kind_for_item(const logical_device_t *item)
 {
     if (!item) return "hid";
-    if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0ce6") == 0) return "ds5";
+    if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0ce6") == 0)
+        return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5_usb" : "ds5";
     if (strcmp(item->vid, "054c") == 0 &&
         (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0)) return "ds4";
     if (strcmp(item->vid, "045e") == 0 &&

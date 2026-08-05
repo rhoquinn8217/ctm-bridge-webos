@@ -9,13 +9,13 @@
 #include <math.h>
 #include <string.h>
 
-/* matches: claim the DualSense over BT. When: factory classification. */
+/* matches: claim the DualSense over BT or USB. When: factory classification. */
 static bool ds5_matches(const ctm_controller_dev_t *dev)
 {
     return dev &&
            strcmp(dev->vid, "054c") == 0 &&
            strcmp(dev->pid, "0ce6") == 0 &&
-           strcmp(dev->bus, "BT") == 0;
+           (strcmp(dev->bus, "BT") == 0 || strcmp(dev->bus, "USB") == 0);
 }
 
 /* Map an audio mode to the DS5 BT 0x36 sub-block header byte. */
