@@ -226,17 +226,40 @@ static void gesture_requested(ctm_controller_t *c)
     pthread_mutex_unlock(&g_gesture_mutex);
 }
 
+/* How often the worker re-checks that the agent is answering. Short enough
+ * that the header is not misleading, long enough to be free. */
+#define AGENT_PROBE_INTERVAL_MS 3000
+
 static void *gesture_worker(void *arg)
 {
     (void)arg;
     while (g_running) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += AGENT_PROBE_INTERVAL_MS / 1000;
+
         pthread_mutex_lock(&g_gesture_mutex);
         while (!g_gesture_pending && g_running) {
-            pthread_cond_wait(&g_gesture_cond, &g_gesture_mutex);
+            if (pthread_cond_timedwait(&g_gesture_cond, &g_gesture_mutex,
+                                       &deadline) == ETIMEDOUT) {
+                break;
+            }
         }
+        bool gesture = g_gesture_pending;
         g_gesture_pending = false;
         pthread_mutex_unlock(&g_gesture_mutex);
         if (!g_running) break;
+
+        /* Woke on the timer: refresh the agent's reachability off the
+         * interface thread, so asking never costs the UI anything. */
+        if (!gesture) {
+            if (g_agent_host[0]) {
+                char probe[256];
+                g_agent_online =
+                    send_agent_command("STATUS", probe, sizeof(probe)) == 0;
+            }
+            continue;
+        }
 
         /* Which controller asked? Copy the keys out first: stop_session edits
          * the session table as it goes. */
@@ -287,16 +310,16 @@ void ctm_bridge_set_agent_host(const char *host, int port)
 bool discover_agent_once(void)
 {
     /* Already told where the agent is: no need to search for it -- but knowing
-     * the address is not evidence that anything is listening there. Ask, using
-     * the ordinary command path so the reply is bounded by its timeout. A host
-     * that has gone away answers nothing, and the caller can refuse to plug
-     * rather than stalling on a connection that will never be accepted.
+     * the address is not evidence that anything is listening there. The worker
+     * asks every few seconds on its own thread and leaves the answer here, so
+     * this returns at once. Do NOT ask inline: this is called from the
+     * interface -- on stream start, on opening the overlay, on every header
+     * refresh -- and a network call here stalls the UI for as long as the host
+     * takes to not answer.
      *
-     * The address is deliberately kept on failure: the agent may simply be
-     * restarting, and the next attempt should try the same place again. */
+     * The address is deliberately kept when the agent goes quiet: it may simply
+     * be restarting, and the next probe should try the same place again. */
     if (g_agent_host[0]) {
-        char probe[256];
-        g_agent_online = send_agent_command("STATUS", probe, sizeof(probe)) == 0;
         return g_agent_online;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
