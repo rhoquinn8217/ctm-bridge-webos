@@ -202,8 +202,13 @@ static bool ds5e_matches(const ctm_controller_dev_t *dev)
  *
  * The gesture is deliberately NOT swallowed -- the report is relayed unchanged.
  * Two fingers plus a press is not a combination games ask for, so the safer
- * choice is to stay a pure relay. */
-#define DS5_CHORD_HOLD_MS 2000
+ * choice is to stay a pure relay.
+ *
+ * Five seconds is deliberate. Unplugging is the destructive direction and the
+ * fallback is trivial -- pull the cable -- so a long, obviously intentional
+ * hold costs nothing and cannot happen by accident mid-game. It also matches
+ * what a hold means elsewhere: powering a phone down, a PC's power button. */
+#define DS5_CHORD_HOLD_MS 5000
 
 static bool ds5_chord_held(const uint8_t *data, size_t len)
 {
