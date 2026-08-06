@@ -225,6 +225,7 @@ void *stop_sniff_worker(void *arg);
 void publish_bt_macs(void);
 void ctm_bridge_set_agent_host(const char *host, int port);
 void ctm_bridge_gesture_init(void);
+bool plug_in_by_node(const char *node);
 bool discover_agent_once(void);
 int send_agent_command(const char *command, char *response, size_t response_len);
 int session_index_for_key(const char *key);

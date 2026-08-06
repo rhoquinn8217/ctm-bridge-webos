@@ -717,6 +717,46 @@ bool item_is_tv_remote(const logical_device_t *item)
 
 /* Plug the whole device using its first hidraw node (the default). When: the
  * logical row's Plug button. */
+/* Plug whichever device owns this /dev/hidrawN. When: a local gesture named a
+ * device by its node -- the only identifier that distinguishes two otherwise
+ * identical controllers. Enumerates first, so a device connected since the last
+ * scan is still found. */
+bool plug_in_by_node(const char *node)
+{
+    if (!node || !node[0]) {
+        return false;
+    }
+    enumerate_devices(&g_scan);
+    build_logical_devices(&g_scan, &g_devices);
+
+    for (int i = 0; i < g_devices.count; ++i) {
+        logical_device_t *item = &g_devices.items[i];
+        for (int k = 0; k < item->device_count; ++k) {
+            int j = item->device_indices[k];
+            if (j < 0 || j >= g_scan.count) {
+                continue;
+            }
+            if (strcmp(g_scan.devices[j].node, node) != 0) {
+                continue;
+            }
+            if (plug_key_is_set(item->key)) {
+                log_append("gesture: %s is already plugged", item->name);
+                return false;
+            }
+            if (plug_in_item(item)) {
+                item->plugged = true;
+                set_plug_key(item->key, true);
+                log_append("gesture: plugged %s (%s)", item->name, node);
+                return true;
+            }
+            log_append("gesture: could not plug %s (%s)", item->name, node);
+            return false;
+        }
+    }
+    log_append("gesture: no device owns %s", node);
+    return false;
+}
+
 bool plug_in_item(logical_device_t *item)
 {
     if (!item) {
