@@ -202,6 +202,72 @@ void publish_bt_macs(void)
     pthread_mutex_unlock(&g_bt_mac_mutex);
 }
 
+/* ---- local unplug gesture -------------------------------------------------
+ * A controller type can ask to be unplugged from inside its own input thread
+ * (see ctm_controller_request_unplug). It must not do the unplug itself: that
+ * joins the very thread making the request. So the request only wakes this
+ * worker, which does the work on a thread of its own.
+ *
+ * The worker sleeps on a condition variable rather than polling -- it costs
+ * nothing until a gesture actually happens. */
+static pthread_mutex_t g_gesture_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_gesture_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t g_gesture_thread;
+static bool g_gesture_thread_started;
+static bool g_gesture_pending;
+
+/* Invoked on the requesting controller's input thread: signal only. */
+static void gesture_requested(ctm_controller_t *c)
+{
+    (void)c;
+    pthread_mutex_lock(&g_gesture_mutex);
+    g_gesture_pending = true;
+    pthread_cond_signal(&g_gesture_cond);
+    pthread_mutex_unlock(&g_gesture_mutex);
+}
+
+static void *gesture_worker(void *arg)
+{
+    (void)arg;
+    while (g_running) {
+        pthread_mutex_lock(&g_gesture_mutex);
+        while (!g_gesture_pending && g_running) {
+            pthread_cond_wait(&g_gesture_cond, &g_gesture_mutex);
+        }
+        g_gesture_pending = false;
+        pthread_mutex_unlock(&g_gesture_mutex);
+        if (!g_running) break;
+
+        /* Which controller asked? Copy the keys out first: stop_session edits
+         * the session table as it goes. */
+        char keys[MAX_SESSIONS][96];
+        int n = 0;
+        for (int i = 0; i < g_session_count && n < MAX_SESSIONS; ++i) {
+            if (g_sessions[i].controller &&
+                ctm_controller_unplug_requested(g_sessions[i].controller)) {
+                snprintf(keys[n], sizeof(keys[0]), "%s", g_sessions[i].key);
+                ++n;
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            log_append("gesture: unplugging %s", keys[i]);
+            stop_session(keys[i]);
+            set_plug_key(keys[i], false);
+        }
+    }
+    return NULL;
+}
+
+/* Start the gesture worker once. When: first plug of a session. */
+void ctm_bridge_gesture_init(void)
+{
+    if (g_gesture_thread_started) return;
+    ctm_controller_set_unplug_cb(gesture_requested);
+    if (pthread_create(&g_gesture_thread, NULL, gesture_worker, NULL) == 0) {
+        g_gesture_thread_started = true;
+    }
+}
+
 /* Set the agent endpoint directly, skipping discovery. When: a host app that
  * already knows where the agent is (e.g. moonlight, which is streaming from
  * that same machine) can say so instead of relying on a broadcast probe, which
@@ -625,6 +691,7 @@ bool plug_in_item(logical_device_t *item)
     if (!item) {
         return false;
     }
+    ctm_bridge_gesture_init();
     int scan_index = first_scan_index_for_item(item);
     if (scan_index < 0) {
         log_append("no hidraw node for %s", item->name);

@@ -58,6 +58,12 @@ typedef struct {
      * handshake, puck lizard-mode exit). NULL => none. */
     int (*on_plug_init)(ctm_controller_t *c, ctm_transport_t *t);
 
+    /* Peek at each input report as it is relayed, before it goes to the host.
+     * Read-only: the report is forwarded unchanged either way. NULL => no peek.
+     * When: the controller's own input thread, once per report. Must not block
+     * -- it runs in the relay path. */
+    void (*on_input_report)(ctm_controller_t *c, const uint8_t *data, size_t len);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -98,6 +104,27 @@ void ctm_controller_set_log_sink(void (*sink)(const char *line));
  * bytes. When: a DS patch_output hook after rewriting a report. Defined in
  * controller_common.c so DS4 + DS5 share it. */
 void ctm_bt_sign_output(uint8_t *data, size_t len);
+
+/* Ask for this controller to be unplugged. When: a type's on_input_report
+ * recognises a local gesture. Sets a flag and notifies the app; it does NOT
+ * tear down, because the caller is the input thread and unplugging joins that
+ * same thread. */
+void ctm_controller_request_unplug(ctm_controller_t *c);
+bool ctm_controller_unplug_requested(const ctm_controller_t *c);
+
+/* Told when some controller has requested an unplug, so the app can do it on a
+ * thread of its own. Invoked on the requesting controller's input thread, so
+ * the handler must only signal, never tear down. */
+typedef void (*ctm_controller_unplug_cb)(ctm_controller_t *c);
+void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
+
+/* Scratch value owned by the controller's TYPE, one per controller. When: a
+ * type needs to remember something between reports -- gesture timing, say.
+ * Deliberately per-controller: a file-level variable here would be shared by
+ * every controller's thread, which is the fault that took four sessions to
+ * find in the capture path. */
+uint64_t ctm_controller_type_state(const ctm_controller_t *c);
+void ctm_controller_set_type_state(ctm_controller_t *c, uint64_t v);
 
 /* Per-type ops tables, defined in controller_<kind>.c. */
 extern const ctm_controller_ops_t ctm_controller_ds5_ops;

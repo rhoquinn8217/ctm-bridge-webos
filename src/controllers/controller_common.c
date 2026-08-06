@@ -88,6 +88,12 @@ struct ctm_controller {
     int input_thread_started;
     volatile int stop;
 
+    /* Set by a type's on_input_report to ask the app to unplug this
+     * controller. Read and cleared by the app, never by the input thread. */
+    volatile int unplug_requested;
+    /* One scratch value per controller, owned by its type. */
+    uint64_t type_state;
+
     pthread_mutex_t hid_mutex;
     pthread_mutex_t settings_mutex;
     tv_bridge_worker_settings_t settings;
@@ -137,6 +143,36 @@ static uint64_t now_us(void)
 /* Optional UI log sink, set by the app, so controller events also appear in the
  * on-screen console. NULL => file + stderr only. */
 static void (*g_log_sink)(const char *line);
+
+/* Told when a controller asks to be unplugged; the app does the work. */
+static ctm_controller_unplug_cb g_unplug_cb;
+
+void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb)
+{
+    g_unplug_cb = cb;
+}
+
+void ctm_controller_request_unplug(ctm_controller_t *c)
+{
+    if (!c || c->unplug_requested) return;
+    c->unplug_requested = 1;
+    if (g_unplug_cb) g_unplug_cb(c);
+}
+
+bool ctm_controller_unplug_requested(const ctm_controller_t *c)
+{
+    return c && c->unplug_requested != 0;
+}
+
+uint64_t ctm_controller_type_state(const ctm_controller_t *c)
+{
+    return c ? c->type_state : 0;
+}
+
+void ctm_controller_set_type_state(ctm_controller_t *c, uint64_t v)
+{
+    if (c) c->type_state = v;
+}
 
 void ctm_controller_set_log_sink(void (*sink)(const char *line))
 {
@@ -636,6 +672,11 @@ static void *input_thread_main(void *arg)
                     break;
                 }
                 c->st_reports_in++;
+                /* Relay first, look second: the host sees the report whatever
+                 * the type makes of it. */
+                if (c->ops && c->ops->on_input_report) {
+                    c->ops->on_input_report(c, buf, (size_t)n);
+                }
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;

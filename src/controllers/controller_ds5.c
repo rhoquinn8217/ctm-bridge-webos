@@ -8,6 +8,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 /* matches: claim the DualSense over BT or USB. When: factory classification. */
 static bool ds5_matches(const ctm_controller_dev_t *dev)
@@ -188,6 +189,71 @@ static bool ds5e_matches(const ctm_controller_dev_t *dev)
            (strcmp(dev->bus, "BT") == 0 || strcmp(dev->bus, "USB") == 0);
 }
 
+/* Local gesture: hold TWO fingers on the touchpad AND press it down, for
+ * CHORD_HOLD_MS, to unplug this controller without the overlay.
+ *
+ * Byte offsets measured from real hardware 2026-08-05 (DualSense and Edge, both
+ * identical), wired input report 0x01:
+ *   byte 10  bit 1     touchpad pressed
+ *   byte 33  bit 7 clear   first touch point active
+ *   byte 37  bit 7 clear   second touch point active
+ * An inactive touch point reads 0x80; a finger clears the top bit and the low
+ * bits become a touch counter, so only the top bit is meaningful here.
+ *
+ * The gesture is deliberately NOT swallowed -- the report is relayed unchanged.
+ * Two fingers plus a press is not a combination games ask for, so the safer
+ * choice is to stay a pure relay. */
+#define DS5_CHORD_HOLD_MS 2000
+
+static bool ds5_chord_held(const uint8_t *data, size_t len)
+{
+    if (!data || len < 41 || data[0] != 0x01) {
+        return false;
+    }
+    bool pressed = (data[10] & 0x02) != 0;
+    bool finger1 = (data[33] & 0x80) == 0;
+    bool finger2 = (data[37] & 0x80) == 0;
+    return pressed && finger1 && finger2;
+}
+
+static uint64_t ds5_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+/* on_input_report: watch for the unplug gesture. When: this controller's input
+ * thread, once per relayed report. The timestamp lives in the controller's own
+ * type state, never in a file-level variable -- two controllers each have their
+ * own thread calling this. */
+static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    if (!c) return;
+
+    if (!ds5_chord_held(data, len)) {
+        /* Released: re-arm. */
+        ctm_controller_set_type_state(c, 0);
+        return;
+    }
+
+    uint64_t since = ctm_controller_type_state(c);
+    uint64_t now = ds5_now_ms();
+
+    if (since == 0) {
+        ctm_controller_set_type_state(c, now);
+        return;
+    }
+    /* Already fired for this hold: wait for the fingers to lift. */
+    if (since == UINT64_MAX) {
+        return;
+    }
+    if (now - since >= DS5_CHORD_HOLD_MS) {
+        ctm_controller_set_type_state(c, UINT64_MAX);
+        ctm_controller_request_unplug(c);
+    }
+}
+
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .kind = "ds5",
     .needs_host_config = true,
@@ -196,6 +262,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .matches = ds5_matches,
     .select_node = NULL,
     .on_plug_init = NULL,
+    .on_input_report = ds5_on_input_report,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
 };
@@ -211,6 +278,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .matches = ds5e_matches,
     .select_node = NULL,
     .on_plug_init = NULL,
+    .on_input_report = ds5_on_input_report,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
 };
