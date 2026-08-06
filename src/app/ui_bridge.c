@@ -286,10 +286,18 @@ void ctm_bridge_set_agent_host(const char *host, int port)
 
 bool discover_agent_once(void)
 {
-    /* Already told where the agent is: nothing to discover. */
+    /* Already told where the agent is: no need to search for it -- but knowing
+     * the address is not evidence that anything is listening there. Ask, using
+     * the ordinary command path so the reply is bounded by its timeout. A host
+     * that has gone away answers nothing, and the caller can refuse to plug
+     * rather than stalling on a connection that will never be accepted.
+     *
+     * The address is deliberately kept on failure: the agent may simply be
+     * restarting, and the next attempt should try the same place again. */
     if (g_agent_host[0]) {
-        g_agent_online = true;
-        return true;
+        char probe[256];
+        g_agent_online = send_agent_command("STATUS", probe, sizeof(probe)) == 0;
+        return g_agent_online;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
