@@ -105,6 +105,17 @@ void ctm_controller_set_log_sink(void (*sink)(const char *line));
  * controller_common.c so DS4 + DS5 share it. */
 void ctm_bt_sign_output(uint8_t *data, size_t len);
 
+/* Send a report to the device as-is, bypassing the type's patch hook. When: a
+ * type needs to say something to the controller itself rather than pass a host
+ * report along. */
+int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t len);
+
+/* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
+ * to the app's console sink if one is set. When: a type wants to record
+ * something about its device. Cheap, but it opens a file -- do not call it per
+ * report in the relay path without throttling. */
+void ctl_log(ctm_controller_t *c, const char *fmt, ...);
+
 /* Ask for this controller to be unplugged. When: a type's on_input_report
  * recognises a local gesture. Sets a flag and notifies the app; it does NOT
  * tear down, because the caller is the input thread and unplugging joins that
@@ -123,8 +134,9 @@ void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
  * Deliberately per-controller: a file-level variable here would be shared by
  * every controller's thread, which is the fault that took four sessions to
  * find in the capture path. */
-uint64_t ctm_controller_type_state(const ctm_controller_t *c);
-void ctm_controller_set_type_state(ctm_controller_t *c, uint64_t v);
+#define CTM_TYPE_STATE_SLOTS 3
+uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot);
+void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v);
 
 /* Per-type ops tables, defined in controller_<kind>.c. */
 extern const ctm_controller_ops_t ctm_controller_ds5_ops;

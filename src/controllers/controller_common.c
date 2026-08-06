@@ -91,8 +91,8 @@ struct ctm_controller {
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
     volatile int unplug_requested;
-    /* One scratch value per controller, owned by its type. */
-    uint64_t type_state;
+    /* Scratch values per controller, owned by its type. */
+    uint64_t type_state[CTM_TYPE_STATE_SLOTS];
 
     pthread_mutex_t hid_mutex;
     pthread_mutex_t settings_mutex;
@@ -164,14 +164,16 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c)
     return c && c->unplug_requested != 0;
 }
 
-uint64_t ctm_controller_type_state(const ctm_controller_t *c)
+uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot)
 {
-    return c ? c->type_state : 0;
+    if (!c || slot < 0 || slot >= CTM_TYPE_STATE_SLOTS) return 0;
+    return c->type_state[slot];
 }
 
-void ctm_controller_set_type_state(ctm_controller_t *c, uint64_t v)
+void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v)
 {
-    if (c) c->type_state = v;
+    if (!c || slot < 0 || slot >= CTM_TYPE_STATE_SLOTS) return;
+    c->type_state[slot] = v;
 }
 
 void ctm_controller_set_log_sink(void (*sink)(const char *line))
@@ -182,7 +184,7 @@ void ctm_controller_set_log_sink(void (*sink)(const char *line))
 /* Per-controller log: writes to its MAC-named file (if open), stderr, and the
  * UI sink (if set), each line prefixed with the controller kind. When:
  * throughout a controller's lifetime (any of its threads). */
-static void ctl_log(ctm_controller_t *c, const char *fmt, ...)
+void ctl_log(ctm_controller_t *c, const char *fmt, ...)
 {
     char body[512];
     va_list ap;
@@ -440,6 +442,19 @@ static int apply_output_settings(ctm_controller_t *c, uint8_t *data, size_t *len
 {
     if (!c->ops->patch_output) return 0;
     return c->ops->patch_output(c, data, len_io);
+}
+
+/* Write one report to the device WITHOUT the patch hook, mutex-guarded. When: a
+ * type sends a report of its own rather than forwarding the host's -- the
+ * confirmation light, say. Skipping the hook is deliberate: the hook exists to
+ * rewrite the HOST's reports, and running it on ours would recurse. */
+int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    if (!c || c->hid_fd < 0 || !data || len == 0) return -1;
+    pthread_mutex_lock(&c->hid_mutex);
+    ssize_t n = write(c->hid_fd, data, len);
+    pthread_mutex_unlock(&c->hid_mutex);
+    return n == (ssize_t)len ? 0 : -1;
 }
 
 /* Patch (via the ops hook) then write one report to the device, mutex-guarded.
