@@ -101,6 +101,7 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
 
 /* Per-type ops tables, defined in controller_<kind>.c. */
 extern const ctm_controller_ops_t ctm_controller_ds5_ops;
+extern const ctm_controller_ops_t ctm_controller_ds5e_ops;
 extern const ctm_controller_ops_t ctm_controller_ds4_ops;
 extern const ctm_controller_ops_t ctm_controller_xbox_ops;
 extern const ctm_controller_ops_t ctm_controller_steam_puck_ops;

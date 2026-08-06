@@ -1100,6 +1100,7 @@ void ctm_controller_destroy(ctm_controller_t *c)
 static const ctm_controller_ops_t *const k_registry[] = {
     &ctm_controller_steam_puck_ops,
     &ctm_controller_ds5_ops,
+    &ctm_controller_ds5e_ops,
     &ctm_controller_ds4_ops,
     &ctm_controller_xbox_ops,
     &ctm_controller_generic_ops,

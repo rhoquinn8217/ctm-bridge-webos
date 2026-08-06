@@ -48,6 +48,16 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x41;
+    } else if (strcmp(kind, "ds5e") == 0) {
+        /* Edge over BT: a DualSense as far as reports go, so the same values. */
+        settings.kind = TV_BRIDGE_KIND_DS5;
+        settings.headset_volume_percent = 0x4d;
+        settings.speaker_volume_percent = 0x41;
+    } else if (strcmp(kind, "ds5e_usb") == 0) {
+        /* Edge wired: as ds5_usb -- the host owns the output reports. */
+        settings.kind = TV_BRIDGE_KIND_DS5;
+        settings.headset_volume_percent = 0x4d;
+        settings.speaker_volume_percent = 0x41;
     } else if (strcmp(kind, "ds4") == 0) {
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
@@ -468,6 +478,8 @@ const char *bridge_kind_for_item(const logical_device_t *item)
     if (!item) return "hid";
     if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0ce6") == 0)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5_usb" : "ds5";
+    if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0df2") == 0)
+        return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5e_usb" : "ds5e";
     if (strcmp(item->vid, "054c") == 0 &&
         (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0)) return "ds4";
     if (strcmp(item->vid, "045e") == 0 &&

@@ -175,6 +175,19 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
     return 0;
 }
 
+/* matches: claim the DualSense Edge over BT or USB. A separate device from the
+ * base DualSense so it can be presented to the host as itself, but it shares
+ * every behaviour below -- its reports are shaped identically, so a second copy
+ * of patch_output would only drift out of step with this one. When: factory
+ * classification. */
+static bool ds5e_matches(const ctm_controller_dev_t *dev)
+{
+    return dev &&
+           strcmp(dev->vid, "054c") == 0 &&
+           strcmp(dev->pid, "0df2") == 0 &&
+           (strcmp(dev->bus, "BT") == 0 || strcmp(dev->bus, "USB") == 0);
+}
+
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .kind = "ds5",
     .needs_host_config = true,
@@ -185,4 +198,19 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .on_plug_init = NULL,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
+};
+
+/* DualSense Edge. Same behaviour as the base DualSense -- deliberately sharing
+ * its hooks rather than duplicating them -- but its own entry in the factory so
+ * it is identified as itself and can diverge later without untangling. */
+const ctm_controller_ops_t ctm_controller_ds5e_ops = {
+    .kind = "ds5e",
+    .needs_host_config = true,
+    .grab_evdev = true,
+    .request_bt_mode = true,
+    .matches = ds5e_matches,
+    .select_node = NULL,
+    .on_plug_init = NULL,
+    .patch_output = ds5_patch_output,
+    .set_settings = NULL,
 };
