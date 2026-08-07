@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sound/asound.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -47,6 +48,42 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #ifndef EVIOCGRAB
 #define EVIOCGRAB _IOW('E', 0x90, int)
 #endif
+
+/* ------------------------------------------------------------------
+ * DS5 output report layout
+ *
+ * The controller's output report is a fixed 48-byte block: a report ID,
+ * two "which settings am I claiming?" flag bytes, then the settings
+ * themselves at fixed positions. A setting is only honoured if its
+ * claim bit is set -- but note that a CLAIMED setting left at zero is
+ * applied AS zero, not left alone. Claiming something you don't intend
+ * to set is therefore an active change, not a no-op. This is why the
+ * init deliberately claims as little as possible.
+ * ------------------------------------------------------------------ */
+#define DS5_OUT_REPORT_ID              0x02
+#define DS5_OUT_REPORT_LEN             48    /* matches every host report on the wire */
+
+/* Positions within the report */
+#define DS5_IDX_VALID_FLAG0            1
+#define DS5_IDX_VALID_FLAG1            2
+#define DS5_IDX_SPEAKER_VOLUME         6
+#define DS5_IDX_AUDIO_CONTROL          8
+
+/* valid_flag0 -- claim bits for the settings we care about */
+#define DS5_F0_ALLOW_SPEAKER_VOLUME    0x20
+#define DS5_F0_ALLOW_AUDIO_CONTROL     0x80
+
+/* audio_control (byte 8) fields */
+#define DS5_AUDIO_OUT_PATH_SPEAKER     0x30  /* route playback to the controller speaker */
+#define DS5_AUDIO_ECHO_NOISE_CANCEL    0x0c  /* echo + noise cancellation ON.
+                                              * The controller suppresses its own speaker
+                                              * when this is off -- feedback protection,
+                                              * since the mic sits centimetres away. This
+                                              * is THE attenuation lever: measured on C1,
+                                              * attenuated -> 80 dB -> 94 dB with this bit
+                                              * alone, volume held constant. */
+#define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
+                                              * dualsensectl all use */
 
 #define MAX_REPORT 4096
 #define MAX_REPORT_DESCRIPTOR 4096
@@ -80,6 +117,7 @@ struct ctm_controller {
     ctm_transport_t xport;
     ctm_enet_client_t *enet;        /* process-owned client; borrowed by xport */
     int hid_fd;
+    int alsa_fd;   /* wired DS5/Edge: the controller's own playback device */
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -130,6 +168,101 @@ static void enet_global_init_once(void)
 {
     if (enet_client_global_init() == 0) g_enet_ready = 1;
     else fprintf(stderr, "controller: enet_initialize failed; ENet disabled, TCP only\n");
+}
+
+/* Open the DualSense's own USB audio playback device for wired ISO passthrough.
+ * Scans ALSA cards for one named "DualSense", opens pcmC{n}D0p, configures
+ * S16_LE 4ch 48kHz. Returns fd on success, -1 on failure.
+ *
+ * Ported from ds5-aurora, which is the reference implementation and was proven
+ * on hardware. Two deliberate differences, both noted rather than silent:
+ *
+ *   - The root-broker fallback is NOT carried across. The scaffold falls back
+ *     to a helper when the open is refused; the app is in group `audio` (29)
+ *     and opens the device directly on every TV tested. Add it back if a set
+ *     refuses -- do not add it speculatively.
+ *   - The channel layout is not ours to choose: 0/1 are the speaker, 2/3 the
+ *     haptics, confirmed via ALSA's own channel map. THIS IS WHY SPEAKER AND
+ *     RUMBLE ARE ONE FEATURE -- writing this device drives both.
+ *
+ * The card index is scanned every time and never cached: it drifts per plug-in,
+ * and a cached index reopens the wrong node after a re-enumeration.
+ *
+ * WITH TWO CONTROLLERS THIS CAN OPEN THE WRONG ONE. Both match the name
+ * "DualSense" and the first is taken. The capture path carries the same flaw
+ * and a measurement proving it -- on 2026-08-04 two capture threads reported
+ * identical levels while one controller was muted AT THE HARDWARE, which a
+ * muted microphone cannot produce.
+ *
+ * The way out is known and is NOT a guess: /proc/asound/cardN/usbbus names the
+ * USB bus and device the card belongs to. Read with root on 2026-08-04 it gave
+ * 001/004 and 001/003 for the two controllers -- genuinely different devices,
+ * which is what eliminated every external explanation and forced the code
+ * re-read that found the real bug. The bridge already knows each controller's
+ * USB path, so this is joining two things we both have rather than parsing
+ * something unknown.
+ *
+ * Not done here, deliberately: it is untested with two controllers on this
+ * base, and the audio path is worth getting working for one before it is made
+ * clever for two. */
+static int open_ds5_alsa_playback(void)
+{
+    char path[128];
+    int fd = -1;
+    for (int card = 0; card < 8; card++) {
+        snprintf(path, sizeof(path), "/proc/asound/card%d/stream0", card);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char line[256];
+        int found = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strstr(line, "DualSense")) { found = 1; break; }
+        }
+        fclose(f);
+        if (!found) continue;
+        snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
+        fd = open(path, O_WRONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        struct snd_pcm_hw_params hw;
+        memset(&hw, 0, sizeof(hw));
+        /* Init all intervals to full range ("any"), then constrain */
+        for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+            hw.intervals[i].min = 0;
+            hw.intervals[i].max = 0xFFFFFFFFU;
+        }
+        /* Init all masks to full range */
+        for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+            memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+        /* ACCESS: RW_INTERLEAVED(3) only */
+        memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+        hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
+        /* FORMAT: S16_LE(2) only */
+        memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+        hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
+        /* CHANNELS: exactly 4 */
+        hw.intervals[2].min = hw.intervals[2].max = 4;
+        hw.intervals[2].integer = 1;
+        /* RATE: exactly 48000 */
+        hw.intervals[3].min = hw.intervals[3].max = 48000;
+        hw.intervals[3].integer = 1;
+        /* PERIOD_SIZE: let the kernel choose what suits the hardware.
+         * A hardcoded 48-frame period once mismatched the host's 480-frame
+         * chunks and contributed to underruns. */
+        /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
+         * host's chunks. */
+        hw.intervals[9].min = 960;
+        hw.intervals[9].max = 0xFFFFFFFFU;
+        hw.intervals[9].integer = 0;
+        int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
+        if (hw_rc < 0 || prep_rc < 0) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        return fd;
+    }
+    return -1;
 }
 
 /* Monotonic clock in microseconds. When: pacing schedules + handshake timeout. */
@@ -1017,6 +1150,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->vid_num = (unsigned int)strtoul(dev->vid, NULL, 16);
     c->pid_num = (unsigned int)strtoul(dev->pid, NULL, 16);
     c->hid_fd = -1;
+    c->alsa_fd = -1;
     c->wake_pipe[0] = -1;
     c->wake_pipe[1] = -1;
     for (int i = 0; i < MAX_EVDEV_GRABS; ++i) c->evdev_grabs[i].fd = -1;
@@ -1089,6 +1223,57 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
 /* Stop bridging: signal stop, wake + join the session thread, then close the
  * HID fd, transport, evdev grabs, and log. When: the user clicks Plug out, or
  * the device disconnects. */
+void ctm_controller_open_alsa_playback(ctm_controller_t *c)
+{
+    if (!c || c->alsa_fd >= 0) return;
+    c->alsa_fd = open_ds5_alsa_playback();
+    if (c->alsa_fd < 0) {
+        ctl_log(c, "alsa: playback open failed (wired audio unavailable)");
+        return;
+    }
+    ctl_log(c, "alsa: opened playback for wired audio (fd=%d)", c->alsa_fd);
+
+    /* ONE merged init report, written atomically.
+     *
+     * This was two reports 3ms apart. The first set volume while claiming
+     * audio-control and supplying zero for it -- routing playback to the
+     * headphone jack with echo cancel OFF -- and the second corrected the
+     * routing. On TVs where writes fail, the first landing without the second
+     * strands the controller routed to a headphone jack that isn't there:
+     * silence, worse than the attenuation this init exists to prevent. One
+     * report removes the window entirely.
+     *
+     * The host's own launch sequence has the same two-step flaw (measured on
+     * C3: headphone then speaker 8ms apart, audible as a brief blip). We
+     * deliberately do NOT copy its shape -- correct behaviour is the target,
+     * not parity with the game.
+     *
+     * Claims ONLY speaker volume and audio control. It previously claimed
+     * seven further sections while supplying zero for all of them, actively
+     * zeroing settings it never intended to touch. Dropping those leaves the
+     * controller's own microphone mute alone -- respecting the physical mute
+     * button -- and removes an LED-blanking side effect at every open.
+     *
+     * Length comes from the array, not a hand-typed run of zeros: the old
+     * literals were 49 bytes where every host report on the wire is 48. */
+    uint8_t spk_init[DS5_OUT_REPORT_LEN] = {0};
+    spk_init[0]                      = DS5_OUT_REPORT_ID;
+    spk_init[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
+                                       DS5_F0_ALLOW_AUDIO_CONTROL;
+    spk_init[DS5_IDX_VALID_FLAG1]    = 0x00;  /* claim nothing else */
+    spk_init[DS5_IDX_SPEAKER_VOLUME] = DS5_SPEAKER_VOLUME_MAX;
+    spk_init[DS5_IDX_AUDIO_CONTROL]  = DS5_AUDIO_OUT_PATH_SPEAKER |
+                                       DS5_AUDIO_ECHO_NOISE_CANCEL;
+    int rc = ctm_controller_write_raw(c, spk_init, sizeof(spk_init));
+    ctl_log(c, "alsa: speaker init (merged, %zu bytes) rc=%d", sizeof(spk_init), rc);
+
+    /* ds5-aurora fires an open-tone burst here. NOT PORTED: it is a recorded
+     * DECISIVE NEGATIVE -- tested on both fault classes with clean deliveries,
+     * and the audio still attenuated, because audio content was never the
+     * lever and control bytes were. See the disproven list in
+     * controller-attenuation-investigation.md before reaching for it again. */
+}
+
 void ctm_controller_plug_out(ctm_controller_t *c)
 {
     if (!c) return;
@@ -1102,6 +1287,7 @@ void ctm_controller_plug_out(ctm_controller_t *c)
     ctm_transport_disconnect(&c->xport);
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
+    if (c->alsa_fd >= 0) { close(c->alsa_fd); c->alsa_fd = -1; }
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }
     if (c->wake_pipe[1] >= 0) { close(c->wake_pipe[1]); c->wake_pipe[1] = -1; }
     if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }

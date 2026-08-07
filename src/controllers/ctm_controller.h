@@ -109,6 +109,10 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
 
+/* Open the controller's own USB audio playback device, for wired audio and
+ * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */
+void ctm_controller_open_alsa_playback(ctm_controller_t *c);
+
 /* Send a report to the device as-is, bypassing the type's patch hook. When: a
  * type needs to say something to the controller itself rather than pass a host
  * report along. */

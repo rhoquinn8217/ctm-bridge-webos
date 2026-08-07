@@ -19,7 +19,9 @@ enum ctmb_message_type {
     CTMB_MSG_LOG = 7,
     CTMB_MSG_ERROR = 8,
     CTMB_MSG_FEATURE_SET = 9,
-    CTMB_MSG_ENUM = 10           /* forwarded composite USB enumeration (puck) */
+    CTMB_MSG_ENUM = 10,          /* forwarded composite USB enumeration (puck) */
+    CTMB_MSG_ISO_AUDIO = 11,     /* raw PCM audio: CTM-USBIP -> aurora-tv for wired ISO passthrough */
+    CTMB_MSG_MIC_AUDIO = 12      /* raw PCM audio: aurora-tv -> CTM-USBIP, the controller microphone */
 };
 
 #pragma pack(push, 1)
