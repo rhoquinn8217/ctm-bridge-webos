@@ -346,6 +346,22 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
     ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, DS5_LIGHT_ARMED);
     ctm_controller_set_type_state(c, DS5_SLOT_LIGHT_SAVED, 0);
     ctl_log(c, "light: armed, waiting for the host's first output report");
+
+    /* On a cable, open the controller's own speaker and haptics.
+     *
+     * Gated on how the controller is attached, not on a setting. Over
+     * Bluetooth the controller's audio device is not ours to open and the
+     * haptics already travel inside the reports themselves, so there is
+     * nothing to do; on a cable neither is true and both are silent without
+     * this.
+     *
+     * Here rather than earlier because the HID device is already open by this
+     * point, which the settings report needs, and later would be too late:
+     * this runs before the session loop starts, so the device is ready before
+     * the first chunk can arrive. Idempotent, and safe on a reconnect. */
+    if (strcmp(ctm_controller_bus(c), "USB") == 0)
+        ctm_controller_open_alsa_playback(c);
+
     return 0;
 }
 

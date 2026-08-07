@@ -173,6 +173,35 @@ static void enet_global_init_once(void)
     else fprintf(stderr, "controller: enet_initialize failed; ENet disabled, TCP only\n");
 }
 
+/* Audio has its own log file, and every line in it carries a wall-clock time.
+ *
+ * Both halves of that are deliberate. Its own file, because the app's log is
+ * not readable on this platform -- no journal, no /var/log -- so anything that
+ * needs diagnosing has to write somewhere reachable. And a time on every line,
+ * because a reopen is the ONLY event that re-sends the settings report, which
+ * makes it the single most important thing to be able to place in a session.
+ * Without one, "did the audio hold across a reopen?" cannot be answered even
+ * with the evidence in hand -- which is exactly what happened once, with four
+ * reopens logged and no way to tell whether they fell inside the window being
+ * measured.
+ *
+ * Seconds since the epoch to three decimals, matching the other logs, so they
+ * can be read side by side with no conversion. */
+static void alsa_log(const char *tag, const char *fmt, ...)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    FILE *f = fopen("/tmp/alsa_debug.log", "a");
+    if (!f) return;
+    fprintf(f, "%s %.3f ", tag, (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 /* Open the DualSense's own USB audio playback device for wired ISO passthrough.
  * Scans ALSA cards for one named "DualSense", opens pcmC{n}D0p, configures
  * S16_LE 4ch 48kHz. Returns fd on success, -1 on failure.
@@ -263,6 +292,11 @@ static int open_ds5_alsa_playback(void)
             fd = -1;
             continue;
         }
+        /* What the kernel actually chose. Restored to match the reference:
+         * on a first test this is the only record of the period and buffer
+         * size the hardware settled on. */
+        alsa_log("[alsa-hwparams]", "card=%d period_frames=%u buffer_frames=%u",
+                 card, (unsigned)hw.intervals[5].max, (unsigned)hw.intervals[9].max);
         return fd;
     }
     return -1;
@@ -272,35 +306,6 @@ static int open_ds5_alsa_playback(void)
  * at open. Frames are what it counts in, so an arriving chunk is divided by
  * this to get them. */
 #define DS5_AUDIO_CHANNELS 4
-
-/* Audio has its own log file, and every line in it carries a wall-clock time.
- *
- * Both halves of that are deliberate. Its own file, because the app's log is
- * not readable on this platform -- no journal, no /var/log -- so anything that
- * needs diagnosing has to write somewhere reachable. And a time on every line,
- * because a reopen is the ONLY event that re-sends the settings report, which
- * makes it the single most important thing to be able to place in a session.
- * Without one, "did the audio hold across a reopen?" cannot be answered even
- * with the evidence in hand -- which is exactly what happened once, with four
- * reopens logged and no way to tell whether they fell inside the window being
- * measured.
- *
- * Seconds since the epoch to three decimals, matching the other logs, so they
- * can be read side by side with no conversion. */
-static void alsa_log(const char *fmt, ...)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    FILE *f = fopen("/tmp/alsa_debug.log", "a");
-    if (!f) return;
-    fprintf(f, "%.3f ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
 
 /* Write one chunk of arriving PCM to the controller's playback device.
  *
@@ -365,26 +370,28 @@ static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t le
      * when nothing did, to prove the path is still alive. */
     c->alsa_writes++;
     if (first_errno != 0 || rc < 0 || (c->alsa_writes % 500) == 0) {
-        alsa_log("[alsa-write] n=%llu frames=%lu rc=%d first_errno=%d retries=%d",
+        alsa_log("[alsa-write]", "n=%llu frames=%lu final_rc=%d first_errno=%d retries=%d",
                  (unsigned long long)c->alsa_writes, (unsigned long)xfer.frames,
                  rc, first_errno, retries);
     }
 
-    const char *why = NULL;
-    if (c->alsa_consec_fail >= 20) why = "writes failing outright";
-    else if (c->alsa_retry_streak >= 5) why = "writes needing retries";
-    if (!why) return;
+    const char *heal_reason = NULL;
+    if (c->alsa_consec_fail >= 20) heal_reason = "consecutive-fail";
+    else if (c->alsa_retry_streak >= 5) heal_reason = "retry-streak";
+    if (!heal_reason) return;
 
-    alsa_log("[alsa-selfheal] reason=%s failed=%d retried=%d, reopening",
-             why, c->alsa_consec_fail, c->alsa_retry_streak);
-    ctl_log(c, "alsa: reopening playback -- %s (failed=%d retried=%d)",
-            why, c->alsa_consec_fail, c->alsa_retry_streak);
-    c->alsa_consec_fail = 0;
-    c->alsa_retry_streak = 0;
+    alsa_log("[alsa-selfheal]", "reason=%s consec_fail=%d retry_streak=%d, reopening ALSA device",
+             heal_reason, c->alsa_consec_fail, c->alsa_retry_streak);
     close(c->alsa_fd);
     c->alsa_fd = -1;
     ctm_controller_open_alsa_playback(c);
-    alsa_log("[alsa-selfheal] reopen %s", c->alsa_fd >= 0 ? "ok" : "FAILED");
+    if (c->alsa_fd >= 0) {
+        ctl_log(c, "alsa: self-healed - reopened playback (fd=%d)", c->alsa_fd);
+    } else {
+        ctl_log(c, "alsa: self-heal reopen failed");
+    }
+    c->alsa_consec_fail = 0;
+    c->alsa_retry_streak = 0;
 }
 
 /* Monotonic clock in microseconds. When: pacing schedules + handshake timeout. */
@@ -1354,10 +1361,10 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
     if (!c || c->alsa_fd >= 0) return;
     c->alsa_fd = open_ds5_alsa_playback();
     if (c->alsa_fd < 0) {
-        ctl_log(c, "alsa: playback open failed (wired audio unavailable)");
+        ctl_log(c, "alsa: DS5 playback open failed (wired audio unavailable)");
         return;
     }
-    ctl_log(c, "alsa: opened playback for wired audio (fd=%d)", c->alsa_fd);
+    ctl_log(c, "alsa: opened DS5 playback for ISO passthrough (fd=%d)", c->alsa_fd);
 
     /* ONE merged init report, written atomically.
      *
@@ -1390,8 +1397,9 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
     spk_init[DS5_IDX_SPEAKER_VOLUME] = DS5_SPEAKER_VOLUME_MAX;
     spk_init[DS5_IDX_AUDIO_CONTROL]  = DS5_AUDIO_OUT_PATH_SPEAKER |
                                        DS5_AUDIO_ECHO_NOISE_CANCEL;
-    int rc = ctm_controller_write_raw(c, spk_init, sizeof(spk_init));
-    ctl_log(c, "alsa: speaker init (merged, %zu bytes) rc=%d", sizeof(spk_init), rc);
+    int svrc = hid_write_report(c, spk_init, sizeof(spk_init));
+    ctl_log(c, "alsa: speaker init (merged, %zu bytes) rc=%d hid_fd=%d",
+            sizeof(spk_init), svrc, c->hid_fd);
 
     /* ds5-aurora fires an open-tone burst here. NOT PORTED: it is a recorded
      * DECISIVE NEGATIVE -- tested on both fault classes with clean deliveries,
