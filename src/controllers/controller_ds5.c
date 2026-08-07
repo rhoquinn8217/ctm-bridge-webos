@@ -291,14 +291,41 @@ static bool ds5e_matches(const ctm_controller_dev_t *dev)
 
 
 
+/* Bluetooth carries the same fields one byte further along: report 0x31 adds a
+ * sequence/flags byte ahead of the payload that wired report 0x01 does not
+ * have.
+ *
+ * HYPOTHESIS, not yet measured. The wired offsets were read off hardware
+ * (2026-08-06); these are those plus one. Measuring the Bluetooth ones the same
+ * way was not possible: an unbridged Bluetooth DualSense sends a CUT-DOWN
+ * 10-byte report with no touch data at all, and only switches to the full
+ * report once a host asks for it -- which our own plug does. So the reading has
+ * to happen from inside a bridged session, and the test is the measurement.
+ *
+ * Consequence worth knowing: the gesture can only ever UNBRIDGE over Bluetooth.
+ * An unbridged Bluetooth controller is not sending fingers to detect. */
+#define DS5_BT_REPORT_ID   0x31
+#define DS5_BT_OFFSET      1
+
 static bool ds5_chord_held(const uint8_t *data, size_t len)
 {
-    if (!data || len < 41 || data[0] != 0x01) {
+    size_t off;
+    if (!data) {
         return false;
     }
-    bool pressed = (data[10] & 0x02) != 0;
-    bool finger1 = (data[33] & 0x80) == 0;
-    bool finger2 = (data[37] & 0x80) == 0;
+    if (data[0] == 0x01) {
+        off = 0;                      /* wired, measured */
+    } else if (data[0] == DS5_BT_REPORT_ID) {
+        off = DS5_BT_OFFSET;          /* bluetooth, inferred */
+    } else {
+        return false;
+    }
+    if (len < 41 + off) {
+        return false;
+    }
+    bool pressed = (data[10 + off] & 0x02) != 0;
+    bool finger1 = (data[33 + off] & 0x80) == 0;
+    bool finger2 = (data[37 + off] & 0x80) == 0;
     return pressed && finger1 && finger2;
 }
 
