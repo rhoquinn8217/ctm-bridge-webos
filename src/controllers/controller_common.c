@@ -164,6 +164,11 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c)
     return c && c->unplug_requested != 0;
 }
 
+const char *ctm_controller_bus(const ctm_controller_t *c)
+{
+    return c ? c->dev.bus : "";
+}
+
 uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot)
 {
     if (!c || slot < 0 || slot >= CTM_TYPE_STATE_SLOTS) return 0;

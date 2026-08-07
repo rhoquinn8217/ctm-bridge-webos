@@ -105,6 +105,10 @@ void ctm_controller_set_log_sink(void (*sink)(const char *line));
  * controller_common.c so DS4 + DS5 share it. */
 void ctm_bt_sign_output(uint8_t *data, size_t len);
 
+/* How this controller is attached: "USB" or "BT". When: a type behaves
+ * differently per transport -- report formats differ between the two. */
+const char *ctm_controller_bus(const ctm_controller_t *c);
+
 /* Send a report to the device as-is, bypassing the type's patch hook. When: a
  * type needs to say something to the controller itself rather than pass a host
  * report along. */

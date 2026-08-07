@@ -383,6 +383,20 @@ static void ds5_light_tick(ctm_controller_t *c)
     if (until == 0) {
         return;
     }
+    /* WIRED ONLY. The report written below is the wired one -- id 0x02, 48
+     * bytes, no checksum. Bluetooth expects its own format with a CRC on the
+     * end, so writing this over a Bluetooth link sends the controller
+     * something malformed.
+     *
+     * Measured 2026-08-06 on the rooted monitor: a Bluetooth session
+     * established cleanly, logged "light: show started", and then died
+     * mid-show -- no "show over" line, and the host reported the client gone.
+     * Wired cycled five times in a row without trouble. */
+    if (strcmp(ctm_controller_bus(c), "USB") != 0) {
+        ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 0);
+        ctl_log(c, "light: skipped, not a wired connection");
+        return;
+    }
     uint64_t now = ds5_now_ms();
     if (until == DS5_LIGHT_ARMED) {
         until = now + DS5_LIGHT_SHOW_MS;
