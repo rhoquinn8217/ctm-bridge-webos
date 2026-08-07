@@ -118,6 +118,9 @@ struct ctm_controller {
     ctm_enet_client_t *enet;        /* process-owned client; borrowed by xport */
     int hid_fd;
     int alsa_fd;   /* wired DS5/Edge: the controller's own playback device */
+    int alsa_consec_fail;      /* audio writes that failed outright, in a row */
+    int alsa_retry_streak;     /* audio writes that needed any retry, in a row */
+    unsigned long long alsa_writes;   /* audio chunks written, for the log */
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -263,6 +266,125 @@ static int open_ds5_alsa_playback(void)
         return fd;
     }
     return -1;
+}
+
+/* Four channels of 16-bit audio, which is what the device was configured for
+ * at open. Frames are what it counts in, so an arriving chunk is divided by
+ * this to get them. */
+#define DS5_AUDIO_CHANNELS 4
+
+/* Audio has its own log file, and every line in it carries a wall-clock time.
+ *
+ * Both halves of that are deliberate. Its own file, because the app's log is
+ * not readable on this platform -- no journal, no /var/log -- so anything that
+ * needs diagnosing has to write somewhere reachable. And a time on every line,
+ * because a reopen is the ONLY event that re-sends the settings report, which
+ * makes it the single most important thing to be able to place in a session.
+ * Without one, "did the audio hold across a reopen?" cannot be answered even
+ * with the evidence in hand -- which is exactly what happened once, with four
+ * reopens logged and no way to tell whether they fell inside the window being
+ * measured.
+ *
+ * Seconds since the epoch to three decimals, matching the other logs, so they
+ * can be read side by side with no conversion. */
+static void alsa_log(const char *fmt, ...)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    FILE *f = fopen("/tmp/alsa_debug.log", "a");
+    if (!f) return;
+    fprintf(f, "%.3f ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+/* Write one chunk of arriving PCM to the controller's playback device.
+ *
+ * A write can fail two recoverable ways. The device can run dry between chunks
+ * (EPIPE), and will take nothing more until it is prepared again; or its buffer
+ * can be full (EAGAIN), which just needs a moment. Anything else is not worth
+ * retrying. Three attempts, then the chunk is dropped -- audio is droppable by
+ * nature, and a dropped chunk is a brief gap, never a reason to stop.
+ *
+ * Two counters watch for the device decaying, and BOTH LIVE ON THE CONTROLLER
+ * rather than in this function. In the implementation this is ported from they
+ * are function-level statics, which means two controllers share one pair: one
+ * controller's failures would reopen the other's audio, and the one actually
+ * failing would never heal. That is the same fault that took four sessions to
+ * find in the microphone path.
+ *
+ *   - Failures in a row (20): the device is genuinely stuck.
+ *   - Writes needing any retry, in a row (5): the device is decaying. This one
+ *     fires before anything is audible, which is the point of having it.
+ *
+ * Either one reopens the device. Reopening also re-sends the settings report,
+ * and that is what actually restores the sound.
+ *
+ * Known limitation, carried over deliberately: if the reopen itself fails, the
+ * handle stays closed and nothing tries again -- later chunks are dropped
+ * silently. The reference behaves the same way, and matching it matters more
+ * here than improving on it.
+ *
+ * When: once per arriving audio message, on the session thread. */
+static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
+{
+    if (!c || c->alsa_fd < 0 || !pcm || len == 0) return;
+
+    struct snd_xferi xfer;
+    memset(&xfer, 0, sizeof(xfer));
+    xfer.buf = (void *)pcm;
+    xfer.frames = len / (DS5_AUDIO_CHANNELS * sizeof(int16_t));
+    if (xfer.frames == 0) return;
+
+    int rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+    int first_errno = (rc < 0) ? errno : 0;
+    int retries = 0;
+    while (rc < 0 && retries < 3) {
+        if (errno == EPIPE) {
+            ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+        } else if (errno == EAGAIN) {
+            struct timespec ts = {0, 1000000};   /* 1 ms for buffer space */
+            nanosleep(&ts, NULL);
+        } else {
+            break;                               /* not recoverable */
+        }
+        xfer.result = 0;
+        rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+        retries++;
+    }
+
+    if (rc < 0) c->alsa_consec_fail++; else c->alsa_consec_fail = 0;
+    if (first_errno != 0) c->alsa_retry_streak++; else c->alsa_retry_streak = 0;
+
+    /* This line is where the fault counts come from -- there is no separate
+     * one -- so it is written on anything that went wrong, and periodically
+     * when nothing did, to prove the path is still alive. */
+    c->alsa_writes++;
+    if (first_errno != 0 || rc < 0 || (c->alsa_writes % 500) == 0) {
+        alsa_log("[alsa-write] n=%llu frames=%lu rc=%d first_errno=%d retries=%d",
+                 (unsigned long long)c->alsa_writes, (unsigned long)xfer.frames,
+                 rc, first_errno, retries);
+    }
+
+    const char *why = NULL;
+    if (c->alsa_consec_fail >= 20) why = "writes failing outright";
+    else if (c->alsa_retry_streak >= 5) why = "writes needing retries";
+    if (!why) return;
+
+    alsa_log("[alsa-selfheal] reason=%s failed=%d retried=%d, reopening",
+             why, c->alsa_consec_fail, c->alsa_retry_streak);
+    ctl_log(c, "alsa: reopening playback -- %s (failed=%d retried=%d)",
+            why, c->alsa_consec_fail, c->alsa_retry_streak);
+    c->alsa_consec_fail = 0;
+    c->alsa_retry_streak = 0;
+    close(c->alsa_fd);
+    c->alsa_fd = -1;
+    ctm_controller_open_alsa_playback(c);
+    alsa_log("[alsa-selfheal] reopen %s", c->alsa_fd >= 0 ? "ok" : "FAILED");
 }
 
 /* Monotonic clock in microseconds. When: pacing schedules + handshake timeout. */
@@ -928,6 +1050,10 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
     } else if (h->type == CTMB_MSG_HOST_CONFIG && h->payload_len >= sizeof(*host_cfg)) {
         memcpy(host_cfg, payload, sizeof(*host_cfg));
         if (host_cfg->bt_pace_us == 0) host_cfg->bt_pace_us = 10667;
+    } else if (h->type == CTMB_MSG_ISO_AUDIO) {
+        /* Wired speaker and haptics. A host that never sends this never
+         * reaches here, and a controller with no audio device open drops it. */
+        write_iso_audio(c, payload, h->payload_len);
     }
 }
 
@@ -1288,6 +1414,8 @@ void ctm_controller_plug_out(ctm_controller_t *c)
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
     if (c->alsa_fd >= 0) { close(c->alsa_fd); c->alsa_fd = -1; }
+    c->alsa_consec_fail = 0;
+    c->alsa_retry_streak = 0;
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }
     if (c->wake_pipe[1] >= 0) { close(c->wake_pipe[1]); c->wake_pipe[1] = -1; }
     if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }
