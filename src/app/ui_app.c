@@ -126,8 +126,6 @@ static void plug_button_cb(lv_event_t *event)
     }
 
     item->plugged = requested_state;
-    if (!item_is_tv_remote(item))
-        set_plug_key(item->key, item->plugged);
     g_selected_index = index;
     snprintf(g_selected_key, sizeof(g_selected_key), "%s", item->key);
 

@@ -144,8 +144,6 @@ extern scan_result_t g_scan;
 extern logical_result_t g_devices;
 extern int g_selected_index;
 extern char g_selected_key[96];
-extern char g_plugged_keys[MAX_DEVICES][96];
-extern int g_plugged_key_count;
 extern char g_expanded_keys[MAX_DEVICES][96];
 extern int g_expanded_key_count;
 extern bridge_session_t g_sessions[MAX_SESSIONS];
@@ -197,8 +195,10 @@ bool is_xpad_input_only_candidate(const char *bus, const char *vid, const char *
 void steam_root_from_phys(const char *phys, char *out, size_t out_len);
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len);
 void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len);
+/* Is this device bridged right now? Answered from the session table -- there
+ * is no second record to keep in step. There is deliberately no setter: the
+ * answer changes by starting or stopping a session, never by being told. */
 bool plug_key_is_set(const char *key);
-void set_plug_key(const char *key, bool plugged);
 bool expand_key_is_set(const char *key);
 void set_expand_key(const char *key, bool expanded);
 bool logical_device_can_expand(const logical_device_t *item);

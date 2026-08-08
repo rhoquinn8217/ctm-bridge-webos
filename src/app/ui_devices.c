@@ -281,31 +281,27 @@ void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len
     }
 }
 
+/* Is this device bridged right now?
+ *
+ * ONE record, and this is a question asked of it rather than a second copy
+ * kept alongside it. Until 2026-08-07 there was a separate list of plugged
+ * keys, updated by whichever caller happened to remember. Two records of the
+ * same fact drift the moment a session ends by a route that does not go
+ * through such a caller -- and a link teardown is exactly that route. The
+ * session went away, the list still said plugged, and the app then refused to
+ * plug the controller back in because it believed it already had.
+ *
+ * The TV remote's row already worked this way, deliberately, and for the same
+ * reason: it mirrors live pointer state rather than a persisted flag so a
+ * stale "plugged" cannot strand the row. This applies that decision to
+ * controllers.
+ *
+ * Cheap on purpose: a walk of an in-memory table, no I/O, no lock. It is
+ * called during enumeration on the UI thread, and anything that waited here
+ * would be waiting in front of the interface. */
 bool plug_key_is_set(const char *key)
 {
-    for (int i = 0; i < g_plugged_key_count; ++i) {
-        if (strcmp(g_plugged_keys[i], key) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void set_plug_key(const char *key, bool plugged)
-{
-    for (int i = 0; i < g_plugged_key_count; ++i) {
-        if (strcmp(g_plugged_keys[i], key) == 0) {
-            if (!plugged) {
-                memmove(&g_plugged_keys[i], &g_plugged_keys[i + 1],
-                        (size_t)(g_plugged_key_count - i - 1) * sizeof(g_plugged_keys[0]));
-                g_plugged_key_count--;
-            }
-            return;
-        }
-    }
-    if (plugged && g_plugged_key_count < MAX_DEVICES) {
-        snprintf(g_plugged_keys[g_plugged_key_count++], sizeof(g_plugged_keys[0]), "%s", key);
-    }
+    return session_index_for_key(key) >= 0;
 }
 
 bool expand_key_is_set(const char *key)

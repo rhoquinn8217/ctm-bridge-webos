@@ -19,8 +19,6 @@ scan_result_t g_scan;
 logical_result_t g_devices;
 int g_selected_index = -1;
 char g_selected_key[96];
-char g_plugged_keys[MAX_DEVICES][96];
-int g_plugged_key_count;
 char g_expanded_keys[MAX_DEVICES][96];
 int g_expanded_key_count;
 bridge_session_t g_sessions[MAX_SESSIONS];

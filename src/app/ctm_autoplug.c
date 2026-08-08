@@ -45,8 +45,6 @@ void ctm_autoplug_tick(void)
         snprintf(s_attempted[s_attempted_count++], sizeof s_attempted[0], "%s", item->key);
         if (remote ? ctm_tv_pointer_plug() : plug_in_item(item)) {
             item->plugged = true;
-            if (!remote)
-                set_plug_key(item->key, true);
             log_append("auto-plug: %s (%s)", item->name, remote ? "tv-pointer" : kind);
         } else {
             log_append("auto-plug failed for %s; use Plug in", item->name);
