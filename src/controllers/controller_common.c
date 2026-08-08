@@ -121,6 +121,11 @@ struct ctm_controller {
     int alsa_consec_fail;      /* audio writes that failed outright, in a row */
     int alsa_retry_streak;     /* audio writes that needed any retry, in a row */
     unsigned long long alsa_writes;   /* audio chunks written, for the log */
+    /* The audio settings currently in force on this controller. Start as the
+     * defaults and are updated by any host report that claims them, so a
+     * reopen restores what the host asked for rather than what we assumed. */
+    uint8_t audio_spk_vol;
+    uint8_t audio_control;
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -758,6 +763,36 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
     return n == (ssize_t)len ? 0 : -1;
 }
 
+/* Remember any audio setting a report claims, so a later reopen can restore it.
+ *
+ * The audio device can vanish mid-session and be reopened, and a reopen has to
+ * re-send the settings -- a fresh handle knows nothing about volume or routing.
+ * Sending the hardcoded defaults there would silently undo whatever the host
+ * had set: a user at volume 60 jumps back to full the first time the audio path
+ * stumbles.
+ *
+ * Only the CLAIMED fields are taken. A report carries flags saying which
+ * settings it is setting, and a field that is not claimed is untouched by that
+ * report -- reading it anyway would record a zero the host never sent.
+ *
+ * Deliberately NOT a copy of the report. Replaying a whole report would replay
+ * everything else in it, and most outbound reports are rumble.
+ *
+ * When: every outbound report, from the one place they all pass through. */
+static void remember_audio_settings(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    if (!c || !data) return;
+    if (len <= DS5_IDX_AUDIO_CONTROL) return;
+    if (data[0] != DS5_OUT_REPORT_ID) return;
+    uint8_t claims = data[DS5_IDX_VALID_FLAG0];
+    if (claims & DS5_F0_ALLOW_SPEAKER_VOLUME) {
+        c->audio_spk_vol = data[DS5_IDX_SPEAKER_VOLUME];
+    }
+    if (claims & DS5_F0_ALLOW_AUDIO_CONTROL) {
+        c->audio_control = data[DS5_IDX_AUDIO_CONTROL];
+    }
+}
+
 /* Patch (via the ops hook) then write one report to the device, mutex-guarded.
  * When: every direct OUTPUT write and every paced-queue drain. */
 static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len)
@@ -774,6 +809,9 @@ static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len
     ssize_t n = write(c->hid_fd, patched, patched_len);
     pthread_mutex_unlock(&c->hid_mutex);
     if (n == (ssize_t)patched_len) {
+        /* After patching and only on success: what is recorded is what the
+         * controller actually received. */
+        remember_audio_settings(c, patched, patched_len);
         c->st_reports_out++;
         return 0;
     }
@@ -1318,6 +1356,11 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->pid_num = (unsigned int)strtoul(dev->pid, NULL, 16);
     c->hid_fd = -1;
     c->alsa_fd = -1;
+    /* The defaults stop being an assertion about what the settings are and
+     * become the starting values. Anything the host sets replaces them, so the
+     * first open behaves exactly as before and a reopen no longer reverts. */
+    c->audio_spk_vol = DS5_SPEAKER_VOLUME_MAX;
+    c->audio_control = DS5_AUDIO_OUT_PATH_SPEAKER | DS5_AUDIO_ECHO_NOISE_CANCEL;
     c->wake_pipe[0] = -1;
     c->wake_pipe[1] = -1;
     for (int i = 0; i < MAX_EVDEV_GRABS; ++i) c->evdev_grabs[i].fd = -1;
@@ -1428,12 +1471,11 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
     spk_init[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
                                        DS5_F0_ALLOW_AUDIO_CONTROL;
     spk_init[DS5_IDX_VALID_FLAG1]    = 0x00;  /* claim nothing else */
-    spk_init[DS5_IDX_SPEAKER_VOLUME] = DS5_SPEAKER_VOLUME_MAX;
-    spk_init[DS5_IDX_AUDIO_CONTROL]  = DS5_AUDIO_OUT_PATH_SPEAKER |
-                                       DS5_AUDIO_ECHO_NOISE_CANCEL;
+    spk_init[DS5_IDX_SPEAKER_VOLUME] = c->audio_spk_vol;
+    spk_init[DS5_IDX_AUDIO_CONTROL]  = c->audio_control;
     int svrc = hid_write_report(c, spk_init, sizeof(spk_init));
-    ctl_log(c, "alsa: speaker init (merged, %zu bytes) rc=%d hid_fd=%d",
-            sizeof(spk_init), svrc, c->hid_fd);
+    ctl_log(c, "alsa: speaker init (merged, %zu bytes) vol=0x%02x ctrl=0x%02x rc=%d hid_fd=%d",
+            sizeof(spk_init), c->audio_spk_vol, c->audio_control, svrc, c->hid_fd);
 
     /* ds5-aurora fires an open-tone burst here. NOT PORTED: it is a recorded
      * DECISIVE NEGATIVE -- tested on both fault classes with clean deliveries,
