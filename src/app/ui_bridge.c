@@ -272,9 +272,16 @@ static void *gesture_worker(void *arg)
                 ++n;
             }
         }
+        /* The pair either side of stop_session is the point: a teardown that
+         * wedges shows as "stopping" with no matching "stopped", and the
+         * worker is a SINGLE thread, so nothing behind it gets serviced. */
+        ctm_gesture_log(NULL, "worker woke: %d of %d session(s) asking to unplug",
+                        n, g_session_count);
         for (int i = 0; i < n; ++i) {
             log_append("gesture: unplugging %s", keys[i]);
+            ctm_gesture_log(NULL, "stopping %s", keys[i]);
             stop_session(keys[i]);
+            ctm_gesture_log(NULL, "stopped %s", keys[i]);
             set_plug_key(keys[i], false);
         }
     }

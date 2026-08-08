@@ -128,6 +128,11 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...);
  * recognises a local gesture. Sets a flag and notifies the app; it does NOT
  * tear down, because the caller is the input thread and unplugging joins that
  * same thread. */
+/* Write a line to /tmp/ctm-gesture.log, the file the app's plug-in watcher
+ * also writes, so a gesture reads end to end in one place. `c` may be NULL
+ * when the caller holds a key rather than a controller. */
+void ctm_gesture_log(const ctm_controller_t *c, const char *fmt, ...);
+
 void ctm_controller_request_unplug(ctm_controller_t *c);
 bool ctm_controller_unplug_requested(const ctm_controller_t *c);
 

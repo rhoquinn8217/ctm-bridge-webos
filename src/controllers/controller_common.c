@@ -414,10 +414,44 @@ void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb)
     g_unplug_cb = cb;
 }
 
+/* Write a line to the gesture log -- the same file the app's plug-in watcher
+ * uses, so both halves of a gesture read in order, in one place.
+ *
+ * The unplug half wrote nothing at all until 2026-08-07. A gesture that did
+ * not unplug left no evidence of whether it was seen, whether it fired, or
+ * whether the teardown it asked for ever finished, and twice in one session
+ * that had to be reasoned about from silence.
+ *
+ * `c` may be NULL, for callers holding a key rather than a controller. */
+void ctm_gesture_log(const ctm_controller_t *c, const char *fmt, ...)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    FILE *f = fopen("/tmp/ctm-gesture.log", "a");
+    if (!f) return;
+    fprintf(f, "%.3f [%s] ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9,
+            (c && c->ops && c->ops->kind) ? c->ops->kind : "app");
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 void ctm_controller_request_unplug(ctm_controller_t *c)
 {
-    if (!c || c->unplug_requested) return;
+    if (!c) return;
+    if (c->unplug_requested) {
+        /* The flag is deliberately never cleared, so this is reached whenever
+         * a controller asks twice -- which also means it is STILL ASKING on
+         * every later pass of the worker. Worth being able to see. */
+        ctm_gesture_log(c, "unplug already requested for %s, ignoring", c->dev.mac);
+        return;
+    }
     c->unplug_requested = 1;
+    ctm_gesture_log(c, "unplug requested for %s (handler %s)",
+                    c->dev.mac, g_unplug_cb ? "set" : "MISSING");
     if (g_unplug_cb) g_unplug_cb(c);
 }
 

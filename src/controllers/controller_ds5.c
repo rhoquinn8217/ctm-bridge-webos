@@ -454,7 +454,16 @@ static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
 
     ds5_light_tick(c);
 
+    /* Logged on TRANSITIONS ONLY. This runs once per input report, roughly 250
+     * times a second per controller, so a line per call would drown the file
+     * and pay for a file open every time. */
     if (!ds5_chord_held(data, len)) {
+        uint64_t was = ctm_controller_type_state(c, DS5_SLOT_CHORD);
+        if (was != 0 && was != UINT64_MAX) {
+            ctm_gesture_log(c, "chord released after %llums, short of %dms",
+                            (unsigned long long)(ds5_now_ms() - was),
+                            DS5_CHORD_HOLD_MS);
+        }
         /* Released: re-arm. */
         ctm_controller_set_type_state(c, DS5_SLOT_CHORD, 0);
         return;
@@ -464,6 +473,7 @@ static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
     uint64_t now = ds5_now_ms();
 
     if (since == 0) {
+        ctm_gesture_log(c, "chord held, timing a %dms hold", DS5_CHORD_HOLD_MS);
         ctm_controller_set_type_state(c, DS5_SLOT_CHORD, now);
         return;
     }
@@ -472,6 +482,8 @@ static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
         return;
     }
     if (now - since >= DS5_CHORD_HOLD_MS) {
+        ctm_gesture_log(c, "chord complete after %llums, asking to unplug",
+                        (unsigned long long)(now - since));
         ctm_controller_set_type_state(c, DS5_SLOT_CHORD, UINT64_MAX);
         ctm_controller_request_unplug(c);
     }
