@@ -23,51 +23,23 @@ static bool ds5_matches(const ctm_controller_dev_t *dev)
  * so this logs the FIRST few reports of a show and nothing after -- enough to
  * see what arrived and what was written, without writing a file at input rate.
  * Uses the controller's own log, which lands in /tmp/ctm-<mac-or-kind>.log. */
-#define DS5_LIGHT_LOG_REPORTS 6
 
 /* Which scratch slot each feature uses. Per controller, never shared. */
+/* We write no lightbar patterns. The light belongs, in order, to the player's
+ * own config, then the game, then Steam, then Windows -- and every moment we
+ * might have wanted to signal something is a moment one of them may be driving
+ * it. The confirmation show that used to live here also suppressed the host's
+ * lightbar bytes while it played, which is this layer overriding the game.
+ *
+ * What a user sees on a successful plug is Steam taking the light over, which
+ * is both more recognisable and the honest signal: the controller is behaving
+ * like a natively connected one. Confirmation of our own belongs on the
+ * speaker and the motors, which nothing else claims.
+ *
+ * Removing the show frees two of the three type-state slots. */
 #define DS5_SLOT_CHORD 0
-#define DS5_SLOT_LIGHT 1
-#define DS5_SLOT_LIGHT_SAVED 2
 
 /* Waiting for the host's first output report to start the clock. */
-#define DS5_LIGHT_ARMED UINT64_MAX
-
-/* Reports logged so far in this show, packed above the saved colour. */
-#define DS5_LIGHT_LOG_SHIFT 32
-
-/* Confirmation light: on plug, hold the lightbar for a moment and pulse it, so
- * the controller says for itself that it is bridged.
- *
- * This is a deliberate exception to relaying reports untouched. It is bounded:
- * the host's colour bytes are overwritten only until the show ends, and after
- * that the report passes through as before. The window is also the quietest
- * one available -- the host has only just been told the device exists.
- *
- * A BLINK, not a fade. The host sends output reports sparingly, and there is
- * no way to write more of them from here -- so an effect built from smooth
- * motion plays across whatever handful of reports happen to pass, which is not
- * an effect at all. Measured 2026-08-06: a fade produced one blip and then a
- * colour that simply stayed. A blink survives that, because it needs a state
- * change to be seen rather than a curve.
- *
- * Deep green, deliberately: green means connected everywhere else, and it is
- * nothing like the DualSense's own teal, so there is no doubt anything
- * happened. Amber and red stay free for saying something is wrong. */
-#define DS5_LIGHT_SHOW_MS 1500
-#define DS5_LIGHT_BLINKS  2
-
-/* Wired output report 0x02: byte 0 is the report id, so payload offset N sits
- * at byte N+1. Lightbar red/green/blue are payload 44..46. Flag panel 2
- * (payload 1) must allow the lightbar section or the colour bytes are ignored:
- * bit 2 allows the colour, bit 3 releases the controller's own start-up
- * animation. Layout from ds5-output-report-reference.md. */
-#define DS5_OUT_FLAGS2      2
-#define DS5_OUT_LED_RED     45
-#define DS5_OUT_LED_GREEN   46
-#define DS5_OUT_LED_BLUE    47
-#define DS5_FLAG2_ALLOW_LED 0x04
-#define DS5_FLAG2_RELEASE_LED 0x08
 
 static uint64_t ds5_now_ms(void)
 {
@@ -115,27 +87,6 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
     const tv_bridge_worker_settings_t *settings = &s;
 
     size_t len = len_io ? *len_io : 0;
-
-    /* While the confirmation light is running, hold the host's colour back.
-     *
-     * Writing our own reports animates cleanly, but it does not stop the host
-     * writing between ours -- measured 2026-08-06, where green alternating with
-     * the host's teal simply read as teal, and magenta read as pink. The two
-     * mechanisms answer different halves: ours drives the animation, this stops
-     * anyone else reaching the light while it plays.
-     *
-     * Deliberately narrow: only the colour bytes and only the lightbar's allow
-     * bit, only while the show is running -- about a second and a half after
-     * plugging in. Everything else in the report passes through untouched, and
-     * once the show ends so does this. */
-    if (data && len > DS5_OUT_LED_BLUE && data[0] == 0x02 &&
-        ctm_controller_type_state(c, DS5_SLOT_LIGHT) != 0) {
-        data[DS5_OUT_FLAGS2] &= (uint8_t)~DS5_FLAG2_ALLOW_LED;
-        data[DS5_OUT_LED_RED] = 0;
-        data[DS5_OUT_LED_GREEN] = 0;
-        data[DS5_OUT_LED_BLUE] = 0;
-        return 0;
-    }
 
     if (!data || len < 12 || (data[0] != 0x36 && data[0] != 0x32)) return 0;
 
@@ -329,23 +280,11 @@ static bool ds5_chord_held(const uint8_t *data, size_t len)
     return pressed && finger1 && finger2;
 }
 
-/* on_plug_init: start the confirmation light. When: once, immediately after the
+/* on_plug_init: open the wired audio path. When: once, immediately after the
  * host accepts the device. */
 static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 {
     (void)t;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
-    (void)now;
-    /* ARM the show; do not start it. This runs when the TV connects, but the
-     * host has not created the device yet -- enumeration takes over a second,
-     * measured 2026-08-06 -- so a window opened here expires before the first
-     * output report ever arrives, and nothing is seen. The clock starts on the
-     * first report instead. */
-    ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, DS5_LIGHT_ARMED);
-    ctm_controller_set_type_state(c, DS5_SLOT_LIGHT_SAVED, 0);
-    ctl_log(c, "light: armed, waiting for the host's first output report");
 
     /* On a cable, open the controller's own speaker and haptics.
      *
@@ -367,83 +306,6 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 
 
 
-/* Send one lightbar report of our own. Only the lightbar section is enabled,
- * so nothing else the controller is doing is disturbed. */
-static void ds5_write_light(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b)
-{
-    uint8_t rep[48];
-    memset(rep, 0, sizeof(rep));
-    rep[0] = 0x02;                                      /* wired output report */
-    rep[DS5_OUT_FLAGS2] = DS5_FLAG2_ALLOW_LED | DS5_FLAG2_RELEASE_LED;
-    rep[DS5_OUT_LED_RED] = r;
-    rep[DS5_OUT_LED_GREEN] = g;
-    rep[DS5_OUT_LED_BLUE] = b;
-    ctm_controller_write_raw(c, rep, sizeof(rep));
-}
-
-/* Drive the confirmation light.
- *
- * Writes its own reports rather than patching the host's. Measured 2026-08-06:
- * only FIVE host reports arrived across the whole show, at irregular intervals,
- * and their colours were changing as the host ran its own start-up sequence --
- * so an animation built on them is not an animation, and whichever frame lands
- * last simply sticks. Ours also works when there is no host at all, which is
- * what a failure signal will need.
- *
- * Clocked by the INPUT stream, which arrives steadily at 250-1000 reports a
- * second. Cheap: a comparison per report, and a write only when the step
- * changes. */
-static void ds5_light_tick(ctm_controller_t *c)
-{
-    uint64_t until = ctm_controller_type_state(c, DS5_SLOT_LIGHT);
-    if (until == 0) {
-        return;
-    }
-    /* WIRED ONLY. The report written below is the wired one -- id 0x02, 48
-     * bytes, no checksum. Bluetooth expects its own format with a CRC on the
-     * end, so writing this over a Bluetooth link sends the controller
-     * something malformed.
-     *
-     * Measured 2026-08-06 on the rooted monitor: a Bluetooth session
-     * established cleanly, logged "light: show started", and then died
-     * mid-show -- no "show over" line, and the host reported the client gone.
-     * Wired cycled five times in a row without trouble. */
-    if (strcmp(ctm_controller_bus(c), "USB") != 0) {
-        ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 0);
-        ctl_log(c, "light: skipped, not a wired connection");
-        return;
-    }
-    uint64_t now = ds5_now_ms();
-    if (until == DS5_LIGHT_ARMED) {
-        until = now + DS5_LIGHT_SHOW_MS;
-        ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, until);
-        ctm_controller_set_type_state(c, DS5_SLOT_LIGHT_SAVED, 0);
-        ctl_log(c, "light: show started");
-    }
-    if (now >= until) {
-        /* Done. Leave the light dark rather than guessing at a colour: the
-         * host sets its own on its next report, and it does so within a second
-         * of a session settling. */
-        ds5_write_light(c, 0, 0, 0);
-        ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 0);
-        ctl_log(c, "light: show over");
-        return;
-    }
-
-    uint64_t elapsed = DS5_LIGHT_SHOW_MS - (until - now);
-    uint64_t period = DS5_LIGHT_SHOW_MS / DS5_LIGHT_BLINKS;
-    bool lit = (elapsed % period) < (period / 2);
-
-    /* Write only when the step changes, not on every input report. */
-    uint64_t last = ctm_controller_type_state(c, DS5_SLOT_LIGHT_SAVED);
-    uint64_t step = lit ? 2 : 1;
-    if (last == step) {
-        return;
-    }
-    ctm_controller_set_type_state(c, DS5_SLOT_LIGHT_SAVED, step);
-    ds5_write_light(c, 0, lit ? 0xff : 0x00, 0);
-}
-
 /* on_input_report: watch for the unplug gesture. When: this controller's input
  * thread, once per relayed report. The timestamp lives in the controller's own
  * type state, never in a file-level variable -- two controllers each have their
@@ -451,8 +313,6 @@ static void ds5_light_tick(ctm_controller_t *c)
 static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c) return;
-
-    ds5_light_tick(c);
 
     /* Logged on TRANSITIONS ONLY. This runs once per input report, roughly 250
      * times a second per controller, so a line per call would drown the file
