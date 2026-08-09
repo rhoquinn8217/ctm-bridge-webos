@@ -797,6 +797,16 @@ static void *mic_capture_thread(void *arg)
     uint64_t sends_ok = 0, sends_failed = 0;
     int16_t peak_ch0 = 0, peak_ch1 = 0;
     time_t last_report = 0;
+    /* Self-heal counters, the same pair the playback path uses: reads that
+     * failed outright in a row, and reads that needed any recovery in a row.
+     * Locals, so per thread by construction.
+     *
+     * THE THRESHOLDS ARE INHERITED FROM PLAYBACK, NOT MEASURED FOR CAPTURE.
+     * No capture failure has ever been observed here -- a million reads across
+     * several sessions, none failed -- so there is nothing to tune them
+     * against. They are a starting point. */
+    int consec_fail = 0, retry_streak = 0;
+    uint64_t heals = 0;
 
     mic_cap_log("%s card=%d thread running fd=%d", node, mic_card, fd);
 
@@ -834,20 +844,62 @@ static void *mic_capture_thread(void *arg)
         xfer.frames = MIC_CAP_FRAMES;
         int rc = ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
         if (rc < 0) {
+            const int read_errno = errno;
             reads_failed++;
-            if (errno == EPIPE) {
+            consec_fail++;
+            int fatal = 0;
+            if (read_errno == EPIPE) {
                 /* overrun: the stream ran ahead of us. Re-prepare and restart. */
                 ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
                 ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-            } else if (errno == EAGAIN) {
+                retry_streak++;
+            } else if (read_errno == EAGAIN) {
                 struct timespec ts = {0, 1000000};   /* 1 ms */
                 nanosleep(&ts, NULL);
+                retry_streak++;
             } else {
-                mic_cap_log("read failed errno=%d, stopping", errno);
+                /* Anything else means the device itself is gone or broken.
+                 * This used to log and exit, which left the microphone dead
+                 * for the rest of the session with nothing said about it --
+                 * while the PLAYBACK side of the same USB audio device has
+                 * recovered from exactly this for months. */
+                fatal = 1;
+            }
+
+            /* Two triggers, mirroring playback: failing outright, or needing
+             * recovery over and over. The second fires before anything is
+             * audible, which is the point of having it. */
+            const char *why = NULL;
+            if (fatal) why = "read error";
+            else if (consec_fail >= 20) why = "consecutive-fail";
+            else if (retry_streak >= 5) why = "retry-streak";
+            if (!why) {
+                continue;
+            }
+
+            /* Reopen. The scan runs again from scratch, because the card
+             * index drifts across a re-enumeration and a remembered one would
+             * reopen the wrong node. */
+            mic_cap_log("%s card=%d self-heal: %s errno=%d consec=%d retry=%d, reopening",
+                        node, mic_card, why, read_errno, consec_fail, retry_streak);
+            close(fd);
+            fd = open_ds5_alsa_capture(&mic_card, node);
+            if (fd < 0) {
+                mic_cap_log("%s self-heal: reopen FAILED, thread stopping", node);
                 break;
             }
+            if (ioctl(fd, SNDRV_PCM_IOCTL_START, NULL) < 0) {
+                mic_cap_log("%s self-heal: START failed errno=%d (first read may start it)",
+                            node, errno);
+            }
+            heals++;
+            consec_fail = 0;
+            retry_streak = 0;
+            mic_cap_log("%s self-healed: reopened card=%d fd=%d", node, mic_card, fd);
             continue;
         }
+        consec_fail = 0;
+        retry_streak = 0;
         /* HOW MANY FRAMES WE ACTUALLY GOT IS xfer.result, NOT xfer.frames.
          * frames is what we ASKED for and the kernel leaves it alone; result
          * is what it delivered. The device hands over 48-frame periods (see
@@ -914,11 +966,12 @@ static void *mic_capture_thread(void *arg)
         }
     }
 
-    mic_cap_log("%s card=%d thread stopping: reads_ok=%llu failed=%llu frames=%llu",
+    mic_cap_log("%s card=%d thread stopping: reads_ok=%llu failed=%llu frames=%llu heals=%llu",
                 node, mic_card,
                 (unsigned long long)reads_ok,
                 (unsigned long long)reads_failed,
-                (unsigned long long)frames_total);
+                (unsigned long long)frames_total,
+                (unsigned long long)heals);
     free(buf);
     close(fd);
     return NULL;
