@@ -126,6 +126,8 @@ struct ctm_controller {
      * reopen restores what the host asked for rather than what we assumed. */
     uint8_t audio_spk_vol;
     uint8_t audio_control;
+    pthread_t mic_cap_thread;
+    int mic_cap_started;
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -519,6 +521,425 @@ static int c_send(ctm_controller_t *c, uint16_t type, uint32_t flags,
                   uint32_t request_id, const void *payload, size_t len)
 {
     return ctm_transport_send_msg(&c->xport, type, flags, request_id, payload, len);
+}
+
+
+/* --- microphone capture ----------------------------------------------------
+ *
+ * Reads the controller's microphone and sends it to the host as
+ * CTMB_MSG_MIC_AUDIO. Proven end to end for two independent controllers.
+ *
+ * WHAT IS KNOWN, MEASURED ON AN UNROOTED C1: the capture side reports S16_LE,
+ * 2 channels, 48000 Hz. The two channels are a MICROPHONE ARRAY -- both carry
+ * the voice; there is no dead channel to drop. Plugging a headset in switches
+ * BOTH channels to the headset mic.
+ *
+ * GATED. Nothing happens unless /tmp/mic_capture_on exists, checked when a
+ * capture thread starts.
+ *   Arm:    touch /tmp/mic_capture_on
+ *   Disarm: rm /tmp/mic_capture_on
+ * A /tmp sentinel does not survive a TV reboot -- deliberate for a diagnostic,
+ * and not acceptable for the finished feature.
+ *
+ * MIRRORS open_ds5_alsa_playback() above: same card scan, same hw_params
+ * shape. The differences are the capture device suffix ('c' not 'p'),
+ * O_RDONLY, and 2 channels not 4.
+ *
+ * Placed after c_send() because the reader sends from this thread. */
+
+#define MIC_CAP_CHANNELS   2
+#define MIC_CAP_RATE       48000
+#define MIC_CAP_FRAMES     480          /* 10 ms, matching the host's request size */
+#define MIC_CAPTURE_ON_PATH "/tmp/mic_capture_on"
+
+static int mic_capture_armed(void)
+{
+    return access(MIC_CAPTURE_ON_PATH, F_OK) == 0;
+}
+
+static void mic_cap_log(const char *fmt, ...)
+{
+    FILE *f = fopen("/tmp/mic_capture.log", "a");
+    if (!f) return;
+    /* Wall-clock, the same shape as the Windows session log (20:43:01.590) so
+     * the three logs -- this one, the controller log, and the host's -- can be
+     * lined up by eye. The epoch seconds this replaced were correct but
+     * unreadable, which pushed every investigation into counting lines and
+     * taking markers before each step. */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tmv;
+    localtime_r(&ts.tv_sec, &tmv);
+    fprintf(f, "%02d:%02d:%02d.%03d ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+            (int)(ts.tv_nsec / 1000000));
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+/* Open the DualSense capture device. Returns fd, or -1.
+ *
+ * Reports which card it opened through out_card, because every log line the
+ * thread writes afterwards needs it. Two controllers share ONE log file, and
+ * without the card on each line the only way to tell the two streams apart is
+ * to compare counter values and infer which thread started first -- which
+ * works until both have been running a while, and then does not. */
+static int open_ds5_alsa_capture(int *out_card, const char *want_node)
+{
+    char path[128];
+    int fd = -1;
+    for (int card = 0; card < 8; card++) {
+        snprintf(path, sizeof(path), "/proc/asound/card%d/stream0", card);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char line[256];
+        char header[256];
+        int found = 0;
+        header[0] = '\0';
+        while (fgets(line, sizeof(line), f)) {
+            /* The first line names the device AND where it is attached, e.g.
+             * "...DualSense Wireless Controller at usb-generic-ehci-1.4...".
+             * That tail is the only thing here that distinguishes one
+             * controller's card from the other's -- the NAME is identical for
+             * both. */
+            if (header[0] == '\0') {
+                snprintf(header, sizeof(header), "%s", line);
+                char *nl = strchr(header, '\n');
+                if (nl) *nl = '\0';
+            }
+            if (strstr(line, "DualSense")) { found = 1; break; }
+        }
+        fclose(f);
+        if (!found) continue;
+
+        /* MEASUREMENT, NOT A FIX. Both capture threads scan this same list and
+         * both match on the name "DualSense", so with two controllers there is
+         * nothing here that ties a card to the controller asking for it.
+         *
+         * On 2026-08-04 both threads reported bit-identical audio levels while
+         * one controller was MUTED AT THE HARDWARE -- peaks 231/231, 188/188,
+         * 237/237 -- which a muted microphone cannot produce. Both were
+         * reading one microphone.
+         *
+         * This line prints what each card says about itself and which
+         * controller is asking, so a later session can see whether they
+         * correspond. Matching on it is deliberately NOT done yet: the text
+         * format has not been read, and guessing at formats is what produced
+         * three sessions of wrong conclusions. */
+        mic_cap_log("scan: card=%d wants_node=%s header=[%s]",
+                    card, want_node ? want_node : "?", header);
+
+        /* 'c' = capture. The playback path uses the same name ending in 'p'.
+         *
+         * O_NONBLOCK IS LOAD-BEARING, NOT TIDINESS. Opening an ALSA device
+         * that another process already holds WAITS FOREVER without it. With
+         * two controllers connected, the second one's thread would reach this
+         * line for card N, find the first controller already holding it, and
+         * park in the kernel -- no error, no log line, no fall-through to its
+         * own card. Observed: a "capture thread started" line with nothing
+         * after it, and a second controller whose microphone reached nothing
+         * at all.
+         *
+         * The playback opener has always passed this flag, which is why two
+         * controllers' SPEAKERS work: a busy device returns immediately and
+         * the scan continues to the next card. */
+        snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0c", card);
+        fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            mic_cap_log("open failed card=%d path=%s errno=%d", card, path, errno);
+            continue;
+        }
+
+        struct snd_pcm_hw_params hw;
+        memset(&hw, 0, sizeof(hw));
+        for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+            hw.intervals[i].min = 0;
+            hw.intervals[i].max = 0xFFFFFFFFU;
+        }
+        for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+            memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+        /* ACCESS: RW_INTERLEAVED(3) */
+        memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+        hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
+        /* FORMAT: S16_LE(2) */
+        memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+        hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
+        /* CHANNELS: exactly 2 -- the capture side, not the 4-channel playback */
+        hw.intervals[2].min = hw.intervals[2].max = MIC_CAP_CHANNELS;
+        hw.intervals[2].integer = 1;
+        /* RATE: exactly 48000 */
+        hw.intervals[3].min = hw.intervals[3].max = MIC_CAP_RATE;
+        hw.intervals[3].integer = 1;
+        /* BUFFER_SIZE: at least 20 ms of slack, same reasoning as playback */
+        hw.intervals[9].min = 960;
+        hw.intervals[9].max = 0xFFFFFFFFU;
+        hw.intervals[9].integer = 0;
+
+        int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
+        if (hw_rc < 0 || prep_rc < 0) {
+            mic_cap_log("hw_params/prepare failed card=%d hw_rc=%d prep_rc=%d errno=%d",
+                        card, hw_rc, prep_rc, errno);
+            close(fd);
+            fd = -1;
+            continue;
+        }
+        /* DO NOT try to switch this back to blocking with fcntl. It was
+         * tried: the call REPORTS SUCCESS and reads keep returning
+         * immediately anyway. Measured result was 940 reads/second against the
+         * ~100 the stream produces, roughly half of them failing with
+         * "nothing ready" -- the loop spinning as fast as it could and the TV
+         * sending nine times more data than the audio needs.
+         *
+         * The device stays non-blocking, which is what keeps a busy card from
+         * parking the thread. The read loop waits with poll() instead, which
+         * paces against the device without depending on a mode change. */
+        mic_cap_log("capture opened card=%d fd=%d period_frames=%u buffer_frames=%u",
+                    card, fd, (unsigned)hw.intervals[5].max, (unsigned)hw.intervals[9].max);
+        if (out_card) *out_card = card;
+        return fd;
+    }
+    mic_cap_log("no DualSense capture device found");
+    return -1;
+}
+
+
+/* Reader thread: pull frames, measure them, log once a second.
+ *
+ * Peak amplitude is the number that matters. A stream that opens and returns
+ * frames of zeros looks identical to a working one in a frame count -- and
+ * that exact ambiguity cost a whole evening on the Windows side. */
+static void *mic_capture_thread(void *arg)
+{
+    ctm_controller_t *c = (ctm_controller_t *)arg;
+    /* The device file the app opened, e.g. /dev/hidraw1. The controller log
+     * prints this on its session line, so the two TV logs line up.
+     *
+     * The reference also carried the USB socket here -- the physical route,
+     * which is what the overlay row shows and what would eventually tie a
+     * CARD to a CONTROLLER. This base has no such field on the device, so it
+     * is left out rather than half-invented; the scan line below still prints
+     * what each card says about itself. */
+    const char *node = (c && c->dev.path[0]) ? c->dev.path : "?";
+
+    int mic_card = -1;
+    int fd = open_ds5_alsa_capture(&mic_card, node);
+    if (fd < 0) {
+        mic_cap_log("thread exiting: no capture device");
+        return NULL;
+    }
+
+    /* Start the stream. Capture needs an explicit START; playback does not,
+     * because the first write starts it implicitly. */
+    if (ioctl(fd, SNDRV_PCM_IOCTL_START, NULL) < 0) {
+        mic_cap_log("START failed errno=%d (continuing; first read may start it)", errno);
+    }
+
+    /* ONE BUFFER PER THREAD. THIS WAS `static`, AND THAT WAS THE BUG.
+     *
+     * `static` inside a function means ONE instance for the whole program --
+     * not one per call, and not one per thread. With two controllers there are
+     * two of these threads, and they were both reading their audio into the
+     * SAME memory. Whichever read last overwrote the other, and then both
+     * measured their peak levels from it and both SENT from it.
+     *
+     * Everything that made no sense for four sessions follows from that:
+     *   - identical peak levels on two controllers, often bit-for-bit
+     *   - occasional divergence, when one thread measured before the other
+     *     overwrote
+     *   - MUTE ONE and the MUTED controller still reported audio: its own
+     *     read filled the buffer with silence, but the live thread's audio was
+     *     sitting there when it measured
+     *   - MUTE BOTH and both read exactly zero
+     *
+     * INVISIBLE WITH ONE CONTROLLER. One thread, one buffer, correct
+     * behaviour -- the fault could not exist until a second thread did.
+     *
+     * It cannot go on the stack: ~2 KB is too much for a thread here.
+     * Allocated per thread and freed on exit instead. */
+    int16_t *buf = (int16_t *)malloc(sizeof(int16_t) * MIC_CAP_FRAMES * MIC_CAP_CHANNELS);
+    if (!buf) {
+        mic_cap_log("capture buffer allocation failed; thread exiting");
+        close(fd);
+        return NULL;
+    }
+    uint64_t reads_ok = 0, reads_failed = 0, frames_total = 0;
+    uint64_t sends_ok = 0, sends_failed = 0;
+    int16_t peak_ch0 = 0, peak_ch1 = 0;
+    time_t last_report = 0;
+
+    mic_cap_log("%s card=%d thread running fd=%d", node, mic_card, fd);
+
+    while (!c->stop) {
+        /* Sleep until the device actually has audio, instead of asking
+         * repeatedly whether it does. This is what paces the loop: without
+         * it, a non-blocking read returns instantly and the loop spins.
+         * The 100 ms timeout exists only so c->stop is checked on plug-out;
+         * in normal running poll returns in ~10 ms when the next period
+         * lands. */
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        const int pr = poll(&pfd, 1, 100);
+        if (pr == 0) {
+            continue;               /* nothing yet; re-check c->stop */
+        }
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            mic_cap_log("poll failed errno=%d, stopping", errno);
+            break;
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            /* Overrun or the device went away. Re-prepare and carry on; the
+             * read below reports anything that is still wrong. */
+            ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+            ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
+            continue;
+        }
+
+        struct snd_xferi xfer;
+        memset(&xfer, 0, sizeof(xfer));
+        xfer.buf = buf;
+        xfer.frames = MIC_CAP_FRAMES;
+        int rc = ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
+        if (rc < 0) {
+            reads_failed++;
+            if (errno == EPIPE) {
+                /* overrun: the stream ran ahead of us. Re-prepare and restart. */
+                ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+                ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
+            } else if (errno == EAGAIN) {
+                struct timespec ts = {0, 1000000};   /* 1 ms */
+                nanosleep(&ts, NULL);
+            } else {
+                mic_cap_log("read failed errno=%d, stopping", errno);
+                break;
+            }
+            continue;
+        }
+        /* HOW MANY FRAMES WE ACTUALLY GOT IS xfer.result, NOT xfer.frames.
+         * frames is what we ASKED for and the kernel leaves it alone; result
+         * is what it delivered. The device hands over 48-frame periods (see
+         * period_frames in the open log) while this asks for 480, so a
+         * non-blocking read returns 48 and result says so.
+         *
+         * Counting xfer.frames instead sent 480 frames every time: ten times
+         * the real data, nine tenths of it stale buffer contents. Measured as
+         * 1000 reads/second with the peak levels FROZEN at identical values
+         * for 25 seconds -- the same bytes going out over and over. It was
+         * invisible while the read blocked, because then the call waited for
+         * all 480 and the assumption happened to hold. */
+        const long got = (long)xfer.result;
+        if (got <= 0) {
+            continue;
+        }
+        reads_ok++;
+        frames_total += (uint64_t)got;
+
+        /* Send it to the host. Audio is droppable: a failed send is a brief
+         * gap in what Windows hears, never a reason to stop reading or to
+         * tear anything down. The transport takes its own lock, so sending
+         * from this thread cannot interleave with the input reader. */
+        {
+            size_t bytes = (size_t)got * MIC_CAP_CHANNELS * sizeof(int16_t);
+            /* Belt and braces with the start point. Sending before the
+             * session's opening exchange has finished puts audio on the wire
+             * where the host expects a hello, and the session dies -- see the
+             * comment at mic_capture_start()'s call site. The thread now
+             * starts after the link is up, so this should never be false;
+             * it is here because that race hid for two days and would hide
+             * again. */
+            if (!ctm_transport_connected(&c->xport)) {
+                continue;
+            }
+            if (bytes > 0 && c_send(c, CTMB_MSG_MIC_AUDIO, CTMB_FLAG_OK, 0, buf, bytes) != 0) {
+                sends_failed++;
+            } else {
+                sends_ok++;
+            }
+        }
+        for (long i = 0; i < got; i++) {
+            int16_t a = buf[i * MIC_CAP_CHANNELS + 0];
+            int16_t b = buf[i * MIC_CAP_CHANNELS + 1];
+            if (a < 0) a = (int16_t)-a;
+            if (b < 0) b = (int16_t)-b;
+            if (a > peak_ch0) peak_ch0 = a;
+            if (b > peak_ch1) peak_ch1 = b;
+        }
+
+        time_t now = time(NULL);
+        if (now != last_report) {
+            last_report = now;
+            mic_cap_log("%s card=%d reads_ok=%llu failed=%llu frames=%llu sent=%llu send_failed=%llu peak_ch0=%d peak_ch1=%d",
+                        node, mic_card,
+                        (unsigned long long)reads_ok,
+                        (unsigned long long)reads_failed,
+                        (unsigned long long)frames_total,
+                        (unsigned long long)sends_ok,
+                        (unsigned long long)sends_failed,
+                        (int)peak_ch0, (int)peak_ch1);
+            peak_ch0 = 0;
+            peak_ch1 = 0;
+        }
+    }
+
+    mic_cap_log("%s card=%d thread stopping: reads_ok=%llu failed=%llu frames=%llu",
+                node, mic_card,
+                (unsigned long long)reads_ok,
+                (unsigned long long)reads_failed,
+                (unsigned long long)frames_total);
+    free(buf);
+    close(fd);
+    return NULL;
+}
+
+/* EVERY EXIT FROM HERE SAYS WHY.
+ *
+ * Two of these paths used to return in silence: already-started, and not
+ * armed. A second controller bridged with a working speaker and a healthy
+ * session and simply never captured -- no start line, no failure line, nothing
+ * anywhere to say what had been decided. That cost a session, and the only
+ * honest next step was "add a log line", which is this.
+ *
+ * A silent early return is the most expensive kind of code to debug remotely:
+ * it looks identical to code that never ran. */
+static void mic_capture_start(ctm_controller_t *c)
+{
+    if (!c) {
+        return;                 /* nothing to log against */
+    }
+    if (c->mic_cap_started) {
+        ctl_log(c, "mic: capture not started -- already running for this controller");
+        return;
+    }
+    if (strcmp(ctm_controller_bus(c), "USB") != 0) {
+        ctl_log(c, "mic: capture not started -- not a wired connection");
+        return;
+    }
+    if (!mic_capture_armed()) {
+        ctl_log(c, "mic: capture not started -- not armed (%s absent)",
+                MIC_CAPTURE_ON_PATH);
+        return;
+    }
+    if (pthread_create(&c->mic_cap_thread, NULL, mic_capture_thread, c) == 0) {
+        c->mic_cap_started = 1;
+        ctl_log(c, "mic: capture thread started");
+    } else {
+        ctl_log(c, "mic: capture thread failed to start errno=%d", errno);
+    }
+}
+
+static void mic_capture_stop(ctm_controller_t *c)
+{
+    if (!c || !c->mic_cap_started) return;
+    /* c->stop is already set by plug_out before this is called. */
+    pthread_join(c->mic_cap_thread, NULL);
+    c->mic_cap_started = 0;
+    ctl_log(c, "mic: capture thread stopped");
 }
 
 /* Pop one received message (1=got / 0=none / -1=dropped). When: the session
@@ -1205,6 +1626,15 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * thread starts (it tags primary input with c->primary_in_ep). */
     if (c->ops->composite) open_composite_siblings(c);
 
+    /* Microphone capture starts HERE, and not a line earlier.
+     *
+     * It used to start when the audio device opened, which is during session
+     * setup -- so microphone chunks landed on a connection still handshaking,
+     * the host saw audio where it expected a hello, and EVERY SESSION DIED
+     * (host config receive failed / bridge hello failed). The handshake above
+     * has returned by this point, so the link is up. */
+    mic_capture_start(c);
+
     c->input_thread_started = 0;
     if (pthread_create(&c->input_thread, NULL, input_thread_main, c) == 0) {
         c->input_thread_started = 1;
@@ -1356,6 +1786,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->pid_num = (unsigned int)strtoul(dev->pid, NULL, 16);
     c->hid_fd = -1;
     c->alsa_fd = -1;
+    c->mic_cap_started = 0;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
@@ -1497,6 +1928,7 @@ void ctm_controller_plug_out(ctm_controller_t *c)
     ctm_transport_disconnect(&c->xport);
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
+    mic_capture_stop(c);
     if (c->alsa_fd >= 0) { close(c->alsa_fd); c->alsa_fd = -1; }
     c->alsa_consec_fail = 0;
     c->alsa_retry_streak = 0;
