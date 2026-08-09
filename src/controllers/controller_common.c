@@ -1068,6 +1068,41 @@ static void request_full_bt_mode(int fd)
     }
 }
 
+/* INVESTIGATION, 2026-08-08 -- read only, changes nothing.
+ *
+ * Does a WIRED DualSense report its own identity?
+ *
+ * The working assumption all along has been that a wired controller has no
+ * unique identifier: `dev.mac` is empty on a cable, which is why two
+ * controllers share one log file (the name falls back to the kind) and why
+ * both introduce themselves to the host as the same made-up serial.
+ *
+ * But the controller stores its own Bluetooth MAC and reports it over USB
+ * through the pairing-info feature report, 0x09 -- that is how the kernel's
+ * PlayStation driver obtains a MAC for a wired DualSense. If it answers here,
+ * the identifier exists and has simply never been asked for.
+ *
+ * The whole first line of the reply is logged as bytes rather than parsed. The
+ * layout is documented but unverified on this hardware, and guessing at
+ * formats is what produced three sessions of wrong conclusions elsewhere in
+ * this project. Read the bytes first, decide what they mean second. */
+static void probe_pairing_info(ctm_controller_t *c, int fd)
+{
+    uint8_t feature[20];
+    memset(feature, 0, sizeof(feature));
+    feature[0] = 0x09;
+    if (ioctl(fd, HIDIOCGFEATURE(sizeof(feature)), feature) < 0) {
+        ctl_log(c, "probe: feature 0x09 (pairing info) failed errno=%d", errno);
+        return;
+    }
+    char hex[3 * sizeof(feature) + 1];
+    int o = 0;
+    for (size_t i = 0; i < sizeof(feature); ++i) {
+        o += snprintf(hex + o, sizeof(hex) - (size_t)o, "%02x ", feature[i]);
+    }
+    ctl_log(c, "probe: feature 0x09 (pairing info) = %s", hex);
+}
+
 /* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
 static uint32_t crc32_step(uint32_t crc, const uint8_t *data, size_t len)
 {
@@ -1146,6 +1181,9 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
     }
 
     if (c->ops->request_bt_mode) request_full_bt_mode(fd);
+
+    /* Investigation only, wired DualSense. Read and log; nothing acts on it. */
+    if (strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
     return fd;
 }
 
