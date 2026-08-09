@@ -244,7 +244,7 @@ static void alsa_log(const char *tag, const char *fmt, ...)
  * Not done here, deliberately: it is untested with two controllers on this
  * base, and the audio path is worth getting working for one before it is made
  * clever for two. */
-static int open_ds5_alsa_playback(void)
+static int open_ds5_alsa_playback(const char *want_node)
 {
     char path[128];
     int fd = -1;
@@ -253,12 +253,39 @@ static int open_ds5_alsa_playback(void)
         FILE *f = fopen(path, "r");
         if (!f) continue;
         char line[256];
+        char header[256];
         int found = 0;
+        header[0] = '\0';
         while (fgets(line, sizeof(line), f)) {
+            /* The first line names the device AND where it is attached, e.g.
+             * "...DualSense Wireless Controller at usb-generic-ehci-1.4...".
+             * That tail is the only thing here that distinguishes one
+             * controller's card from the other's -- the NAME is identical for
+             * both. */
+            if (header[0] == '\0') {
+                snprintf(header, sizeof(header), "%s", line);
+                char *nl = strchr(header, '\n');
+                if (nl) *nl = '\0';
+            }
             if (strstr(line, "DualSense")) { found = 1; break; }
         }
         fclose(f);
         if (!found) continue;
+
+        /* MEASUREMENT, NOT A FIX -- and the same line the capture scan already
+         * writes. Both controllers' scans match on the name "DualSense", so
+         * with two attached there is nothing here tying a card to the
+         * controller asking for it, and audio has been heard coming from a
+         * controller that was not even bridged.
+         *
+         * Every occurrence so far has been unattributable, because this scan
+         * said which card it opened and never which controller asked. It has
+         * now been observed twice and reproduced neither time; this line is
+         * what makes the next occurrence readable rather than another parked
+         * report. Matching on the header is deliberately NOT done yet. */
+        alsa_log("[alsa-scan]", "card=%d wants_node=%s header=[%s]",
+                 card, want_node ? want_node : "?", header);
+
         snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
         fd = open(path, O_WRONLY | O_NONBLOCK);
         if (fd < 0) continue;
@@ -1867,7 +1894,7 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
 void ctm_controller_open_alsa_playback(ctm_controller_t *c)
 {
     if (!c || c->alsa_fd >= 0) return;
-    c->alsa_fd = open_ds5_alsa_playback();
+    c->alsa_fd = open_ds5_alsa_playback(c->dev.path);
     if (c->alsa_fd < 0) {
         ctl_log(c, "alsa: DS5 playback open failed (wired audio unavailable)");
         return;
