@@ -128,6 +128,10 @@ struct ctm_controller {
     uint8_t audio_control;
     pthread_t mic_cap_thread;
     int mic_cap_started;
+    /* Which sound card is genuinely this controller's, worked out by muting
+     * it and seeing which card falls silent. -1 until answered, and -1 stays
+     * if the answer could not be trusted -- see ctm_cardmatch.inl. */
+    int matched_card;
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -244,11 +248,17 @@ static void alsa_log(const char *tag, const char *fmt, ...)
  * Not done here, deliberately: it is untested with two controllers on this
  * base, and the audio path is worth getting working for one before it is made
  * clever for two. */
-static int open_ds5_alsa_playback(const char *want_node)
+static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
 {
     char path[128];
     int fd = -1;
-    for (int card = 0; card < 8; card++) {
+    /* When the controller's own card is known, open it directly. The scan
+     * below takes the first DualSense card it can open, which with two
+     * controllers is how one ends up playing through the other's speaker.
+     * -1 means not known, and the scan is all there is. */
+    int first = (prefer_card >= 0) ? prefer_card : 0;
+    int last  = (prefer_card >= 0) ? prefer_card : 7;
+    for (int card = first; card <= last; card++) {
         snprintf(path, sizeof(path), "/proc/asound/card%d/stream0", card);
         FILE *f = fopen(path, "r");
         if (!f) continue;
@@ -734,6 +744,11 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
  * Peak amplitude is the number that matters. A stream that opens and returns
  * frames of zeros looks identical to a working one in a frame count -- and
  * that exact ambiguity cost a whole evening on the Windows side. */
+/* Defined in ctm_cardmatch.inl, which is included further down because it
+ * needs hid_write_report. Declared here so the capture thread can open the
+ * card the probe identified rather than scanning for one. */
+static int cardmatch_open_card(int card);
+
 static void *mic_capture_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
@@ -747,8 +762,25 @@ static void *mic_capture_thread(void *arg)
      * what each card says about itself. */
     const char *node = (c && c->dev.path[0]) ? c->dev.path : "?";
 
-    int mic_card = -1;
-    int fd = open_ds5_alsa_capture(&mic_card, node);
+    /* Use the card the probe identified as this controller's, and fall back
+     * to the scan only when it could not answer. The scan takes the first
+     * free DualSense card, which is how a controller ends up reading someone
+     * else's microphone. */
+    int mic_card = c->matched_card;
+    int fd = -1;
+    if (mic_card >= 0) {
+        fd = cardmatch_open_card(mic_card);
+        if (fd < 0) {
+            mic_cap_log("%s card=%d identified but not openable, falling back to scan",
+                        node, mic_card);
+            mic_card = -1;
+        } else {
+            mic_cap_log("%s card=%d opened by identity, not by scan", node, mic_card);
+        }
+    }
+    if (fd < 0) {
+        fd = open_ds5_alsa_capture(&mic_card, node);
+    }
     if (fd < 0) {
         mic_cap_log("thread exiting: no capture device");
         return NULL;
@@ -1905,6 +1937,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->hid_fd = -1;
     c->alsa_fd = -1;
     c->mic_cap_started = 0;
+    c->matched_card = -1;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
@@ -1985,7 +2018,7 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
 void ctm_controller_open_alsa_playback(ctm_controller_t *c)
 {
     if (!c || c->alsa_fd >= 0) return;
-    c->alsa_fd = open_ds5_alsa_playback(c->dev.path);
+    c->alsa_fd = open_ds5_alsa_playback(c->dev.path, c->matched_card);
     if (c->alsa_fd < 0) {
         ctl_log(c, "alsa: DS5 playback open failed (wired audio unavailable)");
         return;

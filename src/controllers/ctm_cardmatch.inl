@@ -348,6 +348,37 @@ static void cardmatch_identify(ctm_controller_t *c)
     ctl_log(c, "cardmatch: answer=%d scan_would_pick=%d %s",
             answer, scan_would_pick, detail);
 
+    c->matched_card = answer;
+
     for (int i = 0; i < n; ++i) close(slots[i].fd);
+
+    /* Move the SPEAKER onto the right card.
+     *
+     * The speaker is opened during session setup, which happens before this
+     * runs, so by now it is already holding whatever the scan gave it. The
+     * capture side has no such problem -- it starts after this and simply
+     * uses the answer.
+     *
+     * Reopening rather than reordering: the self-heal already closes and
+     * reopens this device on a live session, so it is a proven path rather
+     * than a new one, and it leaves upstream's setup order alone.
+     *
+     * Done unconditionally when there is an answer, without checking which
+     * card is currently held. Knowing that would mean threading a card number
+     * back out of upstream's opener; reopening a device that was already
+     * correct costs a few milliseconds and cannot be wrong. */
+    if (answer >= 0) {
+        if (c->alsa_fd >= 0) {
+            close(c->alsa_fd);
+            c->alsa_fd = -1;
+        }
+        /* The ordinary opener, which now honours matched_card. Reusing it
+         * rather than opening the device here keeps the settings report in
+         * one place -- a fresh handle knows nothing about volume or routing,
+         * and that report is what puts them back. */
+        ctm_controller_open_alsa_playback(c);
+        ctl_log(c, "cardmatch: speaker reopened on card=%d (fd=%d)",
+                answer, c->alsa_fd);
+    }
     pthread_mutex_unlock(&g_cardmatch_lock);
 }
