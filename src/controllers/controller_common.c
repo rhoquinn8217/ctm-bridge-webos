@@ -1675,6 +1675,12 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
     }
 }
 
+/* Card matching lives in its own file: it is a feature of ours rather than a
+ * gap in the wired support, so an upstream change to the Bluetooth path
+ * cannot collide with it. Included rather than compiled separately because
+ * ctm_controller_t is defined here and opaque everywhere else. */
+#include "ctm_cardmatch.inl"
+
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
                      const uint8_t *report_desc, uint32_t report_desc_len,
                      ctmb_host_config_t *host_cfg)
@@ -1751,6 +1757,10 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * the host saw audio where it expected a hello, and EVERY SESSION DIED
      * (host config receive failed / bridge hello failed). The handshake above
      * has returned by this point, so the link is up. */
+    /* Measure whether a muted microphone can be told from a live one, before
+     * capture takes the card. Logs and acts on nothing -- see the file. */
+    cardmatch_probe(c);
+
     mic_capture_start(c);
 
     c->input_thread_started = 0;
