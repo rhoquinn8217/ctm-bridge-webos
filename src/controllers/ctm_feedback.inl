@@ -28,62 +28,111 @@
  * WIRED ONLY -- Bluetooth carries audio inside the report patching, a
  * different path entirely.
  *
- * NO FAILURE SIGNAL YET. A refused plug has no session and no open audio
- * device, so it would have to find a card by scanning, which is the guess
- * this project has just finished removing. It can be done properly with the
- * same mute trick the probe uses; it is not done here. */
+ * THE FAILURE SIGNAL IS NOT HERE, AND CANNOT BE. A refused plug has no
+ * session and no open audio device, so nothing on this side can make a sound.
+ * It lives in the app, which still holds the controller through SDL, and is
+ * rumble only for that reason. */
 
 #define FEEDBACK_RATE         48000
 #define FEEDBACK_CHANNELS     4
 #define FEEDBACK_TONE_HZ      880    /* a clear beep, above game rumble */
 #define FEEDBACK_RUMBLE_HZ    60     /* low enough to be felt, not heard */
 #define FEEDBACK_MS           140
+#define FEEDBACK_GAP_MS       90     /* silence between beeps, so two read as two */
 #define FEEDBACK_TONE_LEVEL   9000   /* ~28% of full scale: audible, not harsh */
 #define FEEDBACK_RUMBLE_LEVEL 14000  /* the motors need more than the speaker */
 
-/* One beep and one pulse, handed to the same write path the host's audio
- * uses, so it inherits the retry and self-heal behaviour rather than
+/* Build and play `beeps` beep-and-pulse pairs on this controller's own audio
+ * device. Everything below is a thin wrapper on this.
+ *
+ * Handed to the same write path the host's audio uses, so it inherits the retry and self-heal behaviour rather than
  * repeating it.
  *
  * Both envelopes fade in and out. A square-edged start makes the speaker
  * click and the motors knock, which reads as a fault rather than a
  * confirmation. */
-static void feedback_play_connected(ctm_controller_t *c)
+static void feedback_play(ctm_controller_t *c, int beeps, const char *what)
 {
     if (!c || c->alsa_fd < 0) {
-        ctl_log(c, "feedback: no audio device, nothing played");
+        ctl_log(c, "feedback: %s -- no audio device, nothing played", what);
         return;
     }
 
-    const int frames = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
+    const int frames_per = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
+    const int gap_frames = (FEEDBACK_RATE * FEEDBACK_GAP_MS) / 1000;
+    const int frames = beeps * frames_per + (beeps - 1) * gap_frames;
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
     int16_t *buf = (int16_t *)calloc(1, bytes);
     if (!buf) {
-        ctl_log(c, "feedback: allocation failed, nothing played");
+        ctl_log(c, "feedback: %s -- allocation failed, nothing played", what);
         return;
     }
 
-    for (int i = 0; i < frames; ++i) {
-        /* Triangular envelope: peak in the middle, silent at both ends. */
-        const int half = frames / 2;
-        const int rise = (i < half) ? i : (frames - i);
-        const double env = (half > 0) ? ((double)rise / (double)half) : 0.0;
+    for (int b = 0; b < beeps; ++b) {
+        const int base = b * (frames_per + gap_frames);
+        for (int i = 0; i < frames_per; ++i) {
+            /* Triangular envelope: peak in the middle, silent at both ends. */
+            const int half = frames_per / 2;
+            const int rise = (i < half) ? i : (frames_per - i);
+            const double env = (half > 0) ? ((double)rise / (double)half) : 0.0;
 
-        const double t = (double)i / (double)FEEDBACK_RATE;
-        const double tone = sin(2.0 * M_PI * FEEDBACK_TONE_HZ * t) * env;
-        const double bump = sin(2.0 * M_PI * FEEDBACK_RUMBLE_HZ * t) * env;
+            const double t = (double)i / (double)FEEDBACK_RATE;
+            const double tone = sin(2.0 * M_PI * FEEDBACK_TONE_HZ * t) * env;
+            const double bump = sin(2.0 * M_PI * FEEDBACK_RUMBLE_HZ * t) * env;
 
-        const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
-        const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
+            const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
+            const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
 
-        buf[i * FEEDBACK_CHANNELS + 0] = s;   /* speaker left  */
-        buf[i * FEEDBACK_CHANNELS + 1] = s;   /* speaker right */
-        buf[i * FEEDBACK_CHANNELS + 2] = r;   /* haptic left   */
-        buf[i * FEEDBACK_CHANNELS + 3] = r;   /* haptic right  */
+            const int f = (base + i) * FEEDBACK_CHANNELS;
+            buf[f + 0] = s;   /* speaker left  */
+            buf[f + 1] = s;   /* speaker right */
+            buf[f + 2] = r;   /* haptic left   */
+            buf[f + 3] = r;   /* haptic right  */
+        }
     }
 
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
-    ctl_log(c, "feedback: connected - one tone and pulse on card=%d",
-            c->matched_card);
+    ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d",
+            what, beeps, c->matched_card);
+}
+
+/* Bridged. */
+static void feedback_play_connected(ctm_controller_t *c)
+{
+    feedback_play(c, 1, "connected");
+}
+
+/* Coming back to us.
+ *
+ * PLAYED BEFORE THE UNPLUG, NOT AFTER, and it has to be: the audio device is
+ * torn down by the unplug, so afterwards there is nothing left to play
+ * through.
+ *
+ * WHICH MEANS IT CAN LIE. If the unplug then fails, the controller will have
+ * announced something that did not happen. Accepted deliberately for now
+ * (rhoquinn8217) -- and it is useful while it lasts, because hearing the tone and
+ * then finding the controller still bridged is itself a report of a failed
+ * unplug that would otherwise be silent.
+ *
+ * Generic, one beep, same as connecting -- the two are not yet meant to be
+ * told apart. */
+static void feedback_play_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+{
+    /* All three sound the SAME for now, deliberately. The signals have to be
+     * heard before a vocabulary is committed to, and today connecting and
+     * unplugging are already indistinguishable from each other -- so encoding
+     * meaning would be building on nothing.
+     *
+     * What the reason buys today is the LOG: it names which of the three
+     * routes actually fired. They are not interchangeable -- a user asking is
+     * not the same event as everything being torn down -- and until now
+     * nothing recorded which had happened. */
+    const char *what;
+    switch (why) {
+    case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
+    case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
+    default:                  what = "unplugging (requested)"; break;
+    }
+    feedback_play(c, 1, what);
 }

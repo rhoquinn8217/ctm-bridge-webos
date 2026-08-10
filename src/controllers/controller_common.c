@@ -2078,7 +2078,16 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
 
 void ctm_controller_plug_out(ctm_controller_t *c)
 {
+    ctm_controller_plug_out_reason(c, CTM_UNPLUG_REQUESTED);
+}
+
+void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why)
+{
     if (!c) return;
+    /* Before anything is torn down, while the audio device is still open.
+     * There is no "after" -- the unplug closes the very thing that would
+     * play it. */
+    feedback_play_unplugging(c, why);
     c->stop = 1;
     if (c->xport.fd >= 0) shutdown(c->xport.fd, SHUT_RDWR);
     if (c->wake_pipe[1] >= 0) (void)write(c->wake_pipe[1], "x", 1);

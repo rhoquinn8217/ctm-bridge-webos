@@ -87,7 +87,17 @@ typedef struct {
  * HID fd, transport, settings, and per-MAC log file. */
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev);
 int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
+/* Why a controller is being unplugged. The routes mean different things and
+ * end in the same place, so the caller says which it was: the log records it,
+ * and the controller's own signal can eventually differ. */
+typedef enum {
+    CTM_UNPLUG_REQUESTED = 0,   /* the user asked -- gesture or overlay button */
+    CTM_UNPLUG_SHUTDOWN,        /* everything torn down at once */
+    CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
+} ctm_unplug_reason_t;
+
 void ctm_controller_plug_out(ctm_controller_t *c);
+void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why);
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);

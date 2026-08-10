@@ -546,7 +546,8 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
     int index = session_index_for_key(key);
     if (index >= 0) {
         if (g_sessions[index].controller && g_sessions[index].controller != controller) {
-            ctm_controller_plug_out(g_sessions[index].controller);
+            ctm_controller_plug_out_reason(g_sessions[index].controller,
+                                           CTM_UNPLUG_REPLACED);
             ctm_controller_destroy(g_sessions[index].controller);
         }
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
@@ -645,7 +646,8 @@ void release_local_sessions_on_exit(void)
     ctm_tv_pointer_unplug();
     for (int i = 0; i < g_session_count; ++i) {
         if (g_sessions[i].controller) {
-            ctm_controller_plug_out(g_sessions[i].controller);
+            ctm_controller_plug_out_reason(g_sessions[i].controller,
+                                           CTM_UNPLUG_SHUTDOWN);
             ctm_controller_destroy(g_sessions[i].controller);
             g_sessions[i].controller = NULL;
         }
