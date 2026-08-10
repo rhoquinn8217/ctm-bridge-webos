@@ -561,12 +561,14 @@ static int c_send(ctm_controller_t *c, uint16_t type, uint32_t flags,
  * the voice; there is no dead channel to drop. Plugging a headset in switches
  * BOTH channels to the headset mic.
  *
- * GATED. Nothing happens unless /tmp/mic_capture_on exists, checked when a
- * capture thread starts.
- *   Arm:    touch /tmp/mic_capture_on
- *   Disarm: rm /tmp/mic_capture_on
- * A /tmp sentinel does not survive a TV reboot -- deliberate for a diagnostic,
- * and not acceptable for the finished feature.
+ * ALWAYS ON FOR A WIRED CONTROLLER. This was gated behind a marker file in
+ * /tmp while it was being brought up, and the gate is gone now that capture
+ * is proven on one, two and three controllers, through a game, with the
+ * microphone verified at the far end.
+ *
+ * The gate had to go rather than merely stop being used: a /tmp file does not
+ * survive a TV reboot, so a power cycle silently disabled the microphone with
+ * nothing to suggest why. That cost a testing session on 2026-08-09.
  *
  * MIRRORS open_ds5_alsa_playback() above: same card scan, same hw_params
  * shape. The differences are the capture device suffix ('c' not 'p'),
@@ -577,13 +579,6 @@ static int c_send(ctm_controller_t *c, uint16_t type, uint32_t flags,
 #define MIC_CAP_CHANNELS   2
 #define MIC_CAP_RATE       48000
 #define MIC_CAP_FRAMES     480          /* 10 ms, matching the host's request size */
-#define MIC_CAPTURE_ON_PATH "/tmp/mic_capture_on"
-
-static int mic_capture_armed(void)
-{
-    return access(MIC_CAPTURE_ON_PATH, F_OK) == 0;
-}
-
 static void mic_cap_log(const char *fmt, ...)
 {
     FILE *f = fopen("/tmp/mic_capture.log", "a");
@@ -998,11 +993,6 @@ static void mic_capture_start(ctm_controller_t *c)
     }
     if (strcmp(ctm_controller_bus(c), "USB") != 0) {
         ctl_log(c, "mic: capture not started -- not a wired connection");
-        return;
-    }
-    if (!mic_capture_armed()) {
-        ctl_log(c, "mic: capture not started -- not armed (%s absent)",
-                MIC_CAPTURE_ON_PATH);
         return;
     }
     if (pthread_create(&c->mic_cap_thread, NULL, mic_capture_thread, c) == 0) {
@@ -1759,7 +1749,7 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * has returned by this point, so the link is up. */
     /* Measure whether a muted microphone can be told from a live one, before
      * capture takes the card. Logs and acts on nothing -- see the file. */
-    cardmatch_probe(c);
+    cardmatch_identify(c);
 
     mic_capture_start(c);
 

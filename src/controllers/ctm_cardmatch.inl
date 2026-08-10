@@ -79,15 +79,132 @@ static void cardmatch_set_mic_mute(ctm_controller_t *c, int muted)
     ctl_log(c, "cardmatch: mic mute %s rc=%d", muted ? "ON" : "off", rc);
 }
 
-/* Read the loudest sample seen over MATCH_READ_MS. Returns -1 if the card
- * could not be read at all, which is a different answer from "silent" and
- * must not be confused with one. */
-static int cardmatch_peak(int fd)
+/* --- identifying WHICH card, with more than one free ---------------------
+ *
+ * The measurement above proves a muted microphone reads exactly zero and a
+ * live one does not. This turns that into an answer.
+ *
+ * Open every free DualSense card at once. Read them all with the controller
+ * live, then mute it and read them all again. The card that was speaking and
+ * has fallen exactly silent is that controller's. The others carry on
+ * reporting room noise, because nothing was done to them.
+ *
+ * ALL THE READINGS HAPPEN AT THE SAME TIME, in one loop over every card
+ * rather than card by card. Reading them in sequence would compare cards
+ * measured seconds apart, which room noise alone could decide.
+ *
+ * "FREE" MEANS OPENABLE. A bridged controller's session is holding its own
+ * card, so those refuse to open and drop out by themselves. What is left is
+ * exactly the set of cards belonging to unbridged controllers -- which
+ * includes the one plugging in.
+ *
+ * THE NAME IS NOT USED TO DECIDE ANYTHING. Candidates are gathered by name,
+ * because that is how to know a card is a DualSense at all, but the ANSWER
+ * comes from which one falls silent. That matters with an Edge in the mix:
+ * its card is called "DualSense Edge Wireless Control" and a ds5's is
+ * "DualSense Wireless Controller", so a name match finds both and cannot
+ * tell them apart. Silence can. */
+
+#define CARDMATCH_MAX_CARDS 8
+
+/* ONE PROBE AT A TIME, ACROSS ALL CONTROLLERS.
+ *
+ * A probe opens every free card and mutes one controller. Two running at once
+ * collide twice over: the second finds no free cards because the first is
+ * holding them all, and if their muted windows overlap then two cards fall
+ * silent and neither probe can say which silence was its own. The ambiguity
+ * check would catch that and refuse to answer -- safe, but a failure.
+ *
+ * Serialising also makes the second probe BETTER rather than merely correct:
+ * by the time it runs, the first controller is bridged and holding its own
+ * card, so that card is no longer free and drops out of the candidates. One
+ * less card to tell apart.
+ *
+ * The cost is that a second plug-in waits about three seconds. That is a
+ * hand-driven action, so the wait is invisible in practice. */
+static pthread_mutex_t g_cardmatch_lock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    int card;
+    int fd;
+    int peak_live;
+    int peak_muted;
+} cardmatch_slot_t;
+
+/* Open one specific card for capture. The scan version picks a card; this
+ * one is told which. Same hardware parameters -- deliberately a copy rather
+ * than a refactor of the shared opener, so upstream's function is untouched. */
+static int cardmatch_open_card(int card)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0c", card);
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+
+    struct snd_pcm_hw_params hw;
+    memset(&hw, 0, sizeof(hw));
+    for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+        hw.intervals[i].min = 0;
+        hw.intervals[i].max = 0xFFFFFFFFU;
+    }
+    for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+        memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+    memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+    hw.masks[0].bits[3 / 32] = 1u << (3 % 32);   /* RW_INTERLEAVED */
+    memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+    hw.masks[1].bits[2 / 32] = 1u << (2 % 32);   /* S16_LE */
+    hw.intervals[2].min = hw.intervals[2].max = MIC_CAP_CHANNELS;
+    hw.intervals[2].integer = 1;
+    hw.intervals[3].min = hw.intervals[3].max = MIC_CAP_RATE;
+    hw.intervals[3].integer = 1;
+    hw.intervals[9].min = 960;
+    hw.intervals[9].max = 0xFFFFFFFFU;
+    hw.intervals[9].integer = 0;
+
+    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0 ||
+        ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
+        close(fd);
+        return -1;
+    }
+    ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
+    return fd;
+}
+
+/* Does this card belong to a DualSense of any kind? Name only -- used to
+ * gather candidates, never to choose between them. */
+static int cardmatch_is_dualsense(int card)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/asound/card%d/stream0", card);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[256];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "DualSense")) { found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Read every open card at once for MATCH_READ_MS, recording each one's peak.
+ * `which` selects the field to fill so the same loop serves both passes. */
+static void cardmatch_read_all(cardmatch_slot_t *slots, int n, int muted_pass)
 {
     int16_t buf[MIC_CAP_FRAMES * MIC_CAP_CHANNELS];
-    int peak = -1;
     struct timespec t0, now;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    for (int i = 0; i < n; ++i) {
+        if (muted_pass) slots[i].peak_muted = -1;
+        else            slots[i].peak_live  = -1;
+        /* Start from an empty buffer. Without this the reading is really a
+         * measure of what the room sounded like a moment ago -- the fault
+         * that made the first version of this look like a pass. */
+        ioctl(slots[i].fd, SNDRV_PCM_IOCTL_DROP, NULL);
+        ioctl(slots[i].fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+        ioctl(slots[i].fd, SNDRV_PCM_IOCTL_START, NULL);
+    }
 
     for (;;) {
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -95,99 +212,142 @@ static int cardmatch_peak(int fd)
                   (now.tv_nsec - t0.tv_nsec) / 1000000;
         if (ms >= MATCH_READ_MS) break;
 
-        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-        int pr = poll(&pfd, 1, 100);
-        if (pr <= 0) continue;
-
-        struct snd_xferi xfer;
-        memset(&xfer, 0, sizeof(xfer));
-        xfer.buf = buf;
-        xfer.frames = MIC_CAP_FRAMES;
-        if (ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer) < 0) {
-            if (errno == EPIPE) {
-                ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-                ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-            }
-            continue;
+        struct pollfd pfd[CARDMATCH_MAX_CARDS];
+        for (int i = 0; i < n; ++i) {
+            pfd[i].fd = slots[i].fd;
+            pfd[i].events = POLLIN;
+            pfd[i].revents = 0;
         }
-        long got = (long)xfer.result;
-        if (got <= 0) continue;
-        if (peak < 0) peak = 0;
-        for (long i = 0; i < got * MIC_CAP_CHANNELS; ++i) {
-            int v = buf[i] < 0 ? -buf[i] : buf[i];
-            if (v > peak) peak = v;
+        if (poll(pfd, (nfds_t)n, 50) <= 0) continue;
+
+        for (int i = 0; i < n; ++i) {
+            if (!(pfd[i].revents & POLLIN)) continue;
+            struct snd_xferi xfer;
+            memset(&xfer, 0, sizeof(xfer));
+            xfer.buf = buf;
+            xfer.frames = MIC_CAP_FRAMES;
+            if (ioctl(slots[i].fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer) < 0) {
+                if (errno == EPIPE) {
+                    ioctl(slots[i].fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+                    ioctl(slots[i].fd, SNDRV_PCM_IOCTL_START, NULL);
+                }
+                continue;
+            }
+            long got = (long)xfer.result;
+            if (got <= 0) continue;
+            int *peak = muted_pass ? &slots[i].peak_muted : &slots[i].peak_live;
+            if (*peak < 0) *peak = 0;
+            for (long k = 0; k < got * MIC_CAP_CHANNELS; ++k) {
+                int v = buf[k] < 0 ? -buf[k] : buf[k];
+                if (v > *peak) *peak = v;
+            }
         }
     }
-    return peak;
 }
 
-/* The measurement. Runs once per plug-in, before capture starts, so the card
- * is still free. Costs about three seconds and changes nothing. */
-static void cardmatch_probe(ctm_controller_t *c)
+/* Work out which free card belongs to this controller, and say so.
+ *
+ * LOGS THE ANSWER AND CHANGES NOTHING. It also records which card the
+ * ordinary scan would have taken, so the two can be compared: when they
+ * disagree, that is the misrouting caught in the act rather than reported
+ * afterwards. */
+static void cardmatch_identify(ctm_controller_t *c)
 {
     if (!c || strcmp(ctm_controller_bus(c), "USB") != 0) return;
 
-    int card = -1;
-    int fd = open_ds5_alsa_capture(&card, c->dev.path);
-    if (fd < 0) {
-        ctl_log(c, "cardmatch: no capture card to probe");
+    /* Held for the whole probe -- see the note at the lock. */
+    pthread_mutex_lock(&g_cardmatch_lock);
+
+    cardmatch_slot_t slots[CARDMATCH_MAX_CARDS];
+    int n = 0;
+    for (int card = 0; card < CARDMATCH_MAX_CARDS && n < CARDMATCH_MAX_CARDS; ++card) {
+        if (!cardmatch_is_dualsense(card)) continue;
+        int fd = cardmatch_open_card(card);
+        if (fd < 0) continue;      /* busy: a bridged session holds it */
+        slots[n].card = card;
+        slots[n].fd = fd;
+        slots[n].peak_live = -1;
+        slots[n].peak_muted = -1;
+        n++;
+    }
+
+    if (n == 0) {
+        ctl_log(c, "cardmatch: no free DualSense card to identify");
+        pthread_mutex_unlock(&g_cardmatch_lock);
         return;
     }
-    if (ioctl(fd, SNDRV_PCM_IOCTL_START, NULL) < 0) {
-        ctl_log(c, "cardmatch: START failed errno=%d (first read may start it)", errno);
-    }
 
-    /* Same reasoning for the live reading: whatever accumulated between
-     * opening the card and reaching this line is stale by the time it is
-     * measured. Start both readings from a known-empty buffer so the two are
-     * comparable. */
-    ioctl(fd, SNDRV_PCM_IOCTL_DROP, NULL);
-    ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-    ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
+    /* What the ordinary scan would take: the lowest-numbered free card. That
+     * is the whole bug in one line -- it is first-free, not whose. */
+    const int scan_would_pick = slots[0].card;
 
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    int live = cardmatch_peak(fd);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    long live_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    /* The reading runs even with a single free card, where the answer is
+     * already known. It costs three seconds and it is the only place the
+     * live-versus-muted numbers get recorded -- and the assumption those
+     * numbers test, that a live microphone never reads zero, has not yet
+     * been checked in a genuinely silent room. Cheap insurance against
+     * finding out the hard way. */
+    cardmatch_read_all(slots, n, 0);
 
     cardmatch_set_mic_mute(c, 1);
-
-    /* THROW AWAY WHAT IS ALREADY IN THE BUFFER BEFORE MEASURING.
-     *
-     * The capture buffer holds about a second of audio -- 49152 frames at
-     * 48 kHz. Reading straight after the mute drains audio the microphone
-     * captured BEFORE it was muted, so the "muted" figure is really a
-     * measure of how loud the room was a moment ago.
-     *
-     * Measured 2026-08-09 on C1: a quiet run reported muted_peak=0 and looked
-     * like a pass, while a run with talking reported 212 and a third 54 --
-     * the number tracking the noise that preceded the mute, not any sound
-     * after it. The quiet result was luck.
-     *
-     * DROP discards everything queued; PREPARE and START begin again from the
-     * microphone as it is now. The short sleep first gives the controller
-     * time to act on the report, since the mute is a request over HID rather
-     * than something that takes effect the instant we return. */
-    struct timespec settle = {0, 200 * 1000000};   /* 200 ms */
+    struct timespec settle = {0, 200 * 1000000};
     nanosleep(&settle, NULL);
-    ioctl(fd, SNDRV_PCM_IOCTL_DROP, NULL);
-    ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-    ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
 
-    int muted = cardmatch_peak(fd);
-    /* Cleared here and not at the end: everything below this point is
-     * logging, and an early return past an un-mute is how a controller ends
-     * up muted for good. */
+    cardmatch_read_all(slots, n, 1);
     cardmatch_set_mic_mute(c, 0);
 
-    /* THE NUMBER THAT DECIDES THE WHOLE APPROACH is `muted`. It must be
-     * exactly 0. And `live` must never be 0, or a silent room is
-     * indistinguishable from a muted microphone. */
-    ctl_log(c, "cardmatch: card=%d node=%s live_peak=%d muted_peak=%d read_ms=%ld",
-            card, c->dev.path, live, muted, live_ms);
-    alsa_log("[cardmatch]", "card=%d node=%s live_peak=%d muted_peak=%d read_ms=%ld",
-             card, c->dev.path, live, muted, live_ms);
+    /* The answer: was speaking, now exactly silent. Both halves matter -- a
+     * card that read zero all along proves nothing, and a card still making
+     * noise is somebody else's. */
+    int answer = -1, ambiguous = 0;
+    for (int i = 0; i < n; ++i) {
+        if (slots[i].peak_live > 0 && slots[i].peak_muted == 0) {
+            if (answer >= 0) ambiguous = 1;
+            else answer = slots[i].card;
+        }
+    }
 
-    close(fd);
+    /* NO "IF ONLY ONE CARD IS FREE IT MUST BE OURS" SHORTCUT.
+     *
+     * That was here, and it produced a confidently wrong answer in the one
+     * case that matters. Measured on C1 2026-08-09 with three controllers:
+     * the last to bridge found a single free card and was told it was its
+     * own -- but its real card had already been taken by the controller that
+     * bridged first, and the leftover belonged to someone else. The probe
+     * read `card4=51/71`: nothing fell silent, which was the truth, and the
+     * shortcut overrode it.
+     *
+     * THE LAST FREE CARD IS NOT YOURS. It is whatever nobody else grabbed.
+     *
+     * So a silence that never came is reported as no answer. "My card is
+     * taken" is real information -- it is the case where the right move is to
+     * take our own card back rather than accept the leftover. */
+
+    char detail[192];
+    int o = 0;
+    for (int i = 0; i < n && o < (int)sizeof(detail) - 1; ++i) {
+        o += snprintf(detail + o, sizeof(detail) - (size_t)o, "card%d=%d/%d ",
+                      slots[i].card, slots[i].peak_live, slots[i].peak_muted);
+    }
+
+    if (answer < 0 && !ambiguous) {
+        ctl_log(c, "cardmatch: no card fell silent -- our own card is taken");
+    }
+
+    if (ambiguous) {
+        /* More than one card fell silent. Something else muted at the same
+         * moment -- the TV's own kernel driver also writes this, and it is a
+         * writer we cannot see. Say so rather than pick one. */
+        ctl_log(c, "cardmatch: AMBIGUOUS -- more than one card fell silent");
+        answer = -1;
+    }
+
+    alsa_log("[cardmatch]", "node=%s answer=%d scan=%d %s%s",
+             c->dev.path, answer, scan_would_pick, detail,
+             (answer >= 0 && answer != scan_would_pick) ? "<-- SCAN WOULD BE WRONG" : "");
+    ctl_log(c, "cardmatch: answer=%d scan_would_pick=%d %s",
+            answer, scan_would_pick, detail);
+
+    for (int i = 0; i < n; ++i) close(slots[i].fd);
+    pthread_mutex_unlock(&g_cardmatch_lock);
 }
