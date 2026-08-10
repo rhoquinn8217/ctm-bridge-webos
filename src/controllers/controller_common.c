@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -1702,6 +1703,7 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
  * cannot collide with it. Included rather than compiled separately because
  * ctm_controller_t is defined here and opaque everywhere else. */
 #include "ctm_cardmatch.inl"
+#include "ctm_feedback.inl"
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
                      const uint8_t *report_desc, uint32_t report_desc_len,
@@ -1779,12 +1781,6 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * the host saw audio where it expected a hello, and EVERY SESSION DIED
      * (host config receive failed / bridge hello failed). The handshake above
      * has returned by this point, so the link is up. */
-    /* Measure whether a muted microphone can be told from a live one, before
-     * capture takes the card. Logs and acts on nothing -- see the file. */
-    cardmatch_identify(c);
-
-    mic_capture_start(c);
-
     c->input_thread_started = 0;
     if (pthread_create(&c->input_thread, NULL, input_thread_main, c) == 0) {
         c->input_thread_started = 1;
@@ -1795,6 +1791,20 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         c->comp_count = 0;
         return;
     }
+    /* Buttons work from the line above. Everything below takes about three
+     * seconds, and it is deliberately after the input thread rather than
+     * before it: the card probe used to run first, so a controller was
+     * unresponsive while its microphone was being identified. Audio can wait
+     * three seconds; the sticks cannot.
+     *
+     * Order here is forced, not preference. The probe moves the speaker onto
+     * the right card, so anything that makes a sound has to come after it or
+     * it plays from whichever controller the scan happened to pick -- the
+     * fault this all exists to fix. */
+    cardmatch_identify(c);
+    mic_capture_start(c);
+    feedback_play_connected(c);
+
     c->comp_run = 1;
     if (c->ops->composite) {
         for (int i = 0; i < c->comp_count; ++i) {
