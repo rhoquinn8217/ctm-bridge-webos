@@ -49,6 +49,27 @@ static uint64_t ds5_now_ms(void)
 }
 
 /* Map an audio mode to the DS5 BT 0x36 sub-block header byte. */
+/* Speaker routing WITH echo cancellation, for the Bluetooth report's audio
+ * control byte.
+ *
+ * WHY THE `0x0c` MATTERS, and it is not cosmetic: the DualSense suppresses its
+ * own speaker whenever echo cancellation is off, because the microphone sits
+ * beside the speaker and would feed back. Routing alone (`0x30`) produces a
+ * whisper; routing plus cancellation (`0x3c`) produces full output.
+ *
+ * This was `0x30` here, which is the same fault the wired path had until
+ * 2026-07-22. Measured then on C1 with an 800 Hz tone and no game running:
+ * `0x55`/`0x30` a whisper, `0x64`/`0x30` 80 dB, `0x64`/`0x3c` 94 dB. A game
+ * launch repaired it because games send `0x3c` themselves -- which is exactly
+ * the symptom seen on Bluetooth on 2026-08-11: quiet at bridging, silent from
+ * a browser, correct once a game had started, and correct afterwards.
+ *
+ * Same two bits, same fix, the other transport. */
+#define DS5_BT_AUDIO_OUT_PATH_SPEAKER  0x30
+#define DS5_BT_AUDIO_ECHO_NOISE_CANCEL 0x0c
+#define DS5_BT_AUDIO_SPEAKER_ON \
+    (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_NOISE_CANCEL)
+
 static uint8_t ds5_audio_block_for_mode(tv_bridge_audio_mode_t mode)
 {
     switch (mode) {
@@ -96,6 +117,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 
     if (settings->audio_mode == TV_BRIDGE_AUDIO_AUTO) {
         uint8_t auto_latency = (uint8_t)settings->latency_ms;
+        uint8_t auto_speaker = ds5_volume_raw_byte(settings->speaker_volume_percent);
         if (auto_latency < 20) auto_latency = 20;
         while (pos + 2 <= limit) {
             uint8_t block_id = data[pos];
@@ -109,6 +131,37 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                         data[pos + i] = auto_latency;
                         patched = 1;
                     }
+                }
+            } else if (block_id == 0x90 && payload_len >= 8) {
+                /* AUTO MEANS "FOLLOW THE HOST" -- AND THE HOST ASKS FOR
+                 * NOTHING.
+                 *
+                 * Measured on C3, 2026-08-11, build 78: every report arrives
+                 * with speaker volume 0 and audio control 0. So AUTO passed
+                 * zeros straight through and the controller was SILENT -- in
+                 * the DEFAULT mode, which is the first thing a user meets.
+                 *
+                 * And nothing upstream ever fills them in. The listener only
+                 * learns a speaker volume when Windows sends a USB Audio
+                 * Class volume message, which does not happen unless someone
+                 * moves that device's slider in Windows -- and doing so was
+                 * measured to have no effect here anyway.
+                 *
+                 * So: when the host has asked for nothing, supply the same
+                 * defaults the wired path uses. When it HAS asked for
+                 * something, leave it entirely alone -- that is what AUTO is
+                 * for, and this must not become a second Speaker mode.
+                 *
+                 * Only the bits actually written are claimed. Claiming a
+                 * field and then leaving the host's zero in it is how the
+                 * headphone route ends up muted -- the documented trap from
+                 * the wired investigation: "set the audio allow bits that
+                 * match the bytes being patched". */
+                if (data[pos + 7] == 0 && data[pos + 9] == 0) {
+                    data[pos + 2] = (uint8_t)(data[pos + 2] | 0xa0u);  /* allow speaker vol + audio ctrl */
+                    data[pos + 7] = auto_speaker;
+                    data[pos + 9] = DS5_BT_AUDIO_SPEAKER_ON;
+                    patched = 1;
                 }
             }
             pos += block_len;
@@ -132,16 +185,46 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             break;
         case TV_BRIDGE_AUDIO_SPEAKER:
             target_speaker_volume = speaker_volume;
-            target_audio_flags = 0x30;
+            target_audio_flags = DS5_BT_AUDIO_SPEAKER_ON;
             break;
         case TV_BRIDGE_AUDIO_BOTH:
             target_headset_volume = headset_volume;
             target_speaker_volume = speaker_volume;
-            target_audio_flags = 0x30;
+            target_audio_flags = DS5_BT_AUDIO_SPEAKER_ON;
             break;
         case TV_BRIDGE_AUDIO_OFF:
         default:
             break;
+    }
+
+    /* WHAT BLOCKS ACTUALLY ARRIVE.
+     *
+     * The audio patch below edits block 0x90, and the logging inside it never
+     * produced a single line on a Bluetooth ds5 (C3, build 77) -- so either
+     * that block does not arrive, or this loop does not reach it. Either way
+     * the patch has been editing something that is not there.
+     *
+     * One line per report id per session: enough to see the shape, quiet
+     * enough not to bury a 400 Hz stream. */
+    {
+        static unsigned char s_reported[256];
+        if (!s_reported[data[0]]) {
+            s_reported[data[0]] = 1;
+            char ids[128];
+            int n = 0;
+            size_t p2 = 2;
+            while (p2 + 2 <= limit && n < (int)sizeof(ids) - 8) {
+                uint8_t bid = data[p2];
+                size_t plen = data[p2 + 1];
+                if (bid == 0 && plen == 0) break;
+                if (plen + 2 > limit - p2) break;
+                n += snprintf(ids + n, sizeof(ids) - n, " %02x/%zu", bid, plen);
+                p2 += plen + 2;
+            }
+            ids[n] = 0;
+            ctl_log(c, "bt out report %02x len=%zu blocks:%s", data[0], len,
+                    n ? ids : " (none parsed)");
+        }
     }
 
     while (pos + 2 <= limit) {
@@ -152,6 +235,31 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_len > limit - pos) break;
 
         if (block_id == 0x90 && payload_len >= 8) {
+            /* WHAT THE HOST ASKED FOR, BEFORE WE TOUCH IT.
+             *
+             * The wired attenuation bug was solved by capturing the reports a
+             * GAME sends and diffing them against ours -- the difference was
+             * one byte. Nothing equivalent has ever been captured on
+             * Bluetooth, so this is the same instrument on the other
+             * transport.
+             *
+             * The question it answers: our patch OVERWRITES these fields. In
+             * AUTO mode it does not run and game audio works; in Speaker mode
+             * it does run and there is no sound. So the patch may be
+             * clobbering values the host had right.
+             *
+             * Logged only when we are about to change something, and only
+             * every 64th such report, so a 400 Hz stream does not bury the
+             * log. */
+            static unsigned s_seen;
+            if ((s_seen++ % 64) == 0) {
+                ctl_log(c, "bt audio in: hdr=%02x %02x vol_hs=%02x vol_spk=%02x flags=%02x"
+                           "  ours: vol_hs=%02x vol_spk=%02x flags=%02x mode=%d",
+                        data[pos + 2], data[pos + 3],
+                        data[pos + 6], data[pos + 7], data[pos + 9],
+                        target_headset_volume, target_speaker_volume,
+                        target_audio_flags, (int)settings->audio_mode);
+            }
             /* Only patch confirmed audio fields; preserve effect/rumble bytes. */
             if ((data[pos + 2] & 0xb0u) != 0xb0u) {
                 data[pos + 2] = (uint8_t)(data[pos + 2] | 0xb0u);
@@ -241,24 +349,12 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
      * nothing to do; on a cable neither is true and both are silent without
      * this.
      *
-     * THE SPEAKER IS NO LONGER OPENED HERE.
-     *
-     * It was, and that is what crossed two controllers' cards. This runs
-     * before anything knows which card belongs to which controller, so each
-     * grabbed whichever was free -- and by the time the probe worked out the
-     * truth, each was holding the card the other needed. Neither could swap:
-     *     answer=3 ... card=3 not available, keeping fd=77
-     *     answer=2 ... card=2 not available, keeping fd=78
-     *
-     * The open happens once now, after identification, on the right card --
-     * see ctm_cardmatch.inl. Nothing is taken speculatively, so nothing has
-     * to be given back.
-     *
-     * The cost is that wired audio is silent for the few seconds the probe
-     * takes; chunks arriving in that window are dropped, which the write path
-     * already does when no device is open. Acceptable, because it is the
-     * moment a controller was just plugged in -- and buttons, which people do
-     * notice, work throughout. */
+     * Here rather than earlier because the HID device is already open by this
+     * point, which the settings report needs, and later would be too late:
+     * this runs before the session loop starts, so the device is ready before
+     * the first chunk can arrive. Idempotent, and safe on a reconnect. */
+    if (strcmp(ctm_controller_bus(c), "USB") == 0)
+        ctm_controller_open_alsa_playback(c);
 
     return 0;
 }

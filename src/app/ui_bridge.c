@@ -40,24 +40,36 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
     if (strcmp(kind, "ds5") == 0) {
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
-        settings.speaker_volume_percent = 0x41;
+        /* 0x64, matching the wired path, rather than the 0x41 this was.
+         *
+         * The hardware range is 0x00-0x64 and the controller is quiet at the
+         * bottom of it: measured on this fleet, anything under roughly 0x3c
+         * is inaudible across a room. 0x41 sat barely above that. The wired
+         * path settled on 0x64 after measuring 94 dB against 80 dB at 0x64
+         * with echo cancel off, and games send 0x64 themselves.
+         *
+         * Nothing on the host side ever corrects a low value: the listener
+         * only learns a speaker volume when Windows sends a USB Audio Class
+         * volume message, which does not happen unless someone moves that
+         * device's slider. So whatever is set here is what the user hears. */
+        settings.speaker_volume_percent = 0x64;
     } else if (strcmp(kind, "ds5_usb") == 0) {
         /* Wired: the host owns the output reports, so the audio fields are
          * never patched here. Volume defaults match the BT arm so behaviour
          * is unchanged for a listener that does not distinguish the two. */
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
-        settings.speaker_volume_percent = 0x41;
+        settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strcmp(kind, "ds5e") == 0) {
         /* Edge over BT: a DualSense as far as reports go, so the same values. */
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
-        settings.speaker_volume_percent = 0x41;
+        settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strcmp(kind, "ds5e_usb") == 0) {
         /* Edge wired: as ds5_usb -- the host owns the output reports. */
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
-        settings.speaker_volume_percent = 0x41;
+        settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strcmp(kind, "ds4") == 0) {
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
