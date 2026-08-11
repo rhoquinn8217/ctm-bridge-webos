@@ -36,7 +36,7 @@ static pthread_t g_gesture_thread;
 static volatile bool g_gesture_worker_running;
 static bool g_gesture_pending;
 
-/* When the worker entered its agent probe, in monotonic microseconds; 0 when
+/* When the PROBE THREAD entered its agent probe, in monotonic microseconds; 0 when
  * it is not in one.
  *
  * Written by the worker, read by whichever controller thread raises a request.
@@ -105,27 +105,9 @@ static void *gesture_worker(void *arg)
             break;
         }
 
-        /* Woke on the timer: refresh the agent's reachability off the
-         * interface thread, so asking never costs the UI anything. */
+        /* Woke on the timer with nothing to do. The agent probe used to run
+         * here and no longer does -- see the probe thread below. */
         if (!gesture) {
-            if (g_agent_host[0]) {
-                char probe[256];
-                /* Marked for the whole call, so a request raised while this is
-                 * running can say so. Logged afterwards only when it was slow:
-                 * this runs every few seconds, and a line each time would bury
-                 * the gesture lines this file exists for. */
-                uint64_t t0 = probe_now_us();
-                g_probe_entered_us = t0;
-                g_agent_online =
-                    send_agent_command("STATUS", probe, sizeof(probe)) == 0;
-                g_probe_entered_us = 0;
-                uint64_t took_ms = (probe_now_us() - t0) / 1000;
-                if (took_ms > 250) {
-                    ctm_gesture_log(NULL, "agent probe took %llums (%s)",
-                                    (unsigned long long)took_ms,
-                                    g_agent_online ? "online" : "OFFLINE");
-                }
-            }
             continue;
         }
 
@@ -160,6 +142,68 @@ static void *gesture_worker(void *arg)
 }
 
 /* Start the gesture worker once. When: first plug of a session. */
+/* --- the agent probe, on a thread of its own ------------------------------
+ *
+ * WHAT IT IS FOR, and it is less than it looks: this keeps ONE FLAG honest --
+ * whether the host is answering -- and that flag has exactly one visible
+ * consumer, the overlay's header. Plugging does not depend on it: those paths
+ * look for the agent themselves and then actually try to connect, so a dead
+ * listener is reported by the attempt rather than by the flag.
+ *
+ * WHY IT IS NOT SIMPLY DELETED: it is the ONLY thing that ever notices the
+ * host has gone away. Discovery returns immediately once the address is known
+ * without touching the network, so the UI timer that calls it does nothing
+ * during a stream. Remove this and the header would read "online" forever,
+ * including after the listener dies.
+ *
+ * WHY IT MOVED OFF THE GESTURE WORKER: the call takes up to a second, and the
+ * worker is what services unplugs. Measured on a remote link 2026-08-10:
+ * seven consecutive failures at ~1030 ms each, while a stream played
+ * perfectly over the same connection. Every one of those was a second in
+ * which an unplug request would have sat unserviced.
+ *
+ * The one-second ceiling is not ours and does not need adding: Linux applies
+ * SO_SNDTIMEO to connect(), which is why every failure measured 1003-1035 ms
+ * rather than the minutes an unbounded connect would take. Earlier notes in
+ * this project describing the call as unbounded are wrong.
+ *
+ * On its own thread rather than the interface thread, for the reason the
+ * original comment gave: asking must never cost the UI anything. */
+static pthread_t g_probe_thread;
+static volatile bool g_probe_running;
+
+#define AGENT_PROBE_INTERVAL_US 4000000   /* every 4 seconds */
+
+static void *agent_probe_thread(void *arg)
+{
+    (void)arg;
+    ctm_gesture_log(NULL, "agent probe thread started");
+    while (g_running) {
+        if (g_agent_host[0]) {
+            char probe[256];
+            /* Marked for the whole call, so a gesture raised while this runs
+             * can say so. Logged afterwards only when it was slow: this runs
+             * every few seconds, and a line each time would bury the gesture
+             * lines this file exists for. */
+            uint64_t t0 = probe_now_us();
+            g_probe_entered_us = t0;
+            g_agent_online =
+                send_agent_command("STATUS", probe, sizeof(probe)) == 0;
+            g_probe_entered_us = 0;
+            uint64_t took_ms = (probe_now_us() - t0) / 1000;
+            if (took_ms > 250) {
+                ctm_gesture_log(NULL, "agent probe took %llums (%s)",
+                                (unsigned long long)took_ms,
+                                g_agent_online ? "online" : "OFFLINE");
+            }
+        }
+        usleep(AGENT_PROBE_INTERVAL_US);
+    }
+    g_probe_running = false;
+    ctm_gesture_log(NULL, "agent probe thread exiting");
+    return NULL;
+}
+
 void ctm_bridge_gesture_init(void)
 {
     if (g_gesture_worker_running) {
@@ -179,6 +223,18 @@ void ctm_bridge_gesture_init(void)
     } else {
         g_gesture_worker_running = false;
         ctm_gesture_log(NULL, "worker could not be started");
+    }
+
+    /* Started alongside, and separately: a probe that cannot start must not
+     * stop unplugs from working. */
+    if (!g_probe_running) {
+        g_probe_running = true;
+        if (pthread_create(&g_probe_thread, NULL, agent_probe_thread, NULL) == 0) {
+            pthread_detach(g_probe_thread);
+        } else {
+            g_probe_running = false;
+            ctm_gesture_log(NULL, "agent probe thread could not be started");
+        }
     }
 }
 

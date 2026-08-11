@@ -170,6 +170,50 @@ static int cardmatch_open_card(int card)
     return fd;
 }
 
+/* Open ONE named card for playback, without touching the controller's current
+ * device. The ordinary opener refuses when a device is already open, which is
+ * exactly the case here: the point is to have the replacement in hand before
+ * letting go of what we have. */
+static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        ctl_log(c, "cardmatch: card=%d playback busy or absent (errno=%d)",
+                card, errno);
+        return -1;
+    }
+
+    struct snd_pcm_hw_params hw;
+    memset(&hw, 0, sizeof(hw));
+    for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+        hw.intervals[i].min = 0;
+        hw.intervals[i].max = 0xFFFFFFFFU;
+    }
+    for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+        memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+    memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+    hw.masks[0].bits[3 / 32] = 1u << (3 % 32);   /* RW_INTERLEAVED */
+    memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+    hw.masks[1].bits[2 / 32] = 1u << (2 % 32);   /* S16_LE */
+    hw.intervals[2].min = hw.intervals[2].max = 4;   /* speaker + haptics */
+    hw.intervals[2].integer = 1;
+    hw.intervals[3].min = hw.intervals[3].max = MIC_CAP_RATE;
+    hw.intervals[3].integer = 1;
+    hw.intervals[9].min = 960;
+    hw.intervals[9].max = 0xFFFFFFFFU;
+    hw.intervals[9].integer = 0;
+
+    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0 ||
+        ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
+        ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 /* Does this card belong to a DualSense of any kind? Name only -- used to
  * gather candidates, never to choose between them. */
 static int cardmatch_is_dualsense(int card)
@@ -255,8 +299,8 @@ static void cardmatch_identify(ctm_controller_t *c)
 {
     if (!c || strcmp(ctm_controller_bus(c), "USB") != 0) return;
 
-    /* Held for the whole probe -- see the note at the lock. */
-    pthread_mutex_lock(&g_cardmatch_lock);
+    /* The lock is held by the CALLER, across this, the capture start and the
+     * tone -- see the note at that call. */
 
     cardmatch_slot_t slots[CARDMATCH_MAX_CARDS];
     int n = 0;
@@ -273,7 +317,6 @@ static void cardmatch_identify(ctm_controller_t *c)
 
     if (n == 0) {
         ctl_log(c, "cardmatch: no free DualSense card to identify");
-        pthread_mutex_unlock(&g_cardmatch_lock);
         return;
     }
 
@@ -367,18 +410,52 @@ static void cardmatch_identify(ctm_controller_t *c)
      * card is currently held. Knowing that would mean threading a card number
      * back out of upstream's opener; reopening a device that was already
      * correct costs a few milliseconds and cannot be wrong. */
-    if (answer >= 0) {
-        if (c->alsa_fd >= 0) {
-            close(c->alsa_fd);
-            c->alsa_fd = -1;
-        }
-        /* The ordinary opener, which now honours matched_card. Reusing it
-         * rather than opening the device here keeps the settings report in
-         * one place -- a fresh handle knows nothing about volume or routing,
-         * and that report is what puts them back. */
+    /* OPEN THE SPEAKER HERE, and nowhere earlier.
+     *
+     * This is the first moment the right card is known. Opening at plug time
+     * meant grabbing whatever was free and swapping later, which crossed two
+     * controllers so thoroughly that neither could get its own card back.
+     *
+     * `matched_card` is already set above, so the ordinary opener picks the
+     * right card by itself -- and it is the ordinary opener deliberately, so
+     * the settings report that follows a fresh handle stays in one place. */
+    if (c->alsa_fd < 0) {
         ctm_controller_open_alsa_playback(c);
-        ctl_log(c, "cardmatch: speaker reopened on card=%d (fd=%d)",
+        ctl_log(c, "cardmatch: speaker opened on card=%d (fd=%d)",
                 answer, c->alsa_fd);
+    } else if (answer >= 0) {
+        /* OPEN THE NEW CARD BEFORE CLOSING THE OLD ONE.
+         *
+         * This closed first, and on 2026-08-10 that cost a controller its
+         * speaker for a whole session: the card it had been identified as
+         * owning was still held by the OTHER controller, which had not yet
+         * moved off it. The open failed, the working device was already
+         * gone, and the log read:
+         *     speaker closed (moving to card=3), fd=78
+         *     speaker reopened on card=3 (fd=-1)
+         *     connected -- no audio device, nothing played
+         * No game audio, no haptics, no tone, for the rest of the session.
+         *
+         * Now the wrong card is kept when the right one cannot be taken.
+         * That is still wrong -- audio comes from another controller -- but
+         * it is recoverable and audible, where nothing is neither. */
+        int fresh = cardmatch_open_playback_card(c, answer);
+        if (fresh < 0) {
+            ctl_log(c, "cardmatch: card=%d not available, keeping fd=%d",
+                    answer, c->alsa_fd);
+        } else {
+            if (c->alsa_fd >= 0) {
+                ctl_log(c, "alsa: speaker closed (moved to card=%d), fd=%d",
+                        answer, c->alsa_fd);
+                close(c->alsa_fd);
+            }
+            c->alsa_fd = fresh;
+            ctl_log(c, "cardmatch: speaker reopened on card=%d (fd=%d)",
+                    answer, c->alsa_fd);
+            /* A fresh handle knows nothing about volume or routing, so the
+             * settings report has to go again -- the same thing the ordinary
+             * opener does after opening. */
+            ctm_controller_send_speaker_init(c);
+        }
     }
-    pthread_mutex_unlock(&g_cardmatch_lock);
 }

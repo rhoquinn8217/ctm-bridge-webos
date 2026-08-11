@@ -227,6 +227,30 @@ static bool ds5e_matches(const ctm_controller_dev_t *dev)
  *
  * Included rather than compiled separately because it is the on_input_report
  * hook for this controller type and reaches its private state. */
+/* on_plug_init: open the wired audio path. When: once, immediately after the
+ * host accepts the device. */
+static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
+{
+    (void)t;
+
+    /* On a cable, open the controller's own speaker and haptics.
+     *
+     * Gated on how the controller is attached, not on a setting. Over
+     * Bluetooth the controller's audio device is not ours to open and the
+     * haptics already travel inside the reports themselves, so there is
+     * nothing to do; on a cable neither is true and both are silent without
+     * this.
+     *
+     * Here rather than earlier because the HID device is already open by this
+     * point, which the settings report needs, and later would be too late:
+     * this runs before the session loop starts, so the device is ready before
+     * the first chunk can arrive. Idempotent, and safe on a reconnect. */
+    if (strcmp(ctm_controller_bus(c), "USB") == 0)
+        ctm_controller_open_alsa_playback(c);
+
+    return 0;
+}
+
 #include "ctm_gesture_chord.inl"
 
 const ctm_controller_ops_t ctm_controller_ds5_ops = {

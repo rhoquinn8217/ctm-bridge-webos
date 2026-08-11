@@ -427,6 +427,7 @@ static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t le
 
     alsa_log("[alsa-selfheal]", "reason=%s consec_fail=%d retry_streak=%d, reopening ALSA device",
              heal_reason, c->alsa_consec_fail, c->alsa_retry_streak);
+    ctl_log(c, "alsa: speaker closed (self-heal reopen), fd=%d", c->alsa_fd);
     close(c->alsa_fd);
     c->alsa_fd = -1;
     ctm_controller_open_alsa_playback(c);
@@ -1702,6 +1703,11 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
  * gap in the wired support, so an upstream change to the Bluetooth path
  * cannot collide with it. Included rather than compiled separately because
  * ctm_controller_t is defined here and opaque everywhere else. */
+/* Defined below, after the ALSA opener it belongs with. Declared here so the
+ * card-matching reopen can send the same settings report rather than keeping
+ * a second copy that could drift. */
+void ctm_controller_send_speaker_init(ctm_controller_t *c);
+
 #include "ctm_cardmatch.inl"
 #include "ctm_feedback.inl"
 
@@ -1801,9 +1807,42 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * the right card, so anything that makes a sound has to come after it or
      * it plays from whichever controller the scan happened to pick -- the
      * fault this all exists to fix. */
+    /* DELIBERATELY NOT SERIALISED BEYOND THE PROBE.
+     *
+     * Two controllers bridged a second apart lose tones, and once left one
+     * with no audio device at all. Wrapping all of this in the probe's lock
+     * would very likely hide that -- which is exactly why it is not done yet.
+     * A guard that works by accident cannot be told from one that works for
+     * the right reason until it fails somewhere nobody expected.
+     *
+     * The speaker's closes are logged now. Reproduce the fault first, read
+     * what actually closed the device, THEN decide what the guard should be.
+     * The lock is one line away when that is answered. */
+    /* ONE CONTROLLER SETTLES ITS AUDIO AT A TIME.
+     *
+     * The probe alone was serialised; everything after it was not -- the
+     * speaker moving to the identified card, capture taking that card, and
+     * the tone played through it. Two controllers bridged within a second of
+     * each other interleaved those, and one ended up holding a card the other
+     * had not yet released.
+     *
+     * The open-before-close change above means that can no longer cost a
+     * controller its speaker. This makes it CORRECT rather than merely safe:
+     * the second controller waits for the first to finish, then takes its own
+     * card properly instead of keeping someone else's.
+     *
+     * A lock rather than a retry deliberately. A retry needs a count and a
+     * delay, both guesses, and it can still give up and leave the audio on
+     * the wrong controller. A lock waits exactly as long as necessary.
+     *
+     * Costs the second controller a few seconds before its audio settles --
+     * its buttons already work by then. rhoquinn8217: "sometimes computers need to
+     * think more", which is exactly what is happening. */
+    pthread_mutex_lock(&g_cardmatch_lock);
     cardmatch_identify(c);
     mic_capture_start(c);
     feedback_play_connected(c);
+    pthread_mutex_unlock(&g_cardmatch_lock);
 
     c->comp_run = 1;
     if (c->ops->composite) {
@@ -2025,6 +2064,25 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
 /* Stop bridging: signal stop, wake + join the session thread, then close the
  * HID fd, transport, evdev grabs, and log. When: the user clicks Plug out, or
  * the device disconnects. */
+/* Send the speaker's settings report. Called after ANY fresh handle: a new
+ * one knows nothing about volume or routing, and this is what puts them back.
+ * Split out so the card-matching reopen sends exactly the same thing rather
+ * than a second copy that could drift. */
+void ctm_controller_send_speaker_init(ctm_controller_t *c)
+{
+    if (!c) return;
+    uint8_t spk_init[DS5_OUT_REPORT_LEN] = {0};
+    spk_init[0]                      = DS5_OUT_REPORT_ID;
+    spk_init[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
+                                       DS5_F0_ALLOW_AUDIO_CONTROL;
+    spk_init[DS5_IDX_VALID_FLAG1]    = 0x00;  /* claim nothing else */
+    spk_init[DS5_IDX_SPEAKER_VOLUME] = c->audio_spk_vol;
+    spk_init[DS5_IDX_AUDIO_CONTROL]  = c->audio_control;
+    int svrc = hid_write_report(c, spk_init, sizeof(spk_init));
+    ctl_log(c, "alsa: speaker init (merged, %zu bytes) vol=0x%02x ctrl=0x%02x rc=%d hid_fd=%d",
+            sizeof(spk_init), c->audio_spk_vol, c->audio_control, svrc, c->hid_fd);
+}
+
 void ctm_controller_open_alsa_playback(ctm_controller_t *c)
 {
     if (!c || c->alsa_fd >= 0) return;
@@ -2058,16 +2116,7 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
      *
      * Length comes from the array, not a hand-typed run of zeros: the old
      * literals were 49 bytes where every host report on the wire is 48. */
-    uint8_t spk_init[DS5_OUT_REPORT_LEN] = {0};
-    spk_init[0]                      = DS5_OUT_REPORT_ID;
-    spk_init[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
-                                       DS5_F0_ALLOW_AUDIO_CONTROL;
-    spk_init[DS5_IDX_VALID_FLAG1]    = 0x00;  /* claim nothing else */
-    spk_init[DS5_IDX_SPEAKER_VOLUME] = c->audio_spk_vol;
-    spk_init[DS5_IDX_AUDIO_CONTROL]  = c->audio_control;
-    int svrc = hid_write_report(c, spk_init, sizeof(spk_init));
-    ctl_log(c, "alsa: speaker init (merged, %zu bytes) vol=0x%02x ctrl=0x%02x rc=%d hid_fd=%d",
-            sizeof(spk_init), c->audio_spk_vol, c->audio_control, svrc, c->hid_fd);
+    ctm_controller_send_speaker_init(c);
 
     /* ds5-aurora fires an open-tone burst here. NOT PORTED: it is a recorded
      * DECISIVE NEGATIVE -- tested on both fault classes with clean deliveries,
@@ -2099,7 +2148,11 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
     mic_capture_stop(c);
-    if (c->alsa_fd >= 0) { close(c->alsa_fd); c->alsa_fd = -1; }
+    if (c->alsa_fd >= 0) {
+        ctl_log(c, "alsa: speaker closed (plug out), fd=%d", c->alsa_fd);
+        close(c->alsa_fd);
+        c->alsa_fd = -1;
+    }
     c->alsa_consec_fail = 0;
     c->alsa_retry_streak = 0;
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }

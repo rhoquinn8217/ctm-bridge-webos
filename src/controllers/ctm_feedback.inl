@@ -93,8 +93,34 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what)
 
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
-    ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d",
-            what, beeps, c->matched_card);
+
+    /* WAIT FOR IT TO ACTUALLY COME OUT.
+     *
+     * Writing only hands the samples to the device; the sound emerges over
+     * the next tenth of a second. On an unplug the teardown follows
+     * immediately and CLOSES the device, throwing away whatever is still
+     * queued -- so the tone was a race, and it lost about half the time.
+     * Measured on C1 2026-08-10: two controllers unplugged, both tones
+     * written and logged, only one heard.
+     *
+     * A signal that fires most of the time is worse than none, because it
+     * teaches you to distrust it.
+     *
+     * DRAIN WAS TRIED AND MADE IT WORSE -- build 69 played NOTHING at all,
+     * where the racy version had at least played about half the time. This
+     * device is opened non-blocking, and on a non-blocking handle a drain
+     * request is not reliably "wait for the sound to finish"; it appears to
+     * discard instead. Exactly the wrong outcome, achieved deliberately.
+     *
+     * So: just wait. Unconditional, predictable, and long enough for the tone
+     * plus a margin. Nothing here needs to be clever.
+     *
+     * The drain result is still logged, once, because knowing what this
+     * device does with the request is worth more than the guess above. */
+    struct timespec ts = {0, (long)(FEEDBACK_MS + 40) * 1000000L};
+    nanosleep(&ts, NULL);
+    ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms",
+            what, beeps, c->matched_card, FEEDBACK_MS + 40);
 }
 
 /* Bridged. */
