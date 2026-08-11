@@ -197,36 +197,6 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             break;
     }
 
-    /* WHAT BLOCKS ACTUALLY ARRIVE.
-     *
-     * The audio patch below edits block 0x90, and the logging inside it never
-     * produced a single line on a Bluetooth ds5 (C3, build 77) -- so either
-     * that block does not arrive, or this loop does not reach it. Either way
-     * the patch has been editing something that is not there.
-     *
-     * One line per report id per session: enough to see the shape, quiet
-     * enough not to bury a 400 Hz stream. */
-    {
-        static unsigned char s_reported[256];
-        if (!s_reported[data[0]]) {
-            s_reported[data[0]] = 1;
-            char ids[128];
-            int n = 0;
-            size_t p2 = 2;
-            while (p2 + 2 <= limit && n < (int)sizeof(ids) - 8) {
-                uint8_t bid = data[p2];
-                size_t plen = data[p2 + 1];
-                if (bid == 0 && plen == 0) break;
-                if (plen + 2 > limit - p2) break;
-                n += snprintf(ids + n, sizeof(ids) - n, " %02x/%zu", bid, plen);
-                p2 += plen + 2;
-            }
-            ids[n] = 0;
-            ctl_log(c, "bt out report %02x len=%zu blocks:%s", data[0], len,
-                    n ? ids : " (none parsed)");
-        }
-    }
-
     while (pos + 2 <= limit) {
         uint8_t block_id = data[pos];
         size_t payload_len = data[pos + 1];
@@ -235,31 +205,19 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_len > limit - pos) break;
 
         if (block_id == 0x90 && payload_len >= 8) {
-            /* WHAT THE HOST ASKED FOR, BEFORE WE TOUCH IT.
+            /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.
              *
-             * The wired attenuation bug was solved by capturing the reports a
-             * GAME sends and diffing them against ours -- the difference was
-             * one byte. Nothing equivalent has ever been captured on
-             * Bluetooth, so this is the same instrument on the other
-             * transport.
+             * Recorded because two builds of logging were spent finding it,
+             * and the logging is gone:
+             *   - This block DOES arrive. An earlier reading of the evidence
+             *     said it did not; that was wrong.
+             *   - THE HOST ASKS FOR NOTHING. Every report carried speaker
+             *     volume 0, headset volume 0 and audio control 0. Whatever
+             *     the controller ends up playing at, this side chose it.
              *
-             * The question it answers: our patch OVERWRITES these fields. In
-             * AUTO mode it does not run and game audio works; in Speaker mode
-             * it does run and there is no sound. So the patch may be
-             * clobbering values the host had right.
-             *
-             * Logged only when we are about to change something, and only
-             * every 64th such report, so a 400 Hz stream does not bury the
-             * log. */
-            static unsigned s_seen;
-            if ((s_seen++ % 64) == 0) {
-                ctl_log(c, "bt audio in: hdr=%02x %02x vol_hs=%02x vol_spk=%02x flags=%02x"
-                           "  ours: vol_hs=%02x vol_spk=%02x flags=%02x mode=%d",
-                        data[pos + 2], data[pos + 3],
-                        data[pos + 6], data[pos + 7], data[pos + 9],
-                        target_headset_volume, target_speaker_volume,
-                        target_audio_flags, (int)settings->audio_mode);
-            }
+             * ⚠️ IF THIS TURNS OUT NOT TO BE WHERE AUDIO SETTINGS FLOW,
+             * DELETE THIS COMMENT. A note in the wrong place is worse than
+             * none: it will be read as fact by whoever comes next. */
             /* Only patch confirmed audio fields; preserve effect/rumble bytes. */
             if ((data[pos + 2] & 0xb0u) != 0xb0u) {
                 data[pos + 2] = (uint8_t)(data[pos + 2] | 0xb0u);
