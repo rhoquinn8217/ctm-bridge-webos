@@ -241,12 +241,24 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
      * nothing to do; on a cable neither is true and both are silent without
      * this.
      *
-     * Here rather than earlier because the HID device is already open by this
-     * point, which the settings report needs, and later would be too late:
-     * this runs before the session loop starts, so the device is ready before
-     * the first chunk can arrive. Idempotent, and safe on a reconnect. */
-    if (strcmp(ctm_controller_bus(c), "USB") == 0)
-        ctm_controller_open_alsa_playback(c);
+     * THE SPEAKER IS NO LONGER OPENED HERE.
+     *
+     * It was, and that is what crossed two controllers' cards. This runs
+     * before anything knows which card belongs to which controller, so each
+     * grabbed whichever was free -- and by the time the probe worked out the
+     * truth, each was holding the card the other needed. Neither could swap:
+     *     answer=3 ... card=3 not available, keeping fd=77
+     *     answer=2 ... card=2 not available, keeping fd=78
+     *
+     * The open happens once now, after identification, on the right card --
+     * see ctm_cardmatch.inl. Nothing is taken speculatively, so nothing has
+     * to be given back.
+     *
+     * The cost is that wired audio is silent for the few seconds the probe
+     * takes; chunks arriving in that window are dropped, which the write path
+     * already does when no device is open. Acceptable, because it is the
+     * moment a controller was just plugged in -- and buttons, which people do
+     * notice, work throughout. */
 
     return 0;
 }
