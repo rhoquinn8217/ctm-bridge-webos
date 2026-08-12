@@ -39,6 +39,23 @@
 #define FEEDBACK_RUMBLE_HZ    60     /* low enough to be felt, not heard */
 #define FEEDBACK_MS           140
 #define FEEDBACK_GAP_MS       90     /* silence between beeps, so two read as two */
+/* How long to ask the host to keep the audio stream alive. Comfortably longer
+ * than the tone -- 14 Opus frames at Bluetooth pacing take roughly 400 ms to
+ * go out, and overshooting costs only a few silent reports. */
+#define FEEDBACK_HOLD_MS      1500
+/* Longest to hold up a teardown waiting for the tone to leave.
+ *
+ * MEASURED, not estimated. 800 ms was tried first on the assumption that 14
+ * frames at Bluetooth's ~30 ms pacing would take about 400 ms. It does not:
+ * the connect tone timed out at 800 ms and then finished shortly after, so
+ * the frames leave at roughly 60 ms each -- about 840 ms for the set, just
+ * past the old cutoff. The connect survived it because the session carries on
+ * afterwards; the unplug did not, because it tears down the moment the wait
+ * gives up.
+ *
+ * Still bounded, so a stalled link cannot hold an unplug open indefinitely,
+ * and still shorter than the hold the host was asked for. */
+#define FEEDBACK_TONE_WAIT_MS 1200
 #define FEEDBACK_TONE_LEVEL   9000   /* ~28% of full scale: audible, not harsh */
 #define FEEDBACK_RUMBLE_LEVEL 14000  /* the motors need more than the speaker */
 
@@ -51,10 +68,79 @@
  * Both envelopes fade in and out. A square-edged start makes the speaker
  * click and the motors knock, which reads as a fault rather than a
  * confirmation. */
-static void feedback_play(ctm_controller_t *c, int beeps, const char *what)
+static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out)
 {
-    if (!c || c->alsa_fd < 0) {
-        ctl_log(c, "feedback: %s -- no audio device, nothing played", what);
+    if (!c) return;
+    if (c->alsa_fd < 0) {
+        /* NO AUDIO DEVICE -- SO THIS IS BLUETOOTH.
+         *
+         * The tone cannot be generated here: the speaker rides inside the
+         * output report as Opus and nothing on this TV can encode Opus. A
+         * pre-encoded copy of the same tone is queued instead, and the report
+         * builder feeds it out one frame per report.
+         *
+         * The pulse is not queued here at all -- it goes through SDL from the
+         * app side, because the haptics block is only present in the report
+         * when the host is actually sending haptics, which is never at the
+         * moment a controller is bridged. */
+        /* Ask the host to keep emitting reports for a moment. Without this
+         * there is nothing to write the tone into: on Bluetooth the host only
+         * sends output reports while it has real audio, and at the moment a
+         * controller is bridged or released there is none.
+         *
+         * Generous rather than tight -- 14 frames at Bluetooth's pacing take
+         * roughly 400 ms of wall time to go out, and a few silent reports
+         * after the tone has finished cost nothing.
+         *
+         * Sent on EVERY confirmation, including the connect. The host used to
+         * arm this itself when a controller was bridged; asking for it makes
+         * one mechanism instead of two, and it is what lets the UNPLUG tone
+         * work at all -- the host cannot see an unplug coming. */
+        uint8_t hold[2] = { (uint8_t)(FEEDBACK_HOLD_MS & 0xff),
+                            (uint8_t)((FEEDBACK_HOLD_MS >> 8) & 0xff) };
+        (void)c_send(c, CTMB_MSG_AUDIO_HOLD, 0, 0, hold, sizeof(hold));
+        ctm_controller_tone_start(c);
+        ctl_log(c, "feedback: %s -- asked for a %d ms hold and queued the tone",
+                what, FEEDBACK_HOLD_MS);
+
+        /* WAIT FOR THE FRAMES TO GO OUT -- BUT ONLY WHERE IT IS SAFE TO.
+         *
+         * ⛔ NEVER ON THE SESSION THREAD. That thread receives reports from the
+         * host and writes them to the controller, so sleeping on it stops the
+         * very flow the frames ride on. Measured on the 32SR50F 2026-08-11:
+         * with a 1500 ms hold, waiting 800 ms here left 700 ms of hold and the
+         * tone was audible; waiting 1200 ms left 300 ms and it was silent. The
+         * longer wait made it WORSE, which is the signature of blocking the
+         * thing you are waiting for.
+         *
+         * The connect tone does not need a wait at all -- the session carries
+         * on and the frames leave on their own. The unplug tone does, because
+         * the teardown follows immediately, and it runs on the gesture worker
+         * rather than the session thread, so waiting there is free.
+         *
+         * Queuing is not sending. The frames leave one per outgoing report,
+         * and on Bluetooth those are paced -- fourteen of them take roughly
+         * 400 ms of wall time. An unplug tears the session down the moment
+         * this returns, so without the wait the tone is queued and never
+         * sent: measured on the 32SR50F 2026-08-11, "queued" with no
+         * "finished" and nothing audible.
+         *
+         * The same reason the wired path waits before teardown, and the same
+         * trade rhoquinn8217 accepted there: a guarantee of a tone is worth the delay.
+         * Longer here because Bluetooth is slower, and bounded so a stalled
+         * link cannot hold an unplug open.
+         *
+         * Polls rather than sleeping a fixed time, so a fast link is not made
+         * to wait for the slowest case. */
+        for (int waited = 0; wait_out && waited < FEEDBACK_TONE_WAIT_MS; waited += 10) {
+            if (!ctm_controller_tone_pending(c)) break;
+            struct timespec ts = {0, 10 * 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        if (wait_out && ctm_controller_tone_pending(c)) {
+            ctl_log(c, "feedback: %s -- tone did not finish within %d ms",
+                    what, FEEDBACK_TONE_WAIT_MS);
+        }
         return;
     }
 
@@ -126,7 +212,9 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what)
 /* Bridged. */
 static void feedback_play_connected(ctm_controller_t *c)
 {
-    feedback_play(c, 1, "connected");
+    /* No wait: this runs on the session thread, and the session carries on
+     * afterwards, so the frames leave on their own. */
+    feedback_play(c, 1, "connected", false);
 }
 
 /* Coming back to us.
@@ -160,5 +248,7 @@ static void feedback_play_unplugging(ctm_controller_t *c, ctm_unplug_reason_t wh
     case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
     default:                  what = "unplugging (requested)"; break;
     }
-    feedback_play(c, 1, what);
+    /* Waits: the teardown follows immediately, and this runs on the gesture
+     * worker rather than the session thread. */
+    feedback_play(c, 1, what, true);
 }

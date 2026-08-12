@@ -101,6 +101,13 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
+
+/* The confirmation tone, Bluetooth only: pre-encoded Opus handed to the
+ * report builder one frame at a time. Over a cable the tone is generated as
+ * it plays and written to the audio device instead. */
+void ctm_controller_tone_start(ctm_controller_t *c);
+bool ctm_controller_tone_pending(ctm_controller_t *c);
+int  ctm_controller_tone_take(ctm_controller_t *c, uint8_t *dst, int n);
 void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_t *out);
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out);
 void ctm_controller_destroy(ctm_controller_t *c);

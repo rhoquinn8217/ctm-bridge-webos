@@ -70,6 +70,11 @@ static uint64_t ds5_now_ms(void)
 #define DS5_BT_AUDIO_SPEAKER_ON \
     (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_NOISE_CANCEL)
 
+/* One Opus frame at the settings the tone is encoded with: 48 kHz, 10 ms,
+ * 160 kbps constant bitrate. Named here rather than including the generated
+ * blob, which this file has no other need of. */
+#define FEEDBACK_OPUS_FRAME_BYTES_EXPECTED 200
+
 static uint8_t ds5_audio_block_for_mode(tv_bridge_audio_mode_t mode)
 {
     switch (mode) {
@@ -125,6 +130,21 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             size_t block_len = payload_len + 2;
             if (block_id == 0 && payload_len == 0) break;
             if (block_len > limit - pos) break;
+            if (ctm_controller_tone_pending(c) &&
+                (block_id == 0x93 || block_id == 0x94 ||
+                 block_id == 0x95 || block_id == 0x96)) {
+                /* A CONFIRMATION TONE, ONE OPUS FRAME PER REPORT.
+                 *
+                 * Only when the block is exactly one frame wide. Opus frames
+                 * are not a byte stream and cannot be split or padded, so a
+                 * block of any other size is left alone rather than filled
+                 * with something the controller's decoder would reject. */
+                if ((int)payload_len == FEEDBACK_OPUS_FRAME_BYTES_EXPECTED &&
+                    ctm_controller_tone_take(c, &data[pos + 2],
+                                             (int)payload_len) > 0) {
+                    patched = 1;
+                }
+            }
             if (block_id == 0x91 && payload_len >= 6) {
                 for (size_t i = 3; i <= 7; ++i) {
                     if (data[pos + i] != auto_latency) {
@@ -237,6 +257,17 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             }
             if (data[pos + 9] != target_audio_flags) {
                 data[pos + 9] = target_audio_flags;
+                patched = 1;
+            }
+        } else if (ctm_controller_tone_pending(c) &&
+                   (block_id == 0x93 || block_id == 0x94 ||
+                    block_id == 0x95 || block_id == 0x96) &&
+                   (int)payload_len == FEEDBACK_OPUS_FRAME_BYTES_EXPECTED) {
+            /* See the note in the AUTO loop above. Duplicated rather than
+             * hoisted: the two loops are upstream's, and two small deletable
+             * blocks reconcile better with an upstream change than a helper
+             * wedged between them. */
+            if (ctm_controller_tone_take(c, &data[pos + 2], (int)payload_len) > 0) {
                 patched = 1;
             }
         } else if ((block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {

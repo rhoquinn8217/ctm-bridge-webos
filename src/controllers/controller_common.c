@@ -127,6 +127,14 @@ struct ctm_controller {
      * reopen restores what the host asked for rather than what we assumed. */
     uint8_t audio_spk_vol;
     uint8_t audio_control;
+
+    /* Frames of the confirmation tone still to send, Bluetooth only.
+     *
+     * Over a cable the tone is generated as it plays and written to the
+     * controller's audio device. Bluetooth has no such device -- the speaker
+     * rides inside the output report as Opus -- so a pre-encoded tone is fed
+     * to whoever is building that report, one frame at a time. */
+    volatile int tone_frame_next;
     pthread_t mic_cap_thread;
     int mic_cap_started;
     /* Which sound card is genuinely this controller's, worked out by muting
@@ -1708,6 +1716,9 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
  * a second copy that could drift. */
 void ctm_controller_send_speaker_init(ctm_controller_t *c);
 
+/* Defined below; declared here because the feedback include uses it. */
+void ctm_controller_tone_start(ctm_controller_t *c);
+
 #include "ctm_cardmatch.inl"
 #include "ctm_feedback.inl"
 
@@ -1992,6 +2003,8 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
      * first open behaves exactly as before and a reopen no longer reverts. */
     c->audio_spk_vol = DS5_SPEAKER_VOLUME_MAX;
     c->audio_control = DS5_AUDIO_OUT_PATH_SPEAKER | DS5_AUDIO_ECHO_NOISE_CANCEL;
+    c->tone_frame_next = -1;   /* nothing queued; the struct is memset to 0,
+                                * which would otherwise read as "frame 0" */
     c->wake_pipe[0] = -1;
     c->wake_pipe[1] = -1;
     for (int i = 0; i < MAX_EVDEV_GRABS; ++i) c->evdev_grabs[i].fd = -1;
@@ -2164,6 +2177,42 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
 
 /* Push new UI settings to the controller (stored + forwarded to ops). When: a
  * detail-window slider/toggle changes while plugged in. */
+/* --- the confirmation tone on Bluetooth ----------------------------------
+ *
+ * The bytes live in their own generated file; see its header for why a blob
+ * rather than a generator. This is only the bookkeeping: hand out one frame
+ * per report until the tone is spent. */
+#include "ctm_feedback_opus.inl"
+
+void ctm_controller_tone_start(ctm_controller_t *c)
+{
+    if (!c) return;
+    c->tone_frame_next = 0;
+    ctl_log(c, "tone: %d opus frames queued (%d ms)",
+            FEEDBACK_OPUS_FRAMES, FEEDBACK_OPUS_FRAMES * FEEDBACK_OPUS_FRAME_MS);
+}
+
+bool ctm_controller_tone_pending(ctm_controller_t *c)
+{
+    return c && c->tone_frame_next >= 0 &&
+           c->tone_frame_next < FEEDBACK_OPUS_FRAMES;
+}
+
+/* Copy the next frame out. `n` is the space available, and it must be exactly
+ * one frame: Opus frames are not a byte stream and cannot be split across
+ * reports, so a block of any other size is left alone rather than filled with
+ * something the decoder would reject. */
+int ctm_controller_tone_take(ctm_controller_t *c, uint8_t *dst, int n)
+{
+    if (!c || !dst || n != FEEDBACK_OPUS_FRAME_BYTES) return 0;
+    int f = c->tone_frame_next;
+    if (f < 0 || f >= FEEDBACK_OPUS_FRAMES) return 0;
+    memcpy(dst, g_feedback_opus[f], FEEDBACK_OPUS_FRAME_BYTES);
+    c->tone_frame_next = f + 1;
+    if (c->tone_frame_next >= FEEDBACK_OPUS_FRAMES) ctl_log(c, "tone: finished");
+    return FEEDBACK_OPUS_FRAME_BYTES;
+}
+
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
 {
     if (!c || !s) return;

@@ -21,7 +21,24 @@ enum ctmb_message_type {
     CTMB_MSG_FEATURE_SET = 9,
     CTMB_MSG_ENUM = 10,          /* forwarded composite USB enumeration (puck) */
     CTMB_MSG_ISO_AUDIO = 11,     /* raw PCM audio: CTM-USBIP -> aurora-tv for wired ISO passthrough */
-    CTMB_MSG_MIC_AUDIO = 12      /* raw PCM audio: aurora-tv -> CTM-USBIP, the controller microphone */
+    CTMB_MSG_MIC_AUDIO = 12,     /* raw PCM audio: aurora-tv -> CTM-USBIP, the controller microphone */
+
+    /* aurora-tv -> CTM-USBIP: "keep the audio block in your outgoing reports
+     * for this many milliseconds". Payload is a little-endian uint16 of ms.
+     *
+     * WHY IT IS NEEDED. On Bluetooth the controller's speaker rides inside the
+     * output report, and the host only emits those reports while it has real
+     * audio to send. A controller that has just been bridged -- or is about to
+     * be released -- has nothing playing, so no report is emitted at all and a
+     * confirmation tone from this side has nowhere to go.
+     *
+     * The hold is not a window to hit. Reports arrive, the tone overwrites
+     * them, and it ends when the frames run out; the only requirement is that
+     * the hold outlasts the tone. So neither end has to agree on a duration.
+     *
+     * An older listener ignores unknown message types silently, so the worst
+     * case against one is a tone that does not sound. */
+    CTMB_MSG_AUDIO_HOLD = 13
 };
 
 #pragma pack(push, 1)
