@@ -100,6 +100,22 @@ void ctm_controller_plug_out(ctm_controller_t *c);
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why);
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
+/* CONFIRMATION SIGNALS -- ALL OR NOTHING.
+ *
+ * One switch for every signal on every transport: the tone, the felt pulse,
+ * the lightbar patterns, and the SDL fallback. Not a tone switch and a
+ * transport rule -- one concept.
+ *
+ * ⭐ AND IT COVERS THE FAILURE SIGNALS TOO, deliberately. rhoquinn8217, 2026-08-12:
+ * "if you are not using the confirmation signals, you are putting on a
+ * blindfold and getting angry that you are blindfolded when things go wrong."
+ * A switch that silences success but keeps failure sounds thoughtful and is
+ * really just a second thing to reason about.
+ *
+ * It becomes a real setting when the status page exists -- deliberately no
+ * button for it yet. */
+#define CTM_SIGNALS_ENABLED 1
+
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
 
 /* The confirmation tone, Bluetooth only: pre-encoded Opus handed to the

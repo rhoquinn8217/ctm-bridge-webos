@@ -1720,6 +1720,11 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c);
 void ctm_controller_tone_start(ctm_controller_t *c);
 
 #include "ctm_cardmatch.inl"
+/* The Bluetooth confirmation signal. Included BEFORE the feedback file, which
+ * calls into it. Fork-only: deleting these two lines and the file removes the
+ * feature. */
+#include "ctm_bt_signal.inl"
+
 #include "ctm_feedback.inl"
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
