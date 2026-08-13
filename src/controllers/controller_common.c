@@ -1725,6 +1725,11 @@ void ctm_controller_tone_start(ctm_controller_t *c);
  * feature. */
 #include "ctm_bt_signal.inl"
 
+/* Signals with no session behind them, for a refused plug. Included after the
+ * Bluetooth signal (whose pattern names it shares) and after the card
+ * matching (whose playback open it uses). Fork-only. */
+#include "ctm_signal_wired.inl"
+
 #include "ctm_feedback.inl"
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,

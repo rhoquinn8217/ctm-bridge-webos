@@ -180,8 +180,12 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
     snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
     int fd = open(path, O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        ctl_log(c, "cardmatch: card=%d playback busy or absent (errno=%d)",
-                card, errno);
+        /* c is NULL when a signal is played with no session behind it -- a
+         * refused plug has no controller object. */
+        if (c) ctl_log(c, "cardmatch: card=%d playback busy or absent (errno=%d)",
+                       card, errno);
+        else fprintf(stderr, "[cardmatch] card=%d playback busy or absent (errno=%d)\n",
+                     card, errno);
         return -1;
     }
 
@@ -207,7 +211,8 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
 
     if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0 ||
         ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
-        ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
+        if (c) ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
+        else fprintf(stderr, "[cardmatch] card=%d hw_params failed (errno=%d)\n", card, errno);
         close(fd);
         return -1;
     }

@@ -188,15 +188,16 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
  * the competition for it. This runs on its own thread at one report every ten
  * milliseconds, so a ramp is smooth and repeating it costs nothing. */
 typedef enum {
-    BTSIG_HANDING_OVER,   /* magenta, pulsing */
-    BTSIG_HANDED_BACK     /* yellow, three flashes */
+    BTSIG_HANDING_OVER,   /* magenta, solid */
+    BTSIG_HANDED_BACK,    /* yellow, three flashes */
+    BTSIG_REFUSED         /* red, three flashes */
 } btsig_pattern_t;
 
 /* Brightness for report `i` of `n`, as the chosen pattern would have it. */
 static int btsig_level(btsig_pattern_t p, int i, int n)
 {
     if (n <= 0) return 0;
-    if (p == BTSIG_HANDED_BACK) {
+    if (p == BTSIG_HANDED_BACK || p == BTSIG_REFUSED) {
         /* Three flashes: on for a third of each slot, off for the rest, so
          * they read as three distinct events rather than a flicker. */
         int slot = (n + 2) / 3;
@@ -219,9 +220,62 @@ static int btsig_level(btsig_pattern_t p, int i, int n)
  * Returns 0 if it ran. Takes about a second and a half of wall time, so the
  * caller decides whether it can afford to wait -- see the note in
  * ctm_feedback.inl about never doing this on the session thread. */
-static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
+/* Wait until report number `n` is due, counting from `t0`.
+ *
+ * ⛔ NOT A FIXED SLEEP AFTER EACH WRITE. That was the first attempt and it
+ * starves the controller: each report carries exactly 10 ms of audio, but the
+ * write itself takes about 1.3 ms on top of a 10 ms sleep, so every report
+ * arrives a little later than the one before and the error accumulates.
+ * Measured 2026-08-12: 1153 ms to deliver 1020 ms of audio, a 13 % deficit --
+ * which is a decoder running dry, and sounds like a crack at the start and a
+ * tail cut short.
+ *
+ * Sleeping until an absolute deadline instead means a slow write is absorbed
+ * by the next wait rather than pushing everything after it back. */
+static void btsig_wait_for(const struct timespec *t0, int n)
 {
-    if (!c || c->hid_fd < 0) return -1;
+    long long due_us = (long long)n * BTSIG_PACE_US;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long gone_us = (long long)(now.tv_sec - t0->tv_sec) * 1000000LL +
+                        (now.tv_nsec - t0->tv_nsec) / 1000LL;
+    long long wait_us = due_us - gone_us;
+    if (wait_us <= 0) return;          /* already late; do not sleep at all */
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(wait_us / 1000000LL);
+    ts.tv_nsec = (long)((wait_us % 1000000LL) * 1000LL);
+    nanosleep(&ts, NULL);
+}
+
+static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_to)
+{
+    if (fd < 0) return -1;
+
+    /* ⚠️ COUNTED, because each note is being heard TWICE and reading the code
+     * has not explained it -- one pass through here writes each note once.
+     * Either this runs twice per event, or something else is playing as well.
+     * The number says which. */
+    static unsigned s_calls;
+    unsigned call = ++s_calls;
+
+    /* ⚠️ TIMED, because the sound arrives with a crack at the start and its
+     * tail cut off -- and that is what a decoder running DRY sounds like, not
+     * one being overfed.
+     *
+     * Each report carries exactly 10 ms of audio and we sleep 10 ms between
+     * them, which is right in principle. But the write itself takes time ON
+     * TOP of the sleep, so the real interval is longer than 10 ms and the
+     * controller plays faster than we feed it. A hundred reports claim one
+     * second of audio; if this measures materially more than that, we are
+     * starving it and the fix is to pace against a clock rather than sleeping
+     * a fixed amount after each write.
+     *
+     * There is no reference to look this up in: the kernel driver only knows
+     * the simple 78-byte Bluetooth report, not the 398-byte one that carries
+     * audio. */
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int paced = 0;
 
     uint8_t rep[BTSIG_REPORT_LEN];
     btsig_frame_t f;
@@ -233,57 +287,162 @@ static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
     for (int i = 0; i < BTSIG_PRIME_FRAMES; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         btsig_build(rep, &f);
-        if (write(c->hid_fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
+        if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
-        usleep(BTSIG_PACE_US);
+        btsig_wait_for(&t0, ++paced);
     }
 
     /* The signal itself: colour ramping up, a pulse to feel, a tone to hear. */
+    /* Magenta going to the host, yellow coming back, RED refused.
+     *
+     * ⭐ Yellow used to mean two opposite things -- "you have it back because
+     * you asked" and "you still have it because the bridge failed". Red
+     * separates them, and a failure is the one signal worth being unmistakable
+     * about. */
     const uint8_t R = 0xff;
     const uint8_t G = (pattern == BTSIG_HANDED_BACK) ? 0xff : 0x00;
-    const uint8_t B = (pattern == BTSIG_HANDED_BACK) ? 0x00 : 0xff;
+    const uint8_t B = (pattern == BTSIG_HANDING_OVER) ? 0xff : 0x00;
 
-    /* The light runs longer than the tone, so the pattern is legible. */
-    const int LIT = BTSIG_TONE_FRAMES + 40;
+    /* TWO NOTES, and their order is the message.
+     *
+     * Rising to hand over, falling to come back, SINKING when it did not
+     * happen. Nobody has to learn that -- it is the shape every doorbell and
+     * every error beep already uses. */
+    const uint8_t *first, *second;
+    switch (pattern) {
+    case BTSIG_HANDED_BACK:                 /* high then low  -- falling */
+        first  = &g_btsig_high[0][0];
+        second = &g_btsig_low[0][0];
+        break;
+    case BTSIG_REFUSED:                     /* low then lower -- sinking */
+        first  = &g_btsig_low[0][0];
+        second = &g_btsig_lower[0][0];
+        break;
+    default:                                /* low then high  -- rising */
+        first  = &g_btsig_low[0][0];
+        second = &g_btsig_high[0][0];
+        break;
+    }
 
-    for (int i = 0; i < BTSIG_TONE_FRAMES; ++i) {
+    /* THE SIGNAL RUNS LONGER THAN THE SOUND, and a refusal longer still.
+     *
+     * ⭐ rhoquinn8217, 2026-08-12: "by the time I notice the rumble to look down, the
+     * red flashes have already passed." A signal you feel before you see is
+     * only useful if it is still going when you look. */
+    const int VOICE = BTSIG_TONE_FRAMES * 2 + BTSIG_GAP_FRAMES;
+
+    /* THE LIGHT AND THE PULSE END TOGETHER.
+     *
+     * They used to run on for a while after the sound, so the flashes would
+     * still be going when you looked down. Doubling the pulse solved that on
+     * its own -- there is no need for the light to outlast a buzz that is
+     * already long enough to notice. */
+    const int LIT   = (pattern == BTSIG_REFUSED) ? VOICE * 2 : VOICE;
+
+    for (int i = 0; i < VOICE; ++i) {
+        const uint8_t *note = NULL;
+        if (i < BTSIG_TONE_FRAMES) {
+            note = first + (size_t)i * BTSIG_FRAME_BYTES;
+        } else if (i >= BTSIG_TONE_FRAMES + BTSIG_GAP_FRAMES) {
+            note = second + (size_t)(i - BTSIG_TONE_FRAMES - BTSIG_GAP_FRAMES)
+                          * BTSIG_FRAME_BYTES;
+        }
         int lvl = btsig_level(pattern, i, LIT);
-        f.audio = g_btsig_tone[i]; f.seq = seq++;
+        f.audio = note; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
         f.claim_led = 1;
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
         btsig_build(rep, &f);
-        if (write(c->hid_fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
+        if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
-        usleep(BTSIG_PACE_US);
+        btsig_wait_for(&t0, ++paced);
     }
 
     /* Let the light finish its pattern after the tone has stopped, and keep
      * the stream alive so it does not end mid-frame. */
-    for (int i = BTSIG_TONE_FRAMES; i < LIT; ++i) {
+    for (int i = VOICE; i < LIT; ++i) {
         int lvl = btsig_level(pattern, i, LIT);
-        f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 1;
+        /* The pulse carries on past the sound, for the same reason the light
+         * does: it is what makes you look down in the first place. */
+        f.audio = NULL; f.seq = seq++;
+        f.haptics = 1; f.haptic_n = hn; hn += 32;
+        f.claim_led = 1;
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
         btsig_build(rep, &f);
-        if (write(c->hid_fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
+        if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
-        usleep(BTSIG_PACE_US);
+        btsig_wait_for(&t0, ++paced);
     }
 
-    /* Hand the light back. Claiming it and never releasing would leave SDL
-     * unable to paint, which is the mirror of the fight this avoids. */
-    for (int i = 0; i < 10; ++i) {
+    /* Hand the light back, AND LET THE DECODER DRAIN.
+     *
+     * This was ten reports -- a tenth of a second -- and the stream simply
+     * stopped after them. A decoder cut off mid-stream pops, which is what was
+     * heard on the way back: the tone would end and a small click would
+     * follow. Thirty gives it room to finish what it already has.
+     *
+     * ⚠️ The release also matters for the lightbar: claiming it and never
+     * letting go would leave SDL unable to paint, which is the mirror of the
+     * fight this whole approach avoids.
+     *
+     * ⓘ The 600 ms of priming at the start is probably longer than it needs to
+     * be, and shortening it would pay for this without making the signal
+     * longer -- but it has never been tested at less, and it is the part that
+     * makes the tone audible at all. Not worth trading blind. */
+    for (int i = 0; i < 30; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         btsig_build(rep, &f);
-        if (write(c->hid_fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
+        if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
-        usleep(BTSIG_PACE_US);
+        btsig_wait_for(&t0, ++paced);
     }
 
-    ctl_log(c, "btsig: %d reports sent, %d failed", sent, failed);
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long took_ms = (long)((t1.tv_sec - t0.tv_sec) * 1000 +
+                          (t1.tv_nsec - t0.tv_nsec) / 1000000L);
+    long owed_ms = (long)sent * (BTSIG_PACE_US / 1000);
+
+    if (log_to) {
+        ctl_log(log_to,
+                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio",
+                call, (int)pattern, sent, failed, took_ms, owed_ms);
+    } else {
+        fprintf(stderr,
+                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio\n",
+                call, (int)pattern, sent, failed, took_ms, owed_ms);
+    }
     return failed ? -1 : 0;
+}
+
+/* The ordinary case: a controller we already have a session for. */
+static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
+{
+    if (!c) return -1;
+    return btsig_play_fd(c->hid_fd, pattern, c);
+}
+
+/* A REFUSAL, WHICH HAS NO SESSION TO PLAY THROUGH.
+ *
+ * A plug that failed leaves nothing behind -- no controller object, no open
+ * device -- which is why the refusal signal has always been the coarse SDL
+ * one. On Bluetooth it does not have to be: the whole signal needs a device
+ * node and bytes, and the node is still there.
+ *
+ * ⭐ And the refusal is exactly the case this route is best at. A plug fails
+ * because the host is unreachable, and nothing here depends on the host.
+ *
+ * Opens, plays, closes. Nothing is held afterwards. */
+int ctm_signal_refused_bt(const char *node)
+{
+    if (!node || !node[0]) return -1;
+    int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int rc = btsig_play_fd(fd, BTSIG_REFUSED, NULL);
+    close(fd);
+    return rc;
 }

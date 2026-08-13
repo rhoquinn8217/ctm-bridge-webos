@@ -68,7 +68,34 @@
  * Both envelopes fade in and out. A square-edged start makes the speaker
  * click and the motors knock, which reads as a fault rather than a
  * confirmation. */
-static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out, bool is_unplug)
+/* The three notes, matching the Bluetooth signal exactly.
+ *
+ * ⭐ Once the SOUND says which event happened, the light stops being the
+ * message and becomes confirmation -- you do not have to look down. That only
+ * works if a cable and a radio say the same thing, so these are the same
+ * frequencies, the same order, and the same envelope.
+ *
+ * ⭐ AND THE ENVELOPE HOLDS RATHER THAN FADES. A triangular envelope dwindles
+ * to nothing, and on a speaker this small a low note dwindling is inaudible
+ * before it finishes -- which made every signal ending low sound cut off,
+ * while the one ending high did not. Found on Bluetooth 2026-08-12 and it
+ * applies here for the same physical reason.
+ *
+ * The low notes are lifted too: the speaker rolls off at the bottom, so equal
+ * amplitude is not equal loudness. */
+#define FEEDBACK_HZ_LOW    660
+#define FEEDBACK_HZ_HIGH   990
+#define FEEDBACK_HZ_LOWER  495
+
+static double feedback_note_level(int hz)
+{
+    if (hz == FEEDBACK_HZ_HIGH)  return 0.95;
+    if (hz == FEEDBACK_HZ_LOWER) return 1.55;
+    return 1.25;
+}
+
+static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out,
+                          btsig_pattern_t pattern)
 {
     if (!c) return;
     if (!CTM_SIGNALS_ENABLED) return;
@@ -96,11 +123,24 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         }
         /* Magenta going to the host, yellow coming back -- the same
          * vocabulary the app's own patterns used, so nothing is relearned. */
-        btsig_play(c, is_unplug ? BTSIG_HANDED_BACK : BTSIG_HANDING_OVER);
+        btsig_play(c, pattern);
         ctl_log(c, "feedback: %s -- signalled from the TV", what);
         return;
     }
 
+    /* Two notes, and their order is the message -- see the table above. */
+    int hz_first, hz_second;
+    switch (pattern) {
+    case BTSIG_HANDED_BACK:                     /* high then low  -- falling */
+        hz_first = FEEDBACK_HZ_HIGH;  hz_second = FEEDBACK_HZ_LOW;   break;
+    case BTSIG_REFUSED:                         /* low then lower -- sinking */
+        hz_first = FEEDBACK_HZ_LOW;   hz_second = FEEDBACK_HZ_LOWER; break;
+    default:                                    /* low then high  -- rising */
+        hz_first = FEEDBACK_HZ_LOW;   hz_second = FEEDBACK_HZ_HIGH;  break;
+    }
+    const int hz[2] = { hz_first, hz_second };
+
+    beeps = 2;
     const int frames_per = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
     const int gap_frames = (FEEDBACK_RATE * FEEDBACK_GAP_MS) / 1000;
     const int frames = beeps * frames_per + (beeps - 1) * gap_frames;
@@ -113,14 +153,20 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
 
     for (int b = 0; b < beeps; ++b) {
         const int base = b * (frames_per + gap_frames);
+        const int attack  = frames_per / 10;
+        const int release = (frames_per * 18) / 100;
+        const double level = feedback_note_level(hz[b]);
+
         for (int i = 0; i < frames_per; ++i) {
-            /* Triangular envelope: peak in the middle, silent at both ends. */
-            const int half = frames_per / 2;
-            const int rise = (i < half) ? i : (frames_per - i);
-            const double env = (half > 0) ? ((double)rise / (double)half) : 0.0;
+            /* Attack, HOLD, then a short release -- so the note stops rather
+             * than dwindling into inaudibility. */
+            double env;
+            if (i < attack)                        env = (double)i / (double)attack;
+            else if (i > frames_per - release)     env = (double)(frames_per - i) / (double)release;
+            else                                   env = 1.0;
 
             const double t = (double)i / (double)FEEDBACK_RATE;
-            const double tone = sin(2.0 * M_PI * FEEDBACK_TONE_HZ * t) * env;
+            const double tone = sin(2.0 * M_PI * hz[b] * t) * env * level;
             const double bump = sin(2.0 * M_PI * FEEDBACK_RUMBLE_HZ * t) * env;
 
             const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
@@ -160,17 +206,30 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      *
      * The drain result is still logged, once, because knowing what this
      * device does with the request is worth more than the guess above. */
-    struct timespec ts = {0, (long)(FEEDBACK_MS + 40) * 1000000L};
+    /* ⚠️ DERIVED FROM THE BUFFER, NOT A CONSTANT.
+     *
+     * This was FEEDBACK_MS + 40 -- a hundred and eighty milliseconds, tuned
+     * when the signal was one note. It became two notes and a gap, three
+     * hundred and twenty milliseconds, and the wait did not follow: the
+     * teardown closed the device with the second note still queued, and it
+     * was heard cut off. Exactly the drift a hardcoded duration invites.
+     *
+     * The buffer knows how long it is, so ask it. A margin on top for the
+     * device to actually emit what it has been handed. */
+    const long play_ms = (long)frames * 1000L / FEEDBACK_RATE;
+    const long wait_ms = play_ms + 40;
+    struct timespec ts = {(time_t)(wait_ms / 1000),
+                          (long)(wait_ms % 1000) * 1000000L};
     nanosleep(&ts, NULL);
     ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms",
-            what, beeps, c->matched_card, FEEDBACK_MS + 40);
+            what, beeps, c->matched_card, (int)wait_ms);
 }
 
 /* Bridged. */
 /* Runs a connect signal off the session thread. See the note at the call. */
 static void *feedback_signal_thread(void *arg)
 {
-    feedback_play((ctm_controller_t *)arg, 1, "connected", true, false);
+    feedback_play((ctm_controller_t *)arg, 2, "connected", true, BTSIG_HANDING_OVER);
     return NULL;
 }
 
@@ -223,5 +282,5 @@ static void feedback_play_unplugging(ctm_controller_t *c, ctm_unplug_reason_t wh
     }
     /* Waits: the teardown follows immediately, and this runs on the gesture
      * worker rather than the session thread. */
-    feedback_play(c, 1, what, true, true);
+    feedback_play(c, 2, what, true, BTSIG_HANDED_BACK);
 }

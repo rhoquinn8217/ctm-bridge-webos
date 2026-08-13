@@ -116,6 +116,27 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
 
+/* Signal a REFUSED plug, with no session behind it.
+ *
+ * A failed plug leaves nothing -- no controller object, no open device -- so
+ * the refusal signal has always been the coarse SDL one. It does not have to
+ * be:
+ *
+ *   Bluetooth: the whole signal needs only the device node and bytes, and the
+ *     node is still there. Nothing here depends on the host, which is the
+ *     point -- a plug fails BECAUSE the host is unreachable.
+ *
+ *   Wired: the sound card is made by the kernel when the controller is
+ *     plugged into the TV, not by anything we do, so it is sitting there
+ *     unopened. ⚠️ Declines with more than one DualSense plugged in -- there is
+ *     no way to tell from here which card belongs to which, and buzzing the
+ *     wrong one is worse than buzzing coarsely.
+ *
+ * Both open, play, close. Nothing is held afterwards. `pattern` is a
+ * btsig_pattern_t. */
+int ctm_signal_refused_bt(const char *node);
+int ctm_signal_wired_no_session(const char *node, int pattern);
+
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
 
 /* The confirmation tone, Bluetooth only: pre-encoded Opus handed to the
