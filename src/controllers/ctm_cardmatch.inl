@@ -124,6 +124,60 @@ static void cardmatch_set_mic_mute(ctm_controller_t *c, int muted)
  * hand-driven action, so the wait is invisible in practice. */
 static pthread_mutex_t g_cardmatch_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* --- which card belongs to which controller, remembered ---------------------
+ *
+ * ⭐ SHARED BY BOTH PATHS, which is the whole point of it living here.
+ *
+ * Two places ask this question: a bridge, and a signal played with no session
+ * behind it. They used to answer it separately, so the three seconds was paid
+ * TWICE for the same controller -- refuse a plug, pay; start the listener and
+ * bridge, pay again. With three controllers that is five probes where it
+ * should be three.
+ *
+ * A card does not change while its controller stays plugged in, so whoever
+ * answers first writes it down and everyone else reads it.
+ *
+ * ⚠️ KEYED BY DEVICE NODE, AND NODES ARE REUSED. Unplug a controller, plug in
+ * another, and it may land on the same path with a different card -- and the
+ * note would then be wrong, sending audio to someone else's controller.
+ * ➡️ The proper fix is to forget a node when its controller goes away. */
+
+#define CARDMATCH_CACHE_MAX 4
+
+static struct {
+    char node[64];
+    int  card;
+} g_cardmatch_cache[CARDMATCH_CACHE_MAX];
+static int g_cardmatch_cached;
+
+/* ⚠️ Both of these want g_cardmatch_lock held. */
+static int cardmatch_cache_get(const char *node)
+{
+    if (!node || !node[0]) return -1;
+    for (int i = 0; i < g_cardmatch_cached; ++i) {
+        if (strcmp(g_cardmatch_cache[i].node, node) == 0) {
+            return g_cardmatch_cache[i].card;
+        }
+    }
+    return -1;
+}
+
+static void cardmatch_cache_put(const char *node, int card)
+{
+    if (!node || !node[0] || card < 0) return;
+    for (int i = 0; i < g_cardmatch_cached; ++i) {
+        if (strcmp(g_cardmatch_cache[i].node, node) == 0) {
+            g_cardmatch_cache[i].card = card;
+            return;
+        }
+    }
+    if (g_cardmatch_cached >= CARDMATCH_CACHE_MAX) return;
+    snprintf(g_cardmatch_cache[g_cardmatch_cached].node,
+             sizeof(g_cardmatch_cache[0].node), "%s", node);
+    g_cardmatch_cache[g_cardmatch_cached].card = card;
+    ++g_cardmatch_cached;
+}
+
 typedef struct {
     int card;
     int fd;
@@ -180,12 +234,8 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
     snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
     int fd = open(path, O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        /* c is NULL when a signal is played with no session behind it -- a
-         * refused plug has no controller object. */
-        if (c) ctl_log(c, "cardmatch: card=%d playback busy or absent (errno=%d)",
-                       card, errno);
-        else fprintf(stderr, "[cardmatch] card=%d playback busy or absent (errno=%d)\n",
-                     card, errno);
+        ctl_log(c, "cardmatch: card=%d playback busy or absent (errno=%d)",
+                card, errno);
         return -1;
     }
 
@@ -211,8 +261,7 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
 
     if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0 ||
         ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
-        if (c) ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
-        else fprintf(stderr, "[cardmatch] card=%d hw_params failed (errno=%d)\n", card, errno);
+        ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
         close(fd);
         return -1;
     }
@@ -300,13 +349,14 @@ static void cardmatch_read_all(cardmatch_slot_t *slots, int n, int muted_pass)
  * ordinary scan would have taken, so the two can be compared: when they
  * disagree, that is the misrouting caught in the act rather than reported
  * afterwards. */
-static void cardmatch_identify(ctm_controller_t *c)
+/* THE PROBE ITSELF, split out so it can be SKIPPED when the answer is already
+ * known. Everything here was cardmatch_identify's first half and is unchanged
+ * -- the split is where `answer` was decided, and the card handles are closed
+ * here rather than after it so nothing outside depends on the probe's locals.
+ *
+ * Returns the card, or -1 if it could not say. */
+static int cardmatch_run_probe(ctm_controller_t *c)
 {
-    if (!c || strcmp(ctm_controller_bus(c), "USB") != 0) return;
-
-    /* The lock is held by the CALLER, across this, the capture start and the
-     * tone -- see the note at that call. */
-
     cardmatch_slot_t slots[CARDMATCH_MAX_CARDS];
     int n = 0;
     for (int card = 0; card < CARDMATCH_MAX_CARDS && n < CARDMATCH_MAX_CARDS; ++card) {
@@ -322,11 +372,47 @@ static void cardmatch_identify(ctm_controller_t *c)
 
     if (n == 0) {
         ctl_log(c, "cardmatch: no free DualSense card to identify");
-        return;
+        return -1;
     }
 
     /* What the ordinary scan would take: the lowest-numbered free card. That
      * is the whole bug in one line -- it is first-free, not whose. */
+    /* ⭐ ANSWER BY ELIMINATION BEFORE SPENDING THREE SECONDS.
+     *
+     * Every free card already spoken for by ANOTHER controller is not ours. If
+     * that leaves exactly one unclaimed, it is ours and there is nothing to
+     * find out.
+     *
+     * Covers the obvious case -- one controller, one card -- and the one that
+     * showed up in testing: with three plugged in and two already answered
+     * for, the third was still paying the full probe for an answer that was
+     * already determined. The refusal path had this and the bridge did not.
+     *
+     * ⓘ A card a bridged session holds never opened above, so it is not in
+     * this list at all -- that case eliminates itself. */
+    {
+        int unclaimed = -1, unclaimed_count = 0;
+        for (int i = 0; i < n; ++i) {
+            int owned_by_other = 0;
+            for (int k = 0; k < g_cardmatch_cached; ++k) {
+                if (g_cardmatch_cache[k].card == slots[i].card &&
+                    strcmp(g_cardmatch_cache[k].node, c->dev.path) != 0) {
+                    owned_by_other = 1;
+                    break;
+                }
+            }
+            if (!owned_by_other) { unclaimed = i; ++unclaimed_count; }
+        }
+        if (unclaimed_count == 1) {
+            const int card = slots[unclaimed].card;
+            for (int i = 0; i < n; ++i) close(slots[i].fd);
+            ctl_log(c, "cardmatch: %d free cards, %d already spoken for -> "
+                       "card=%d by elimination, no probe needed",
+                    n, n - 1, card);
+            return card;
+        }
+    }
+
     const int scan_would_pick = slots[0].card;
 
     /* The reading runs even with a single free card, where the answer is
@@ -396,9 +482,33 @@ static void cardmatch_identify(ctm_controller_t *c)
     ctl_log(c, "cardmatch: answer=%d scan_would_pick=%d %s",
             answer, scan_would_pick, detail);
 
+    for (int i = 0; i < n; ++i) close(slots[i].fd);
+    return answer;
+}
+
+/* Find this controller's card and move its speaker onto it.
+ *
+ * ⭐ THE PROBE ONLY RUNS IF NOBODY HAS ANSWERED YET. A refused plug asks the
+ * same question, and used to ask it separately -- so the three seconds was
+ * paid twice for one controller. Whoever answers first writes it down.
+ *
+ * ⚠️ The lock is held by the CALLER, across this, the capture start and the
+ * tone -- see the note at that call. */
+static void cardmatch_identify(ctm_controller_t *c)
+{
+    if (!c || strcmp(ctm_controller_bus(c), "USB") != 0) return;
+
+    int answer = cardmatch_cache_get(c->dev.path);
+    if (answer >= 0) {
+        ctl_log(c, "cardmatch: card=%d already known for %s, no probe needed",
+                answer, c->dev.path);
+    } else {
+        answer = cardmatch_run_probe(c);
+        if (answer >= 0) cardmatch_cache_put(c->dev.path, answer);
+    }
+
     c->matched_card = answer;
 
-    for (int i = 0; i < n; ++i) close(slots[i].fd);
 
     /* Move the SPEAKER onto the right card.
      *

@@ -133,50 +133,11 @@ static int16_t *wired_sig_render(btsig_pattern_t pattern, int *frames_out,
  * sometimes coarse -- you would learn to read the fast one as "something is
  * wrong", which is exactly the distrust the vocabulary exists to avoid. */
 
-#define WIRED_SIG_CACHE_MAX 4
-
-static struct {
-    char node[64];
-    int  card;
-} g_wired_sig_cache[WIRED_SIG_CACHE_MAX];
-static int g_wired_sig_cached;
-/* ⛔ NO LOCK OF ITS OWN -- it shares g_cardmatch_lock, from ctm_cardmatch.inl,
- * which is included just above this file.
+/* ⓘ THE CACHE LIVES IN ctm_cardmatch.inl NOW, not here.
  *
- * This had its own, which is worse than no lock at all: two DIFFERENT locks
- * let a session-less probe run at the same moment as a bridging one. Both
- * would mute a controller, every card would fall silent, and neither probe
- * could say which silence was its own -- exactly the ambiguity the original
- * lock exists to prevent. And both would be opening free cards at once, which
- * is the cross-grab that took several builds to find.
- *
- * One question, one queue. It costs a wait, and the session path already
- * accepted that trade for the same reason. */
-
-static int wired_sig_cache_get(const char *node)
-{
-    for (int i = 0; i < g_wired_sig_cached; ++i) {
-        if (strcmp(g_wired_sig_cache[i].node, node) == 0) {
-            return g_wired_sig_cache[i].card;
-        }
-    }
-    return -1;
-}
-
-static void wired_sig_cache_put(const char *node, int card)
-{
-    for (int i = 0; i < g_wired_sig_cached; ++i) {
-        if (strcmp(g_wired_sig_cache[i].node, node) == 0) {
-            g_wired_sig_cache[i].card = card;
-            return;
-        }
-    }
-    if (g_wired_sig_cached >= WIRED_SIG_CACHE_MAX) return;
-    snprintf(g_wired_sig_cache[g_wired_sig_cached].node,
-             sizeof(g_wired_sig_cache[0].node), "%s", node);
-    g_wired_sig_cache[g_wired_sig_cached].card = card;
-    ++g_wired_sig_cached;
-}
+ * It had its own, which meant a bridge and a refusal answered the same
+ * question separately and the three seconds was paid twice for one controller.
+ * Whoever answers first writes it down; see the note there. */
 
 /* Mute or unmute this controller's microphone, with no session behind it.
  *
@@ -205,7 +166,7 @@ static void wired_sig_set_mute(const char *node, int muted)
  * everything that follows it on the card, not just the reading. */
 static int wired_sig_find_card_locked(const char *node)
 {
-    int cached = wired_sig_cache_get(node);
+    int cached = cardmatch_cache_get(node);
     if (cached >= 0) return cached;
 
     /* ⛔ ENUMERATE AND OPEN TOGETHER, skipping cards that will not open.
@@ -259,9 +220,9 @@ static int wired_sig_find_card_locked(const char *node)
     int unclaimed = -1, unclaimed_count = 0;
     for (int i = 0; i < n; ++i) {
         int owned_by_other = 0;
-        for (int k = 0; k < g_wired_sig_cached; ++k) {
-            if (g_wired_sig_cache[k].card == slots[i].card &&
-                strcmp(g_wired_sig_cache[k].node, node) != 0) {
+        for (int k = 0; k < g_cardmatch_cached; ++k) {
+            if (g_cardmatch_cache[k].card == slots[i].card &&
+                strcmp(g_cardmatch_cache[k].node, node) != 0) {
                 owned_by_other = 1;
                 break;
             }
@@ -272,7 +233,7 @@ static int wired_sig_find_card_locked(const char *node)
     if (unclaimed_count == 1) {
         const int card = slots[unclaimed].card;
         for (int i = 0; i < n; ++i) close(slots[i].fd);
-        wired_sig_cache_put(node, card);
+        cardmatch_cache_put(node, card);
         wired_sig_log("%d free cards, %d already spoken for -> %s is card=%d "
                       "by elimination, no probe needed", n, n - 1, node, card);
         return card;
@@ -317,7 +278,7 @@ static int wired_sig_find_card_locked(const char *node)
         }
     }
 
-    if (answer >= 0) wired_sig_cache_put(node, answer);
+    if (answer >= 0) cardmatch_cache_put(node, answer);
     wired_sig_log("probe of %d free cards for %s -> card=%d", n, node, answer);
     return answer;
 }
