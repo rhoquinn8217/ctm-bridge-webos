@@ -78,7 +78,25 @@
  * report the controller was accepting. ⚠️ The latency is the user's to set --
  * raising it audibly reduced choppiness -- and belongs on the host side with
  * the rest of the device config. Frozen here until that exists. */
-#define BTSIG_T_LEAD       0xfe
+/* ⭐ BIT 0 OF THIS BYTE IS THE MICROPHONE SWITCH.
+ *
+ * 0xfe is 0b11111110 -- bit 0 CLEAR, which means microphone off. That value
+ * was copied from a captured report before anyone knew what it meant, and it
+ * has been in every signal this project has ever sent.
+ *
+ * ⚠️ SO THE CONFIRMATION SIGNAL SILENTLY DISARMS THE MICROPHONE. On the stable
+ * branch that is harmless and arguably helpful -- it pushes the controller
+ * towards the safe state roughly once per bridge. But it is not deliberate,
+ * and nobody knew it was happening.
+ *
+ * ⛔ On the experimental branch it is actively in the way: arming on bridge is
+ * immediately undone by the signal that follows it, which is why an armed
+ * controller produced no audio at all. There, the bit is preserved. */
+#if MICSAFE_EXPERIMENTAL_ARMING
+#define BTSIG_T_LEAD       0xff   /* ⛔ EXPERIMENTAL: leave the microphone on */
+#else
+#define BTSIG_T_LEAD       0xfe   /* microphone off, as every signal has sent */
+#endif
 #define BTSIG_T_LATENCY    0x60
 #define BTSIG_T_AUDIO_SEQ  (BTSIG_TIMING_AT + 8)   /* report byte 75 */
 
