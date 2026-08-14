@@ -86,6 +86,12 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
                                               * dualsensectl all use */
 
+/* Microphone safety. ⚠️ INCLUDED HERE, NEAR THE TOP, DELIBERATELY -- the input
+ * relay calls into it and an include further down would be after its own
+ * caller. It needs nothing from this file, only the standard headers above.
+ * Fork-only. */
+#include "ctm_mic_safety.inl"
+
 #define MAX_REPORT 4096
 #define MAX_REPORT_DESCRIPTOR 4096
 #define PACED_QUEUE_CAP 32
@@ -1592,6 +1598,14 @@ static void *input_thread_main(void *arg)
             uint8_t buf[MAX_REPORT];
             ssize_t n = read(c->hid_fd, buf, sizeof(buf));
             if (n > 0) {
+                /* ⛔ Nothing here arms a microphone, so a report carrying audio
+                 * means something else did -- and every reader on this TV,
+                 * including SDL, will parse it as sticks and buttons. See the
+                 * long note in ctm_mic_safety.inl. */
+                if (micsafe_check_report(c->dev.path, buf, (size_t)n)) {
+                    ctl_log(c, "mic-safety: shutting down, see stderr");
+                    exit(1);
+                }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
                     c->stop = 1;
                     break;

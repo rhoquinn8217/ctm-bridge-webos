@@ -134,6 +134,17 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  *
  * Both open, play, close. Nothing is held afterwards. `pattern` is a
  * btsig_pattern_t. */
+/* ⭐⭐ SILENCE EVERY CONTROLLER'S MICROPHONE BEFORE SDL OPENS ANY OF THEM.
+ *
+ * ⚠️ MUST BE CALLED BEFORE SDL's controller subsystem starts. A controller
+ * told to stream microphone audio keeps doing so when a program dies -- it
+ * only forgets when its Bluetooth link drops. So an app that crashed while one
+ * was streaming comes back to find SDL reading encoded sound as sticks and
+ * buttons, which is exactly what happened on 2026-08-13.
+ *
+ * Moving this call later would quietly remove the protection. */
+void ctm_mic_safety_disarm_all(void);
+
 int ctm_signal_refused_bt(const char *node);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
