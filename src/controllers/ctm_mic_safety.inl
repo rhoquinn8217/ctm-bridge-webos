@@ -59,6 +59,29 @@ static void micsafe_log(const char *fmt, ...)
     fclose(f);
 }
 
+/* ⛔⛔⛔ EXPERIMENTAL BRANCH ONLY -- mic-capture-experimental.
+ *
+ * THIS CODE DOES NOT EXIST ON THE STABLE BRANCH AND MUST NOT BE MERGED THERE.
+ *
+ * It arms the controller's microphone, and it switches OFF the guard that
+ * would otherwise shut the app down when a controller starts streaming. Both
+ * of those are deliberate here and unacceptable anywhere else.
+ *
+ * WHAT HAPPENS WITH THIS ON. A Bluetooth DualSense sends audio in reports that
+ * look exactly like button presses to everything that reads them -- SDL
+ * included, which we cannot filter. Measured on real hardware: a mouse
+ * crossing a desktop continuously, and an app whose menus activated
+ * themselves until the controller was powered off.
+ *
+ * ⚠️ IF THAT HAPPENS: power the controller off. Hold PS until the light goes
+ * out. The microphone state does not survive a Bluetooth link drop, so turning
+ * it off and on again always silences it -- confirmed by measurement. Nothing
+ * on either machine has to be working for that to succeed.
+ *
+ * MICSAFE_EXPERIMENTAL_ARMING must be set to 1 by hand, every time, on
+ * purpose. It is 0 here and stays 0 in the repository. */
+#define MICSAFE_EXPERIMENTAL_ARMING 0
+
 #define MICSAFE_BT_REPORT_ID   0x31
 #define MICSAFE_FLAG_HID_DATA  0x01
 #define MICSAFE_FLAG_MIC_AUDIO 0x02
@@ -122,6 +145,45 @@ static int micsafe_disarm_node(const char *node)
     close(fd);
     return (rc == (ssize_t)sizeof(pkt)) ? 0 : -1;
 }
+
+#if MICSAFE_EXPERIMENTAL_ARMING
+/* ⛔ ARM one controller's microphone. EXPERIMENTAL BRANCH ONLY.
+ *
+ * The mirror of the disarm above: the same small output report and the same
+ * block, with bit 0 set alongside bit 1 instead of bit 1 alone.
+ *
+ * ⚠️ It is a state change, not a stream -- sent once, and the controller
+ * remembers until its Bluetooth link drops. */
+static int micsafe_arm_node(const char *node)
+{
+    if (!node || !node[0]) return -1;
+    int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+
+    uint8_t pkt[MICSAFE_PKT_LEN];
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x32;
+    pkt[1] = 0x00;
+    pkt[2] = 0x91;
+    pkt[3] = 1;
+    pkt[4] = MICSAFE_FLAG_HID_DATA | MICSAFE_FLAG_MIC_AUDIO;   /* ON */
+
+    uint8_t seeded[1 + MICSAFE_CRC_AT];
+    seeded[0] = 0xa2;
+    memcpy(&seeded[1], pkt, MICSAFE_CRC_AT);
+    uint32_t crc = micsafe_crc32(seeded, sizeof(seeded));
+    pkt[MICSAFE_CRC_AT + 0] = (uint8_t)(crc & 0xff);
+    pkt[MICSAFE_CRC_AT + 1] = (uint8_t)((crc >> 8) & 0xff);
+    pkt[MICSAFE_CRC_AT + 2] = (uint8_t)((crc >> 16) & 0xff);
+    pkt[MICSAFE_CRC_AT + 3] = (uint8_t)((crc >> 24) & 0xff);
+
+    ssize_t rc = write(fd, pkt, sizeof(pkt));
+    close(fd);
+    micsafe_log("⛔ EXPERIMENTAL: armed the microphone on %s (rc=%d)",
+                node, (int)rc);
+    return (rc == (ssize_t)sizeof(pkt)) ? 0 : -1;
+}
+#endif /* MICSAFE_EXPERIMENTAL_ARMING */
 
 /* ⭐⭐ SILENCE EVERY CONTROLLER BEFORE SDL OPENS ANY OF THEM.
  *
@@ -199,6 +261,24 @@ static bool micsafe_check_report(const char *node, const uint8_t *buf, size_t n)
 
     if (buf[0] != MICSAFE_BT_REPORT_ID) return false;
     if (!(buf[1] & MICSAFE_FLAG_MIC_AUDIO)) return false;
+
+#if MICSAFE_EXPERIMENTAL_ARMING
+    /* ⛔ THE SAFETY EXIT IS OFF ON THIS BRANCH.
+     *
+     * We armed it on purpose, so shutting down on the first report would make
+     * the experiment impossible. ⚠️ That means the ONLY thing standing between
+     * a bug here and an unusable machine is powering the controller off. */
+    {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            micsafe_log("⛔ EXPERIMENTAL: audio reports arriving and the safety "
+                        "exit is DISABLED -- power the controller off if the "
+                        "app or the desktop starts misbehaving");
+        }
+    }
+    return false;
+#endif
 
     micsafe_log("⛔ %s is streaming microphone audio and nothing here asked "
                 "it to -- disarming and shutting down",

@@ -241,6 +241,22 @@ static void feedback_play_connected(ctm_controller_t *c)
      *
      * Detached deliberately -- nobody waits for a confirmation, and joining
      * would put the wait back where it must not be. */
+#if MICSAFE_EXPERIMENTAL_ARMING
+    /* ⛔ EXPERIMENTAL BRANCH ONLY. Arm the microphone as the controller is
+     * handed over.
+     *
+     * ⭐ WHY HERE AND NOT EARLIER: a bridged controller is already ignored by
+     * the app's own input handling, so this is the one window where audio
+     * arriving as pad state has nowhere to go. That coincidence is the whole
+     * safety argument for the feature, and it is why arming anywhere else
+     * would be worse.
+     *
+     * ⚠️ It does NOT disarm on unbridge here, deliberately -- the point of the
+     * experiment is to see what an armed controller does when the exclusion
+     * goes away. Power the controller off afterwards. */
+    if (c->alsa_fd < 0) micsafe_arm_node(c->dev.path);
+#endif
+
     pthread_t sig;
     if (pthread_create(&sig, NULL, feedback_signal_thread, c) == 0) {
         pthread_detach(sig);
