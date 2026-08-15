@@ -2170,6 +2170,32 @@ void ctm_controller_plug_out(ctm_controller_t *c)
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
     if (!c) return;
+
+    /* Silence this controller's microphone before anything else is torn down,
+     * while the node is still ours to write to. There is no second chance --
+     * the unplug closes the path this would travel.
+     *
+     * ⭐ ORDERED BEFORE THE SIGNAL ON PURPOSE. If this process dies partway
+     * through a teardown, the write has already landed. The detector uses the
+     * same ordering for the same reason.
+     *
+     * ⚠️ Costs ~100ms here: five writes, 20ms apart, because a single write
+     * can be lost. Accepted -- a tenth of a second once, on a path that is
+     * already tearing a session down.
+     *
+     * ⭐ ON A FULL SHUTDOWN, SWEEP EVERYTHING rather than only this
+     * controller. A device this app never tracked is exactly the one nothing
+     * else will reach, and the sweep costs nothing when there is nothing to
+     * silence.
+     *
+     * ⓘ Nothing on this branch turns a microphone on. This is the same class
+     * of guard as the startup sweep above: it exists for a state we cannot
+     * cause, and it runs on the one path where we still own the device. */
+    micsafe_disarm_node(c->dev.path);
+    if (why == CTM_UNPLUG_SHUTDOWN) {
+        ctm_mic_safety_disarm_all_reason("the bridge is shutting down");
+    }
+
     /* Before anything is torn down, while the audio device is still open.
      * There is no "after" -- the unplug closes the very thing that would
      * play it. */
