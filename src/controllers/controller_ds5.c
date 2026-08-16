@@ -106,6 +106,52 @@ static uint8_t ds5_volume_raw_byte(unsigned int value)
  * settings — audio route (0x9x), volume + audio-ctrl bits (0x90), latency
  * (0x91), haptics gain (0x92) — then re-CRC. AUTO touches only the latency
  * block. When: every outbound report, from the pump. Returns 0 (never drops). */
+/* ⛔⛔ EXPERIMENTAL BRANCH ONLY -- keep the microphone armed.
+ *
+ * THE PROBLEM THIS SOLVES, measured 2026-08-16.
+ *
+ * Arming is a STATE CHANGE written into the 0x91 block's first payload byte:
+ * bit 0 is the microphone, bit 1 is HID data. micsafe_arm_node() sets 0b11 and
+ * the controller starts streaming.
+ *
+ * ⚠️ BUT THE HOST SENDS ITS OWN 0x91 BLOCKS, ~30 times a second, and Windows
+ * has never asked for a microphone -- so its byte carries bit 0 CLEAR. Each
+ * one silently disarms what we just armed.
+ *
+ * ⭐ MEASURED: one arming packet yielded ~17 audio frames and then nothing,
+ * every time. Re-arming by hand every 50 reports raised a 500-report window
+ * from 17 audio frames to 105-222. That is this being overwritten, and beaten
+ * back by force.
+ *
+ * ⓘ It also explains why a controller armed from a shell with NO host attached
+ * streamed until it was powered off: nothing was overwriting it.
+ *
+ * ➡️ SO SET THE BIT ON EVERY OUTBOUND REPORT, exactly as AUTO mode supplies a
+ * speaker volume the host never sends. The host's own report stream then keeps
+ * the microphone alive for free -- no timer, no re-arm thread, no interval to
+ * tune.
+ *
+ * ⭐⭐ AND IT IS A DEAD MAN'S SWITCH. Stop sending reports -- because the app
+ * closed, crashed, or the setting was turned off -- and the host's next report,
+ * or the absence of ours, lets the microphone lapse on its own. Nothing has to
+ * remember to clean up.
+ *
+ * ⚠️ ONLY bit 0, and only when capture is enabled. Everything else in the byte
+ * is the host's and is left exactly as it arrived. */
+static int ds5_keep_mic_armed(uint8_t *data, size_t pos, size_t payload_len)
+{
+#if MICSAFE_EXPERIMENTAL_ARMING
+    if (payload_len < 1) return 0;
+    if (!ctm_bt_capture_enabled()) return 0;
+    if (data[pos + 2] & 0x01u) return 0;          /* already set by the host */
+    data[pos + 2] = (uint8_t)(data[pos + 2] | 0x01u);
+    return 1;
+#else
+    (void)data; (void)pos; (void)payload_len;
+    return 0;
+#endif
+}
+
 static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 {
     tv_bridge_worker_settings_t s;
@@ -152,6 +198,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                         patched = 1;
                     }
                 }
+                if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
             } else if (block_id == 0x90 && payload_len >= 8) {
                 /* AUTO MEANS "FOLLOW THE HOST" -- AND THE HOST ASKS FOR
                  * NOTHING.
@@ -282,6 +329,11 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                     patched = 1;
                 }
             }
+            /* ⭐ Both paths, deliberately. AUTO and the explicit audio modes
+             * take different branches, and capture must survive either -- a
+             * user who changes the audio mode should not silently lose the
+             * microphone. */
+            if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
         } else if (block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
             double gain = ds5_haptics_gain(settings->haptics_gain_centi);
             for (size_t i = 2; i < block_len; ++i) {
