@@ -170,6 +170,18 @@ void ctm_controller_set_log_sink(void (*sink)(const char *line));
  * controller_common.c so DS4 + DS5 share it. */
 void ctm_bt_sign_output(uint8_t *data, size_t len);
 
+/* ⛔ Bluetooth microphone capture. Default OFF, and the app must ask for it.
+ *
+ * ⚠️ An armed controller sends audio in the same reports it uses for buttons,
+ * and anything that does not check the tag reads it as thousands of inputs a
+ * second. This app is patched; webOS is not. ⭐ Enabling it also disables this
+ * library's own shutdown-on-audio guard.
+ *
+ * ⓘ Sampled once, as the bridge starts. On the stable branch the setter exists
+ * and does nothing. */
+void ctm_bt_capture_set_enabled(bool on);
+bool ctm_bt_capture_enabled(void);
+
 /* How this controller is attached: "USB" or "BT". When: a type behaves
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);

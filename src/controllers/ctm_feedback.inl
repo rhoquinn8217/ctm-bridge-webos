@@ -254,7 +254,15 @@ static void feedback_play_connected(ctm_controller_t *c)
      * ⚠️ It does NOT disarm on unbridge here, deliberately -- the point of the
      * experiment is to see what an armed controller does when the exclusion
      * goes away. Power the controller off afterwards. */
-    if (c->alsa_fd < 0) micsafe_arm_node(c->dev.path);
+    /* ⭐ THE ONE PLACE THE SETTING IS READ. Everywhere else that mentions
+     * capture turns it OFF -- so a misread here fails to arm, never fails to
+     * disarm.
+     *
+     * ⚠️ The alsa_fd test is how a Bluetooth controller is identified: a wired
+     * one has its own audio device open and needs none of this, because wired
+     * capture is a file descriptor we hold rather than a state the controller
+     * remembers. */
+    if (ctm_bt_capture_enabled() && c->alsa_fd < 0) micsafe_arm_node(c->dev.path);
 #endif
 
     pthread_t sig;

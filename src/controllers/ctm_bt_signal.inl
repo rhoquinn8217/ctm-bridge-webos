@@ -92,11 +92,16 @@
  * ⛔ On the experimental branch it is actively in the way: arming on bridge is
  * immediately undone by the signal that follows it, which is why an armed
  * controller produced no audio at all. There, the bit is preserved. */
-#if MICSAFE_EXPERIMENTAL_ARMING
-#define BTSIG_T_LEAD       0xff   /* ⛔ EXPERIMENTAL: leave the microphone on */
-#else
-#define BTSIG_T_LEAD       0xfe   /* microphone off, as every signal has sent */
-#endif
+/* ⭐ Every signal this project has ever played has also told the controller to
+ * stop listening: bit 0 of this byte is the microphone, and 0xfe leaves it
+ * clear. That was copied from a capture years before anyone knew what the bit
+ * meant, and on stable it is a small free guard.
+ *
+ * ⛔ WITH CAPTURE ENABLED IT HAS TO BE PRESERVED, or the confirmation tone
+ * played on bridging immediately undoes the arming that just happened -- which
+ * is why an armed controller once produced no audio at all. */
+#define BTSIG_T_LEAD_OFF   0xfe   /* microphone off, as every signal has sent */
+#define BTSIG_T_LEAD_KEEP  0xff   /* keep it on, only while capture is enabled */
 #define BTSIG_T_LATENCY    0x60
 #define BTSIG_T_AUDIO_SEQ  (BTSIG_TIMING_AT + 8)   /* report byte 75 */
 
@@ -160,7 +165,8 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
 
     out[BTSIG_TIMING_AT]     = 0x91;
     out[BTSIG_TIMING_AT + 1] = BTSIG_TIMING_LEN;
-    out[BTSIG_TIMING_AT + 2] = BTSIG_T_LEAD;
+    out[BTSIG_TIMING_AT + 2] = ctm_bt_capture_enabled() ? BTSIG_T_LEAD_KEEP
+                                                          : BTSIG_T_LEAD_OFF;
     for (int i = 3; i <= 7; ++i) out[BTSIG_TIMING_AT + i] = BTSIG_T_LATENCY;
 
     /* ⛔ THE FIELD THAT DEFEATED FOUR ATTEMPTS. The map says

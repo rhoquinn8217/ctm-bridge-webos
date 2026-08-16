@@ -78,9 +78,23 @@ static void micsafe_log(const char *fmt, ...)
  * it off and on again always silences it -- confirmed by measurement. Nothing
  * on either machine has to be working for that to succeed.
  *
- * MICSAFE_EXPERIMENTAL_ARMING must be set to 1 by hand, every time, on
- * purpose. It is 0 here and stays 0 in the repository. */
-#define MICSAFE_EXPERIMENTAL_ARMING 0
+ * MICSAFE_EXPERIMENTAL_ARMING is the COMPILE-TIME gate. It is 1 on this branch
+ * and 0 on stable, where none of the arming code exists at all.
+ *
+ * ⭐ IT IS NO LONGER THE SWITCH. Compiling the code in is not the same as
+ * turning it on: the runtime flag below decides that, it defaults to off, and
+ * only one place ever sets it. ⚠️ So an experimental build with the setting
+ * unticked behaves exactly like a build with this define at 0 -- which is what
+ * makes the branch something you switch on rather than something you carry. */
+#define MICSAFE_EXPERIMENTAL_ARMING 1
+
+/* ⛔ EXPERIMENTAL BRANCH ONLY -- the runtime switch lives in its own file.
+ *
+ * ⭐ It is kept out of this one deliberately. Everything here is a GUARD and
+ * exists on stable too; the switch is the one piece that only makes sense
+ * where arming exists. Separating them means a merge from stable can never
+ * bring the two into contact. */
+#include "bt_cap_enabled.inl"
 
 #define MICSAFE_BT_REPORT_ID   0x31
 #define MICSAFE_FLAG_HID_DATA  0x01
@@ -263,21 +277,27 @@ static bool micsafe_check_report(const char *node, const uint8_t *buf, size_t n)
     if (!(buf[1] & MICSAFE_FLAG_MIC_AUDIO)) return false;
 
 #if MICSAFE_EXPERIMENTAL_ARMING
-    /* ⛔ THE SAFETY EXIT IS OFF ON THIS BRANCH.
+    /* ⛔ WITH CAPTURE ENABLED, THE SAFETY EXIT IS OFF.
      *
      * We armed it on purpose, so shutting down on the first report would make
-     * the experiment impossible. ⚠️ That means the ONLY thing standing between
-     * a bug here and an unusable machine is powering the controller off. */
-    {
+     * the feature impossible. ⚠️ That means the ONLY thing standing between a
+     * bug here and an unusable machine is powering the controller off, and the
+     * dialog behind the setting says so.
+     *
+     * ⭐ WITH CAPTURE DISABLED WE FALL THROUGH, and this branch behaves exactly
+     * as stable does: disarm, then exit. Audio arriving when nothing asked for
+     * it is the case the guard was written for, and enabling the feature must
+     * not weaken it for controllers we did not arm. */
+    if (ctm_bt_capture_enabled()) {
         static bool warned = false;
         if (!warned) {
             warned = true;
-            micsafe_log("⛔ EXPERIMENTAL: audio reports arriving and the safety "
-                        "exit is DISABLED -- power the controller off if the "
-                        "app or the desktop starts misbehaving");
+            micsafe_log("⛔ audio reports arriving and the safety exit is "
+                        "DISABLED because capture is enabled -- power the "
+                        "controller off if the app or the TV misbehaves");
         }
+        return false;
     }
-    return false;
 #endif
 
     micsafe_log("⛔ %s is streaming microphone audio and nothing here asked "
