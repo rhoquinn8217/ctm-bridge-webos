@@ -73,6 +73,26 @@ typedef struct {
     uint8_t reserved[28];
 } ctmb_hid_descriptor_info_t;
 
+/* ⭐ latency_ms: the DualSense's Bluetooth AUDIO BUFFER, owned by the host.
+ *
+ * Written into bytes 3..7 of block 0x91 of the 398-byte 0x36 audio output
+ * report. Measured on hardware: HIGHER is smoother, LOWER is choppier. It is a
+ * buffer, and it costs delay for stability.
+ *
+ * ⛔ CTMB_LATENCY_UNSET (0xFFFF) MEANS THE HOST HAS NOT SPOKEN, and the TV keeps
+ * whatever it had. ⚠️ 0 is a REAL VALUE, deliberately reachable -- the point of
+ * host control is to find where the audio stops being recoverable, and a
+ * sentinel of 0 would make the interesting end of the range unreachable.
+ *
+ * ⭐ Applied LIVE. This message is accepted at any point in a session, not only
+ * at the handshake, and the patch hook reads the live settings on every
+ * outbound report -- so a change takes effect on the next report, with no
+ * re-bridge. That matters because the symptom is choppy audio during a game.
+ *
+ * ⓘ Taken from the reserved block, so the struct size is unchanged and an
+ * older build on either side simply ignores it. */
+#define CTMB_LATENCY_UNSET 0xFFFFu
+
 typedef struct {
     uint32_t bt_pace_us;
     uint16_t input_report_len;
@@ -80,7 +100,8 @@ typedef struct {
     uint16_t feature_report_len;
     uint8_t paced_report_count;
     uint8_t paced_report_ids[16];
-    uint8_t reserved[31];
+    uint16_t latency_ms;          /* CTMB_LATENCY_UNSET = leave the TV's value */
+    uint8_t reserved[29];
 } ctmb_host_config_t;
 
 /* CTMB_MSG_ENUM payload (puck composite): the device's OWN enumeration, read

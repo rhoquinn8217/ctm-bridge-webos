@@ -1714,6 +1714,27 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
     } else if (h->type == CTMB_MSG_HOST_CONFIG && h->payload_len >= sizeof(*host_cfg)) {
         memcpy(host_cfg, payload, sizeof(*host_cfg));
         if (host_cfg->bt_pace_us == 0) host_cfg->bt_pace_us = 10667;
+
+        /* ⭐ THE HOST OWNS THE AUDIO BUFFER. Windows is the authority while a
+         * stream is up, and a controller is only ever bridged during one.
+         *
+         * Written straight into the live settings rather than carried
+         * separately: the patch hook already reads them on every outbound
+         * report, so the next report carries the new value. ⭐ That is what
+         * makes it apply mid-game, which is the whole point -- audio going
+         * choppy is not something to fix by unbridging.
+         *
+         * ⛔ CTMB_LATENCY_UNSET leaves the TV's own value alone, so a client
+         * that never sets it behaves exactly as before. */
+        if (host_cfg->latency_ms != CTMB_LATENCY_UNSET) {
+            tv_bridge_worker_settings_t s;
+            ctm_controller_get_settings(c, &s);
+            if (s.latency_ms != (unsigned int)host_cfg->latency_ms) {
+                s.latency_ms = (unsigned int)host_cfg->latency_ms;
+                ctm_controller_set_settings(c, &s);
+                ctl_log(c, "host set audio latency to %u ms", s.latency_ms);
+            }
+        }
     } else if (h->type == CTMB_MSG_ISO_AUDIO) {
         /* Wired speaker and haptics. A host that never sends this never
          * reaches here, and a controller with no audio device open drops it. */
