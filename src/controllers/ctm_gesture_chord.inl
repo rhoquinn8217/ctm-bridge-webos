@@ -78,6 +78,36 @@ static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
 {
     if (!c) return;
 
+    /* ⛔⛔ AN AUDIO REPORT IS ALSO 0x31, AND CARRIES NO TOUCHPAD.
+     *
+     * With microphone capture running, roughly a quarter of the reports carry
+     * sound instead of pad state -- same id, same length, one flag apart. Read
+     * as pad state, the audio bytes say "no fingers".
+     *
+     * ⛔ THE EFFECT IS THAT NO HOLD GESTURE CAN EVER COMPLETE. The chord is seen
+     * on a pad report, lost on the next audio report, and re-armed:
+     *
+     *     chord held, timing a 5000ms hold
+     *     chord released after 1ms, short of 5000ms
+     *
+     * repeating forever -- measured 2026-08-16, with releases of 1 to 5ms
+     * against a 5000ms target. ⚠️ And it TRAPS the user: with capture on, the
+     * only way out of a bridge is the overlay, which crashes on Circle.
+     *
+     * ⭐ SKIPPING IS CORRECT, NOT A WORKAROUND. An audio report is not "nothing
+     * pressed", it is "nothing said about buttons" -- the last pad report still
+     * stands. Returning early leaves the hold timer exactly as it was.
+     *
+     * ⚠️ IT MUST HAPPEN HERE, NOT INSIDE ds5_chord_held(). That returns a bool,
+     * and false there means RELEASED -- which is the bug, not the fix.
+     *
+     * ⓘ Bit 1 says audio is present, bit 0 says pad state is. They are never
+     * both set on this controller (measured across three captures), so an audio
+     * report has nothing here worth reading. */
+    if (len > 1 && data[0] == DS5_BT_REPORT_ID && (data[1] & 0x02u)) {
+        return;
+    }
+
     /* Logged on TRANSITIONS ONLY. This runs once per input report, roughly 250
      * times a second per controller, so a line per call would drown the file
      * and pay for a file open every time. */
