@@ -19,7 +19,21 @@ void build_ds5_detail(lv_obj_t *parent, const logical_device_t *item,
                           0, 100, y, width, 3);
     y = detail_add_slider(parent, "Speaker volume", record ? (int)record->speaker_volume_percent : 0x41,
                           0, 100, y, width, 4);
-    y = detail_add_slider(parent, "Latency", (int)settings->latency_ms, 20, 255, y, width, 1);
+    /* ⭐ FLOOR OPENED TO 0 (was 20), to find out what 0 means.
+     *
+     * ⚠️ NOBODY KNOWS WHAT THIS VALUE DOES. It is written into bytes 3..7 of
+     * block 0x91 of the 398-byte 0x36 audio output report -- five identical
+     * bytes, which is not the shape of a single field. The 20 was a floor
+     * inherited with the slider, never explained, and the default has drifted
+     * 96 -> 48 -> 60 with no reasoning recorded at any step.
+     *
+     * ⛔ No public reverse-engineering documents this block. The community has
+     * mapped the flat 78-byte 0x31 report thoroughly and stops there.
+     *
+     * ⚠️ WATCH FOR: 0x91 also carries the AUDIO SEQUENCE, and the sequence
+     * incrementing is what makes the speaker play at all. A 0 here may silence
+     * speaker audio rather than reduce its latency. */
+    y = detail_add_slider(parent, "Latency", (int)settings->latency_ms, 0, 255, y, width, 1);
     y = detail_add_slider(parent, "Haptics gain", (int)settings->haptics_gain_centi, 0, 500, y, width, 2);
 }
 
