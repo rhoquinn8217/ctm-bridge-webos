@@ -553,9 +553,28 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
     const char *kind = c->ops ? c->ops->kind : "ctl";
+
+    /* ⛔⛔ TIMESTAMPED, AT LAST. Flagged on 2026-07-31 as the obstacle to the
+     * hang investigation -- "the TV log has no wall-clock time, so duration and
+     * ordering across a gap cannot be read from it" -- and still true on
+     * 2026-08-18, when a Bluetooth bridge took eight seconds against a cable's
+     * two and this file could not say where they went.
+     *
+     * ⭐ MILLISECONDS, not seconds. log_append() prints hh:mm:ss, which is
+     * enough to see an eight-second gap and useless for the sub-second ones
+     * that make it up. This is the file that covers the session's own work --
+     * the HID open, the connect, the evdev grabs -- so it is the one that needs
+     * the resolution.
+     *
+     * ⓘ Monotonic rather than wall-clock: a gap is what is being read, and a
+     * clock that can step is the wrong instrument for measuring one. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double t = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+
     fprintf(stderr, "[%s] %s\n", kind, body);
     if (c->log) {
-        fprintf(c->log, "%s\n", body);
+        fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
     pthread_mutex_lock(&c->status_mutex);
@@ -2023,11 +2042,25 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
 static void *session_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    /* First line the session writes. If the eight seconds is BEFORE this, the
+     * cost is in the app or in ctm_controller_plug_in, not in the session. */
+    ctl_log(c, "session thread running");
     ctmb_device_caps_t caps;
     uint8_t report_desc[MAX_REPORT_DESCRIPTOR];
     uint32_t report_desc_len = 0;
 
+    /* ⏱️ TIMED, because a Bluetooth bridge takes eight seconds and every other
+     * stage has been measured and cleared: the TV's own work is 138ms, the
+     * session's logged work is 8ms, and the connect succeeds on the FIRST
+     * attempt -- so the retry loop is not it either. open_hid is the only
+     * stretch left that logs nothing at all. */
+    struct timespec oh0, oh1;
+    clock_gettime(CLOCK_MONOTONIC, &oh0);
     c->hid_fd = open_hid(c, &caps, report_desc, &report_desc_len);
+    clock_gettime(CLOCK_MONOTONIC, &oh1);
+    ctl_log(c, "open_hid took %ldms",
+            (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
+                   (oh1.tv_nsec - oh0.tv_nsec) / 1000000));
     if (c->hid_fd < 0) {
         ctl_log(c, "hid open failed path=%s errno=%d", c->dev.path, errno);
         c->stop = 1;
@@ -2044,11 +2077,35 @@ static void *session_main(void *arg)
     (void)fcntl(c->wake_pipe[1], F_SETFL, fcntl(c->wake_pipe[1], F_GETFL, 0) | O_NONBLOCK);
 
     while (!c->stop) {
+        /* ⛔⛔ THIS LOOP IS WHERE A SLOW BRIDGE GOES, AND IT LOGGED NOTHING.
+         *
+         * Measured 2026-08-18: the TV finished its side of a Bluetooth bridge
+         * in 138ms, the session's own log covered 8ms, and the controller was
+         * unusable for ~7 seconds. The listener put it plainly -- ready=1 at
+         * age_ms=7000 on Bluetooth against 2000 on a cable -- and the gap sat
+         * here, invisible, because a failed attempt said nothing.
+         *
+         * Each pass costs ENet's 400ms timeout plus a 500ms sleep, so seven
+         * seconds is about eight attempts before the host's listener is up.
+         *
+         * ⭐ Counted and logged now: the number of attempts is what says whether
+         * the answer is to wait less, retry faster, or start later. */
+        int attempts = 0;
+        struct timespec w0;
+        clock_gettime(CLOCK_MONOTONIC, &w0);
         while (!c->stop &&
                ctm_transport_connect_once(&c->xport, c->host, c->port, 400) != 0) {
+            ++attempts;
             for (int slept = 0; slept < 500 && !c->stop; slept += 50) usleep(50000);
         }
         if (c->stop) break;
+        if (attempts > 0) {
+            struct timespec w1;
+            clock_gettime(CLOCK_MONOTONIC, &w1);
+            const long waited_ms = (long)((w1.tv_sec - w0.tv_sec) * 1000 +
+                                          (w1.tv_nsec - w0.tv_nsec) / 1000000);
+            ctl_log(c, "connect took %ldms over %d failed attempt(s)", waited_ms, attempts);
+        }
         ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
 
         if (c->ops->grab_evdev) grab_matching_evdev(c);
@@ -2145,6 +2202,15 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     }
     ctm_transport_init(&c->xport, c->enet);
 
+    /* ⏱️ ON THE SAME CLOCK AS THE SESSION'S OWN LINES, deliberately.
+     *
+     * The gesture log and this one use different clocks, so the gap between
+     * "plugged" over there and "session thread running" over here has been
+     * invisible. Everything on each side measures fast -- the plug call is
+     * 15ms, the session is 1s -- while the host reports seven seconds between
+     * asking and the TV connecting. The missing stretch is between this line
+     * and the thread's first, and only one clock can show it. */
+    ctl_log(c, "spawning session thread");
     if (pthread_create(&c->session_thread, NULL, session_main, c) != 0) {
         ctl_log(c, "session thread failed errno=%d", errno);
         ctm_transport_destroy(&c->xport);
