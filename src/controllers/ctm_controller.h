@@ -121,7 +121,14 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * read inside the alsa_fd < 0 branch of feedback_play(). Wired is untouched.
  * The matching gates for gesture, light and rumble live in aurora's
  * ctm_bridge_gesture.c. */
-#define BT_LAYER_TONE 0
+/* ⚠️ NAMED BT_LAYER_TONE UNTIL STEP 5, WHICH WAS MISLEADING. It gates the
+ * core's WHOLE Bluetooth signal -- light, sound and feel together. On Bluetooth
+ * the controller's speaker and its haptics are the same audio device and the
+ * lightbar rides the same report, so the three arrive as one stream and cannot
+ * be gated apart. The old name cost a step to notice: BT_LAYER_RUMBLE could do
+ * nothing while this was off, and nobody expected a "tone" switch to silence a
+ * rumble. */
+#define BT_LAYER_CORE_SIGNAL 1
 
 /* ⭐⭐ T-120: WHAT THE BRIDGE WRITES TO A CONTROLLER WHILE IT IS BRIDGED.
  *
