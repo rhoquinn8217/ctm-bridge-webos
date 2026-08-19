@@ -344,8 +344,28 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     }
 
     /* Prime: the decoder needs a stream to start. A burst from cold produces
-     * nothing at all, which is how three earlier attempts read as failures. */
-    for (int i = 0; i < BTSIG_PRIME_FRAMES; ++i) {
+     * nothing at all, which is how three earlier attempts read as failures.
+     *
+     * ⭐⭐ AND THE VERY FIRST ONE NEEDS LONGER, which is the silent first bridge.
+     *
+     * ⛔ Measured 2026-08-19, and the log made it plain: the silent tone and
+     * the loud ones are the SAME LINE -- `122 sent, 0 failed, took 1220ms for
+     * 1220ms of audio` for both. ⚠️ Delivery was never the problem. The frames
+     * went out perfectly and the controller did not play them.
+     *
+     * ⓘ The call counter said which "first" this is: #5, #6, then #1. That
+     * counter resets when the APP starts, so the silent one is the first tone
+     * since launch -- not since pairing, and not per controller. ➡️ The one
+     * thing genuinely cold on a first run is the controller's decoder.
+     *
+     * ⚠️ Three theories died before this one, all with good correlations: the
+     * speaker not being configured (it was, first try), a failed wake write
+     * (rc=0 and still silent), and the report flags. ⭐ The log line that
+     * settled it was one that already existed. */
+    static int s_primed;
+    const int prime_frames = s_primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
+    s_primed = 1;
+    for (int i = 0; i < prime_frames; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         f.configure = (i == 0);   /* the first report only -- see btsig_build */
         btsig_build(rep, &f);
@@ -412,19 +432,24 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         int lvl = btsig_level(pattern, i, LIT);
         f.audio = note; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
-        /* ⛔⛔ THE LIGHT IS NOT OURS ANY MORE. Changed 2026-08-19.
+        /* ⭐⭐ THE LIGHT IS OURS ONLY ON THE WAY BACK. Settled 2026-08-19 after
+         * getting it wrong in both directions.
          *
-         * This signal takes about a second and a half and runs AFTER the bridge
-         * completes, so the lightbar it painted landed after the app had
-         * already shown magenta-while-asking and a green pulse on success --
-         * and then stayed, because releasing a claim only stops writing; the
-         * last colour written is still showing.
+         * ⛔ ON A BRIDGE THE CORE MUST NOT PAINT. This signal runs AFTER the
+         * bridge completes, so its colour lands on top of the app's own green
+         * and then stays -- releasing a claim only stops writing, it does not
+         * restore anything.
          *
-         * ⭐ The app owns the light now and says more with it than this can:
-         * magenta while asking, green breathing on success, red flashing on a
-         * refusal, yellow breathing on a handback. This carries the SOUND and
-         * the FEEL, which nothing else on Bluetooth can. */
-        f.claim_led = 0;
+         * ⭐ ON AN UNBRIDGE THE CORE SHOULD PAINT, and the app cannot. The
+         * unbridge chord is detected HERE, not in the app: a bridged
+         * controller's touchpad reports come through the core, so the app is
+         * blind to it. It only learns of the unplug from its plugged-check,
+         * a second or more after this tone has finished. Measured: `unplug
+         * pulse finished, 29 steps in 1453ms` arriving well after the sound.
+         *
+         * ➡️ So the light and the tone travel together on the way back, and
+         * the app restores the player colour when it catches up. */
+        f.claim_led = (pattern == BTSIG_HANDED_BACK);
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -442,8 +467,8 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
          * does: it is what makes you look down in the first place. */
         f.audio = NULL; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
-        /* The light is not ours -- see the note on the first of these. */
-        f.claim_led = 0;
+        /* Ours only on the way back -- see the note on the first of these. */
+        f.claim_led = (pattern == BTSIG_HANDED_BACK);
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -484,14 +509,76 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
 
     if (log_to) {
         ctl_log(log_to,
-                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio",
-                call, (int)pattern, sent, failed, took_ms, owed_ms);
+                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio (prime %d)",
+                call, (int)pattern, sent, failed, took_ms, owed_ms, prime_frames);
     } else {
         fprintf(stderr,
                 "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio\n",
                 call, (int)pattern, sent, failed, took_ms, owed_ms);
     }
     return failed ? -1 : 0;
+}
+
+/* ⭐⭐ WAKE THE SPEAKER EARLY, so the first tone of a session is not the thing
+ * that configures it.
+ *
+ * ⛔ THE FAULT THIS EXISTS FOR: the FIRST bridge of a session plays no tone.
+ * Every bridge after it does, and so does the first UNBRIDGE seconds later --
+ * so the speaker works by then. It simply was not ready yet.
+ *
+ * ⚠️ And it had no chance to be: the speaker settings rode on the tone's very
+ * own first report. Configure and play, in the same breath, with no head
+ * start. ⓘ The host does not do that -- it configures when the session opens
+ * and sends audio much later.
+ *
+ * ⭐ Same shape as the wired path, which has always opened its audio device in
+ * on_plug_init for exactly this reason.
+ *
+ * ⓘ One report, settings only, no audio and no light. Cheap, and idempotent on
+ * a reconnect. */
+static int btsig_wake_speaker(ctm_controller_t *c)
+{
+    if (!c || c->hid_fd < 0) return -1;
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.audio = NULL;
+    f.seq = 0;
+    f.haptics = 0;
+    f.claim_led = 0;
+    f.configure = 1;
+    btsig_build(rep, &f);
+    /* ⛔⛔ RETRIED, BECAUSE THE FIRST ONE OF A SESSION FAILS. Measured
+     * 2026-08-19:
+     *
+     *     btsig: speaker woken at session open, rc=-1   <- first session
+     *     btsig: speaker woken at session open, rc=0
+     *     btsig: speaker woken at session open, rc=0
+     *
+     * ⭐ That single failure IS the silent first bridge. The speaker never gets
+     * its settings, so the tone that follows plays into a speaker that was
+     * never turned on -- and every later bridge is fine because the settings
+     * stuck the second time.
+     *
+     * ⚠️ THE LIKELY REASON, not proven: the full-report request runs on a
+     * detached thread holding a dup of this same device, and on a freshly
+     * paired controller it is still in flight -- five seconds of it -- when
+     * this write goes out.
+     *
+     * ⭐ Rather than order those two against each other, this simply tries
+     * again. Bounded, and it says how many attempts it took so a change in
+     * that number is visible rather than silent. */
+    int ok = 0, tries = 0;
+    for (; tries < 5 && !ok; ++tries) {
+        if (tries) {
+            struct timespec ts = {0, 100 * 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        ok = (write(c->hid_fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep));
+    }
+    ctl_log(c, "btsig: speaker woken at session open, rc=%d after %d attempt(s)",
+            ok ? 0 : -1, tries);
+    return ok ? 0 : -1;
 }
 
 /* The ordinary case: a controller we already have a session for. */

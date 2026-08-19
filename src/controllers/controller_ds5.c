@@ -409,6 +409,11 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
     if (strcmp(ctm_controller_bus(c), "USB") == 0)
         ctm_controller_open_alsa_playback(c);
 
+    /* ⓘ Over Bluetooth there is nothing to open, but the speaker still has to
+     * be told its volume and routing before anything plays. That is done in
+     * controller_common.c, beside the code that owns the Bluetooth signal --
+     * this file cannot see it. */
+
     return 0;
 }
 

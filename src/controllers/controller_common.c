@@ -2110,6 +2110,31 @@ static void *session_main(void *arg)
 
         if (c->ops->grab_evdev) grab_matching_evdev(c);
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
+
+        /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE
+         * THE CONFIRMATION.
+         *
+         * ⛔ THE FAULT: the FIRST bridge of a session played no tone. Every one
+         * after it did, and so did the first unbridge seconds later, so the
+         * speaker worked by then -- it was not ready yet. ⚠️ And it had no
+         * chance to be: the speaker settings rode on the tone's OWN first
+         * report, so configure and play happened in the same breath.
+         *
+         * ⛔⛔ FIRST ATTEMPT PUT THIS IN feedback_play_connected AND IT BROUGHT
+         * THE FLICKER BACK. That runs at the instant the app draws its green
+         * breath, so a 398-byte write landed in the middle of the app's own
+         * light writes -- two writers on one light, which is what flickering
+         * has meant every time. ⓘ It also gave almost no head start, which was
+         * the entire point.
+         *
+         * ⭐ Here it is before the session loop and well before anything is
+         * drawn. Same place the wired path opens its audio device, and for the
+         * same reason.
+         *
+         * ⓘ Wired takes the other branch: it has a real audio device, opened
+         * in on_plug_init just above. */
+        if (c->alsa_fd < 0) btsig_wake_speaker(c);
+
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
 
