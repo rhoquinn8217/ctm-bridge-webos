@@ -123,8 +123,62 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         }
         /* Magenta going to the host, yellow coming back -- the same
          * vocabulary the app's own patterns used, so nothing is relearned. */
-        btsig_play(c, pattern);
-        ctl_log(c, "feedback: %s -- signalled from the TV", what);
+        /* ⭐⭐ QUEUE THE TONE AND RETURN. RESTORED 2026-08-18 from the version
+         * that shipped in build 100.
+         *
+         * ⛔ WHY THE TV-BUILT VERSION WAS REMOVED. It built and wrote the whole
+         * signal here -- 600ms of priming silence and then the tone, as a
+         * stream of reports -- and did it synchronously. Measured on the C3:
+         *
+         *   - 5144ms between the plug succeeding and the next line, with the
+         *     interface, the remote pointer and the host mouse all dead for it
+         *   - the controller switched itself off afterwards
+         *   - and NO TONE WAS EVER HEARD from it, on any build since 100
+         *
+         * ➡️ It cost five seconds, took the controller offline, and delivered
+         * nothing. Build 100 was tested on 2026-08-18 by deploying it: tone,
+         * rumble, lightbar, three back-to-back bridge cycles, no stall.
+         *
+         * ⚠️ THE ARGUMENT FOR REMOVING IT DID NOT HOLD EITHER. It was replaced
+         * because the queued tone was said to fail over the internet -- "split
+         * into two beeps or not at all, measured on C3 and C5". Build 100 was
+         * re-tested REMOTELY on the C3 and the tone was correct.
+         *
+         * ⭐ Queuing is what makes it fast: the report builder feeds one frame
+         * per outgoing report, so nothing blocks here. The wait below is only
+         * for the unplug, where the teardown would otherwise throw the queue
+         * away -- and it runs on the gesture worker, never the session thread.
+         *
+         * ⓘ The pulse is not queued here: it goes through SDL from the app,
+         * because the haptics block is only present when the host is actually
+         * sending haptics, which it is not at the moment a controller is
+         * bridged. */
+        uint8_t hold[2] = { (uint8_t)(FEEDBACK_HOLD_MS & 0xff),
+                            (uint8_t)((FEEDBACK_HOLD_MS >> 8) & 0xff) };
+        (void)c_send(c, CTMB_MSG_AUDIO_HOLD, 0, 0, hold, sizeof(hold));
+        ctm_controller_tone_start(c);
+        ctl_log(c, "feedback: %s -- asked for a %d ms hold and queued the tone",
+                what, FEEDBACK_HOLD_MS);
+
+        /* ⛔ NEVER WAIT ON THE SESSION THREAD. That thread carries the reports
+         * the frames ride on, so sleeping on it starves the very flow being
+         * waited for. Measured on the 32SR50F 2026-08-11: waiting 800ms left
+         * the tone audible, waiting 1200ms left it SILENT. A longer wait made
+         * it worse, which is the signature of blocking what you are waiting on.
+         *
+         * ⭐ The connect does not wait at all -- the session carries on and the
+         * frames leave on their own. That is why bridging is fast. The unplug
+         * waits, because the teardown follows immediately and would discard the
+         * queue, and it runs on the gesture worker where waiting is free. */
+        for (int waited = 0; wait_out && waited < FEEDBACK_TONE_WAIT_MS; waited += 10) {
+            if (!ctm_controller_tone_pending(c)) break;
+            struct timespec tone_ts = {0, 10 * 1000000L};
+            nanosleep(&tone_ts, NULL);
+        }
+        if (wait_out && ctm_controller_tone_pending(c)) {
+            ctl_log(c, "feedback: %s -- tone did not finish within %d ms",
+                    what, FEEDBACK_TONE_WAIT_MS);
+        }
         return;
     }
 

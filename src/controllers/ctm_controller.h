@@ -116,6 +116,26 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
 
+/* ⛔⛔ THE BLUETOOTH TONE, SEPARATELY -- a diagnostic switch, not a feature.
+ *
+ * On Bluetooth there is no audio device, so the TV builds the whole signal
+ * itself and writes it straight to the controller: six hundred milliseconds of
+ * priming silence and then the tone, as a stream of reports. Its own comment
+ * says it takes about a second and a half.
+ *
+ * ⚠️ Measured 2026-08-18: a Bluetooth bridge sat for 5.2 seconds between the
+ * plug succeeding and the next line, and the controller then switched itself
+ * off. A bisect over kept builds put the change at build 101 -- the commit that
+ * introduced exactly this.
+ *
+ * ⭐ Set to 0 to leave the light and the felt pulse alone and send NO audio, so
+ * the stall and the power-off can be attributed or ruled out without also
+ * disabling the gestures. CTM_SIGNALS_ENABLED covers far more than its name
+ * suggests and taking it to 0 removed the gestures entirely.
+ *
+ * ⛔ SHIPS AS 1. This exists to answer a question, not to turn a feature off. */
+#define CTM_BT_TONE_ENABLED 1
+
 /* Signal a REFUSED plug, with no session behind it.
  *
  * A failed plug leaves nothing -- no controller object, no open device -- so

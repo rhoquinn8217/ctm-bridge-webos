@@ -1096,14 +1096,48 @@ static int hex_equals(const char *text, unsigned int value)
 
 /* Sony feature-0x05 "full BT mode" probe. When: at HID open, DS only
  * (gated by ops->request_bt_mode). */
-static void request_full_bt_mode(int fd)
+/* ⛔⛔ THIS IS THE FIVE-SECOND STALL ON A BLUETOOTH BRIDGE. Found 2026-08-18.
+ *
+ * Reading feature 0x05 over Bluetooth on this TV takes about five seconds
+ * when the controller does not answer -- measured on the app side, where the
+ * same request is made when a controller first appears: 4.99s, every time,
+ * against 17ms on a cable. Here it was being made AGAIN, at HID open, on the
+ * session thread, immediately after the gesture handed the controller over.
+ * That is exactly where the gesture log went quiet and the interface froze.
+ *
+ * ⭐ It cannot simply be skipped: on a set where the controller binds to
+ * hid-generic nothing else makes this request, and without it the controller
+ * stays in its reduced ten-byte report and no input arrives at all. So it is
+ * still asked -- but from a thread of its own, so the session opens at once
+ * and the answer, or the timeout, lands whenever it lands.
+ *
+ * ⚠️ The fd is dup'd, because the session may close its own before the
+ * request returns. The controller does not care which descriptor asked. */
+static void *request_full_bt_mode_thread(void *arg)
 {
+    int fd = (int)(intptr_t)arg;
     uint8_t feature[64];
     memset(feature, 0, sizeof(feature));
     feature[0] = 0x05;
     if (ioctl(fd, HIDIOCGFEATURE(sizeof(feature)), feature) < 0) {
         fprintf(stderr, "controller: feature 0x05 failed errno=%d\n", errno);
     }
+    close(fd);
+    return NULL;
+}
+
+static void request_full_bt_mode(int fd)
+{
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) return;
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &attr, request_full_bt_mode_thread, (void *)(intptr_t)dup_fd) != 0) {
+        close(dup_fd);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 /* INVESTIGATION, 2026-08-08 -- read only, changes nothing.

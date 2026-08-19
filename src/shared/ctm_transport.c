@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -53,6 +55,68 @@ static void tune_tcp(int fd)
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
 }
 
+/* ⛔⛔ HOW LONG TO WAIT FOR A CONNECT BEFORE GIVING UP.
+ *
+ * A plain blocking connect() has no deadline of its own. To a port that
+ * REFUSES, it returns instantly; to one that silently DROPS -- a host that is
+ * gone, a firewall, a listener that died -- it waits out the kernel's SYN
+ * timeout, which is about a minute.
+ *
+ * ⛔ AND THAT MINUTE LANDS ON THE INTERFACE. Plug out sets a stop flag and then
+ * joins the session thread. A thread parked inside connect() cannot see a flag,
+ * so the join waits for whatever is left of the connect, and the join runs on
+ * the UI thread. Confirmed on the TV with the attempts sat in SYN_SENT, and
+ * measured as a one-minute freeze of the overlay -- the video stream carried on
+ * throughout, because only the overlay's thread was waiting.
+ *
+ * ⭐ Two seconds is chosen against the failure it exists for, not against a
+ * healthy connect. On a local network a listener that is there answers in
+ * single-digit milliseconds; one that does not answer in two seconds is not
+ * about to. The retry loop is what handles a listener that comes back, and it
+ * can now run instead of the UI waiting. */
+#define CTM_CONNECT_TIMEOUT_MS 2000
+
+/* connect() with a deadline: start it non-blocking, wait on the socket, and
+ * read the result back out of SO_ERROR.
+ *
+ * ⚠️ The blocking flag is restored afterwards, because everything downstream
+ * expects a blocking socket and would otherwise get EAGAIN on its first read
+ * for reasons it has no way to explain. */
+static int connect_with_deadline(int fd, const struct sockaddr *addr,
+                                 socklen_t addrlen, int timeout_ms)
+{
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+
+    int rc = connect(fd, addr, addrlen);
+    if (rc != 0 && errno == EINPROGRESS) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        do {
+            rc = poll(&pfd, 1, timeout_ms);
+        } while (rc < 0 && errno == EINTR);
+
+        if (rc <= 0) {
+            /* Timed out, or poll itself failed. Either way this is not a
+             * connection, and the caller moves on to the next address. */
+            (void) fcntl(fd, F_SETFL, flags);
+            return -1;
+        }
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+            (void) fcntl(fd, F_SETFL, flags);
+            return -1;
+        }
+        rc = 0;
+    }
+    (void) fcntl(fd, F_SETFL, flags);
+    return rc;
+}
+
 static int connect_tcp(const char *host, int port)
 {
     char port_text[16];
@@ -69,7 +133,8 @@ static int connect_tcp(const char *host, int port)
     for (struct addrinfo *rp = result; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        if (connect_with_deadline(fd, rp->ai_addr, rp->ai_addrlen,
+                                  CTM_CONNECT_TIMEOUT_MS) == 0) break;
         close(fd);
         fd = -1;
     }

@@ -420,6 +420,16 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
 }
 
 /* The ordinary case: a controller we already have a session for. */
+/* ⛔ NOT CALLED AS OF 2026-08-18. The Bluetooth signal went back to queuing a
+ * pre-encoded tone -- see the note in ctm_feedback.inl for the measurements.
+ *
+ * ⚠️ Kept rather than deleted: the report layout below was hard-won, and its
+ * own commit message warns that "every byte here is load-bearing". If the
+ * queued tone is ever found wanting over a slow link, this is the other answer
+ * and it should not have to be rediscovered.
+ *
+ * The attribute stops the build failing on an unused static. */
+__attribute__((unused))
 static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
 {
     if (!c) return -1;
