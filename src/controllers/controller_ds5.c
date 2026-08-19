@@ -147,14 +147,14 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                     patched = 1;
                 }
             }
-            if (block_id == 0x91 && payload_len >= 6) {
+            if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
                 for (size_t i = 3; i <= 7; ++i) {
                     if (data[pos + i] != auto_latency) {
                         data[pos + i] = auto_latency;
                         patched = 1;
                     }
                 }
-            } else if (block_id == 0x90 && payload_len >= 8) {
+            } else if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
                 /* AUTO MEANS "FOLLOW THE HOST" -- AND THE HOST ASKS FOR
                  * NOTHING.
                  *
@@ -226,7 +226,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
 
-        if (block_id == 0x90 && payload_len >= 8) {
+        if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
             /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.
              *
              * Recorded because two builds of logging were spent finding it,
@@ -272,19 +272,19 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             if (ctm_controller_tone_take(c, &data[pos + 2], (int)payload_len) > 0) {
                 patched = 1;
             }
-        } else if ((block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
+        } else if (BT_FEAT_AUDIO && (block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
             if (data[pos] != audio_block) {
                 data[pos] = audio_block;
                 patched = 1;
             }
-        } else if (block_id == 0x91 && payload_len >= 6) {
+        } else if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
             for (size_t i = 3; i <= 7; ++i) {
                 if (data[pos + i] != latency) {
                     data[pos + i] = latency;
                     patched = 1;
                 }
             }
-        } else if (block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
+        } else if (BT_FEAT_HAPTICS && block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
             double gain = ds5_haptics_gain(settings->haptics_gain_centi);
             for (size_t i = 2; i < block_len; ++i) {
                 int sample = (int)(int8_t)data[pos + i];

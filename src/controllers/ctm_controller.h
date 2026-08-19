@@ -123,6 +123,37 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * ctm_bridge_gesture.c. */
 #define BT_LAYER_TONE 0
 
+/* ⭐⭐ T-120: WHAT THE BRIDGE WRITES TO A CONTROLLER WHILE IT IS BRIDGED.
+ *
+ * The BT_LAYER_ gates above cover the CONFIRMATION signals -- the things that
+ * happen once, at the moment of bridging. These cover the ongoing ones: what
+ * the output patcher puts into every report the host sends.
+ *
+ * ⛔ Separate on purpose. A confirmation that costs five seconds is a bad
+ * bridge; an ongoing write that costs anything is a bad SESSION, and the two
+ * fail in ways that look nothing alike.
+ *
+ * ⚠️ THESE ARE NOT BLUETOOTH-ONLY. The patcher runs on the Bluetooth report
+ * format, so a cable never reaches it -- but that is a property of the report,
+ * not of a check, and it is worth knowing the difference. A wired controller
+ * gets its audio through ALSA and its haptics inside the same reports.
+ *
+ * ⓘ All 1: nothing is switched off. They exist so a layer can be removed for
+ * one build and put back, the way the confirmation gates were.
+ *
+ *   BT_FEAT_AUDIO    block 0x90 -- volumes, routing, echo cancellation
+ *                    and 0x93-0x96 -- the speaker's own audio frames
+ *   BT_FEAT_LATENCY  block 0x91 -- the audio buffer, host-owned
+ *   BT_FEAT_HAPTICS  block 0x92 -- haptics gain
+ *
+ * ⛔ THE LIGHTBAR HAS NO GATE HERE, and that is not an oversight: the core
+ * writes no lightbar at all. It belongs to the player colour from the app side
+ * and to the Bluetooth confirmation signal, which BT_LAYER_LIGHT already
+ * covers. */
+#define BT_FEAT_AUDIO    1
+#define BT_FEAT_LATENCY  1
+#define BT_FEAT_HAPTICS  1
+
 /* Signal a REFUSED plug, with no session behind it.
  *
  * A failed plug leaves nothing -- no controller object, no open device -- so
