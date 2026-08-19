@@ -116,6 +116,68 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 
     if (!data || len < 12 || (data[0] != 0x36 && data[0] != 0x32)) return 0;
 
+    /* ⭐ THE SHAPE OF THE FIRST FEW REPORTS, AND THEN NOTHING.
+     *
+     * ⛔ An earlier version of this only logged once an AUDIO block appeared,
+     * and built a 512-byte string on EVERY report until then. No report ever
+     * had one, so it ran on all of them and the extra work killed the link --
+     * the controller powered itself off. Measured 2026-08-19, build 176.
+     *
+     * ⚠️ So: a hard count, decremented on every call, and NOTHING is built once
+     * it reaches zero. Whatever the first few reports look like is what we get.
+     *
+     * ⭐ Why it is wanted: the TV's own Bluetooth signal invents a 398-byte
+     * report with ONE audio block, so it needs 100 reports a second. The link
+     * delivers about 25. If the host's reports carry four frames each, that is
+     * the shape to copy. */
+    {
+        static int s_shape_left = 3;
+        if (s_shape_left > 0) {
+            --s_shape_left;
+            char line[400];
+            int n = snprintf(line, sizeof(line), "report_shape: id=0x%02x len=%zu:", data[0], len);
+            size_t p2 = 2;
+            while (p2 + 2 <= len - 4 && n > 0 && (size_t)n < sizeof(line) - 24) {
+                uint8_t bid = data[p2];
+                size_t blen = data[p2 + 1];
+                if (bid == 0x00) break;
+                n += snprintf(line + n, sizeof(line) - n, " [%02x len=%zu at=%zu]", bid, blen, p2);
+                p2 += blen + 2;
+            }
+            ctl_log(c, "%s", line);
+
+            /* ⭐⭐ AND THE BYTES OF THE BLOCKS WE FILL OURSELVES.
+             *
+             * The host's reports and ours have the SAME shape -- same id, same
+             * length, same blocks at the same offsets. Yet the host's flow at
+             * full rate and ours take 89 ms each and kill the link. So the
+             * difference is in the CONTENTS, and these are the three blocks
+             * where we choose values rather than copy them.
+             *
+             * ⓘ Audio payload is skipped: it is Opus, and 200 bytes of it says
+             * nothing we can read. */
+            char hx[300];
+            int m = 0;
+            m += snprintf(hx + m, sizeof(hx) - m, "host_bytes: hdr %02x %02x |", data[0], data[1]);
+            m += snprintf(hx + m, sizeof(hx) - m, " 90:");
+            for (int k = 0; k < 12 && (size_t)(2 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[2 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 91:");
+            for (int k = 0; k < 9 && (size_t)(67 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[67 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 95hdr:");
+            for (int k = 0; k < 4 && (size_t)(76 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[76 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 92hdr:");
+            for (int k = 0; k < 6 && (size_t)(278 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[278 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | tail:");
+            for (int k = 4; k >= 1; --k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[len - k]);
+            ctl_log(c, "%s", hx);
+        }
+    }
+
     int patched = 0;
     size_t pos = 2;
     size_t limit = len - 4;

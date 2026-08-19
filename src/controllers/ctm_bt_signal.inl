@@ -69,6 +69,15 @@
  * already lost. Panel 1 claims the two audio fields; panel 2 claims the LED
  * only while we are using it, and nothing else ever. */
 #define BTSIG_F1_AUDIO     0xa0   /* speaker volume + audio control */
+/* ⭐ Present in EVERY report the host sends, and absent from ours until
+ * 2026-08-19. What it enables is not documented in anything we have -- it is
+ * copied because it is what a working report contains. Captured off the relay
+ * while YouTube played through a bridged controller:
+ *
+ *   host:  90 3f 00 14 00 00 00 00 00 00 00 00
+ *   ours:  90 3f a0 00 00 00 00 64 00 3c 00 00
+ */
+#define BTSIG_F2_HOST      0x14
 #define BTSIG_F2_LED       0x04   /* AllowLedColor, and nothing else */
 
 #define BTSIG_SPK_VOL      0x64   /* full scale; below ~0x3c is inaudible */
@@ -119,6 +128,8 @@ typedef struct {
     int            haptics;    /* generate a felt pulse into the haptic block */
     int            haptic_n;   /* running sample count, so the wave is smooth */
     int            claim_led;  /* set the lightbar, or leave it to SDL */
+    /* ⭐ Apply the speaker settings, or just carry audio. See btsig_build. */
+    int            configure;
     uint8_t        r, g, b;
 } btsig_frame_t;
 
@@ -130,10 +141,35 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
 
     out[BTSIG_STATE_AT]     = 0x90;
     out[BTSIG_STATE_AT + 1] = BTSIG_STATE_LEN;
-    out[BTSIG_S_FLAGS1]     = BTSIG_F1_AUDIO;
-    out[BTSIG_S_FLAGS2]     = f->claim_led ? BTSIG_F2_LED : 0x00;
-    out[BTSIG_S_SPK_VOL]    = BTSIG_SPK_VOL;
-    out[BTSIG_S_AUDIO_CTL]  = BTSIG_AUDIO_CTL;
+    /* ⛔⛔ CONFIGURE ONCE, THEN JUST CARRY AUDIO.
+     *
+     * BTSIG_F1_AUDIO (0xa0) means "apply the speaker volume and audio control
+     * in this report". It was set on EVERY report, so the controller was told
+     * to reconfigure its audio subsystem a hundred times a second -- and that
+     * is what stalled the writes and dropped the link. Measured 2026-08-19:
+     * 122 reports took 5243ms for 1220ms of audio, then the controller powered
+     * itself off.
+     *
+     * ⭐ A real report from the host, captured the same day:
+     *
+     *     90 3f 00 14 00 00 00 00 00 00 00 00
+     *          ^^ ^^                ^^    ^^
+     *          f1 f2               vol   ctl
+     *
+     * ⚠️ FLAGS1 IS ZERO and the volume and control bytes are zero WITH it --
+     * they are ignored unless the flag asks for them. The host configures the
+     * speaker once when the session opens and never again; every report after
+     * that is pure carriage.
+     *
+     * ⭐ FLAGS2 is copied from the host as well -- 0x14, against our previous
+     * 0x00. What it enables is not documented in anything we have; it is set
+     * because it is present in every report the controller accepts. */
+    out[BTSIG_S_FLAGS1]     = f->configure ? BTSIG_F1_AUDIO : 0x00;
+    out[BTSIG_S_FLAGS2]     = BTSIG_F2_HOST | (f->claim_led ? BTSIG_F2_LED : 0x00);
+    if (f->configure) {
+        out[BTSIG_S_SPK_VOL]   = BTSIG_SPK_VOL;
+        out[BTSIG_S_AUDIO_CTL] = BTSIG_AUDIO_CTL;
+    }
     if (f->claim_led) {
         out[BTSIG_S_LED_R + 0] = f->r;
         out[BTSIG_S_LED_R + 1] = f->g;
@@ -282,10 +318,36 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     memset(&f, 0, sizeof(f));
     int seq = 0, hn = 0, sent = 0, failed = 0;
 
+    /* ⭐⭐ OUR OWN BYTES, in the same layout the relay logs for the host's.
+     * The shapes match; the contents are the only place a difference can be,
+     * and these are the blocks where we choose values rather than copy them. */
+    {
+        btsig_frame_t probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.audio = NULL; probe.seq = 0;
+        uint8_t sample[BTSIG_REPORT_LEN];
+        btsig_build(sample, &probe);
+        char hx[300];
+        int m = 0;
+        m += snprintf(hx + m, sizeof(hx) - m, "ours_bytes: hdr %02x %02x |", sample[0], sample[1]);
+        m += snprintf(hx + m, sizeof(hx) - m, " 90:");
+        for (int k = 0; k < 12; ++k) m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[2 + k]);
+        m += snprintf(hx + m, sizeof(hx) - m, " | 91:");
+        for (int k = 0; k < 9; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[67 + k]);
+        m += snprintf(hx + m, sizeof(hx) - m, " | 95hdr:");
+        for (int k = 0; k < 4; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[76 + k]);
+        m += snprintf(hx + m, sizeof(hx) - m, " | 92hdr:");
+        for (int k = 0; k < 6; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[278 + k]);
+        m += snprintf(hx + m, sizeof(hx) - m, " | tail:");
+        for (int k = 4; k >= 1; --k) m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[BTSIG_REPORT_LEN - k]);
+        if (log_to) ctl_log(log_to, "%s", hx);
+    }
+
     /* Prime: the decoder needs a stream to start. A burst from cold produces
      * nothing at all, which is how three earlier attempts read as failures. */
     for (int i = 0; i < BTSIG_PRIME_FRAMES; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
+        f.configure = (i == 0);   /* the first report only -- see btsig_build */
         btsig_build(rep, &f);
         if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
@@ -350,7 +412,19 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         int lvl = btsig_level(pattern, i, LIT);
         f.audio = note; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
-        f.claim_led = 1;
+        /* ⛔⛔ THE LIGHT IS NOT OURS ANY MORE. Changed 2026-08-19.
+         *
+         * This signal takes about a second and a half and runs AFTER the bridge
+         * completes, so the lightbar it painted landed after the app had
+         * already shown magenta-while-asking and a green pulse on success --
+         * and then stayed, because releasing a claim only stops writing; the
+         * last colour written is still showing.
+         *
+         * ⭐ The app owns the light now and says more with it than this can:
+         * magenta while asking, green breathing on success, red flashing on a
+         * refusal, yellow breathing on a handback. This carries the SOUND and
+         * the FEEL, which nothing else on Bluetooth can. */
+        f.claim_led = 0;
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -368,7 +442,8 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
          * does: it is what makes you look down in the first place. */
         f.audio = NULL; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
-        f.claim_led = 1;
+        /* The light is not ours -- see the note on the first of these. */
+        f.claim_led = 0;
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
