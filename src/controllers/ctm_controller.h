@@ -116,6 +116,13 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
 
+/* T-120: the Bluetooth confirmation tone, gated separately so the layered
+ * rebuild in aurora can add it last. Bluetooth-only by construction -- it is
+ * read inside the alsa_fd < 0 branch of feedback_play(). Wired is untouched.
+ * The matching gates for gesture, light and rumble live in aurora's
+ * ctm_bridge_gesture.c. */
+#define BT_LAYER_TONE 0
+
 /* Signal a REFUSED plug, with no session behind it.
  *
  * A failed plug leaves nothing -- no controller object, no open device -- so

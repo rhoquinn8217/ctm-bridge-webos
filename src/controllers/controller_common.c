@@ -1096,14 +1096,51 @@ static int hex_equals(const char *text, unsigned int value)
 
 /* Sony feature-0x05 "full BT mode" probe. When: at HID open, DS only
  * (gated by ops->request_bt_mode). */
-static void request_full_bt_mode(int fd)
+/* ⛔⛔ THE FOUR SECONDS BETWEEN A WIRED BRIDGE AND A BLUETOOTH ONE.
+ *
+ * Measured 2026-08-18 with every layer of signalling gated off (T-120 step 1):
+ * a bare panel-button bridge took ~2s on a cable and ~8s over Bluetooth. Same
+ * code, same button, same gates -- and this is the ONLY transport-dependent
+ * call in the open path.
+ *
+ * The app makes the same request when a controller first appears and it was
+ * timed there: 4.99s over Bluetooth against 17ms on a cable. Here it runs
+ * inside open_hid, on the session thread, immediately after the bridge is
+ * handed over -- which is where the interface freezes.
+ *
+ * ⭐ It cannot be skipped. Where a controller binds to hid-generic nothing else
+ * makes this request, and without it the controller stays in its reduced
+ * ten-byte report and no input arrives at all. So it is still asked -- from a
+ * thread of its own, so the session opens at once and the answer, or the
+ * timeout, lands whenever it lands.
+ *
+ * ⚠️ The fd is dup'd: the session may close its own before the request
+ * returns, and the controller does not care which descriptor asked. */
+static void *request_full_bt_mode_thread(void *arg)
 {
+    int fd = (int)(intptr_t)arg;
     uint8_t feature[64];
     memset(feature, 0, sizeof(feature));
     feature[0] = 0x05;
     if (ioctl(fd, HIDIOCGFEATURE(sizeof(feature)), feature) < 0) {
         fprintf(stderr, "controller: feature 0x05 failed errno=%d\n", errno);
     }
+    close(fd);
+    return NULL;
+}
+
+static void request_full_bt_mode(int fd)
+{
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) return;
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &attr, request_full_bt_mode_thread, (void *)(intptr_t)dup_fd) != 0) {
+        close(dup_fd);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 /* INVESTIGATION, 2026-08-08 -- read only, changes nothing.
