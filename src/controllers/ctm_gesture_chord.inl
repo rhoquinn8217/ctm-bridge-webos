@@ -48,6 +48,56 @@
 #define DS5_BT_REPORT_ID   0x31
 #define DS5_BT_OFFSET      1
 
+/* ⭐⭐ BLANK A DUALSENSE INPUT REPORT: nothing pressed, sticks centred, triggers
+ * released. Used while the TV's overlay is open -- see ctm_input_set_held.
+ *
+ * ⛔ THE POINT IS THE HELD BUTTON. A host keeps the last state it was given, so
+ * dropping reports would leave a button that was down when the overlay opened
+ * down in the game, indefinitely. A blank report is what releases it, and
+ * sending one per real report keeps the cadence normal so nothing upstream
+ * decides the controller has gone away.
+ *
+ * ⓘ Offsets are the chord detector's, from the same measurement: wired report
+ * 0x01 at offset 0, Bluetooth 0x31 one byte further along.
+ *
+ * ⚠️ THE TOUCHPAD IS DELIBERATELY LEFT ALONE. The unbridge chord is read from
+ * the real report before this runs, but a game that reads touch data should see
+ * fingers stop, not freeze -- and the touch bytes already read "no finger" as
+ * 0x80, which is what they are set to here.
+ *
+ * ⓘ Everything not named is left untouched: the gyro and accelerometer, the
+ * battery byte, the timestamp and the report's own counter all keep moving, so
+ * the host sees a live controller doing nothing rather than a stalled one. */
+static void ds5_blank_input(uint8_t *data, size_t len)
+{
+    size_t off;
+    if (!data) return;
+    if (data[0] == 0x01) {
+        off = 0;
+    } else if (data[0] == DS5_BT_REPORT_ID) {
+        off = DS5_BT_OFFSET;
+    } else {
+        return;                       /* not a pad report -- audio, say */
+    }
+    if (len < 41 + off) return;
+
+    data[1 + off] = 0x80;             /* left stick X, centred  */
+    data[2 + off] = 0x80;             /* left stick Y           */
+    data[3 + off] = 0x80;             /* right stick X          */
+    data[4 + off] = 0x80;             /* right stick Y          */
+    data[5 + off] = 0x00;             /* left trigger, released */
+    data[6 + off] = 0x00;             /* right trigger          */
+
+    /* Buttons and the d-pad share byte 8: the low nibble is the d-pad as a
+     * direction, and 8 is its neutral value -- 0 would read as "up". */
+    data[8 + off] = 0x08;
+    data[9 + off] = 0x00;
+    data[10 + off] = 0x00;            /* also clears the touchpad-pressed bit */
+
+    data[33 + off] = 0x80;            /* first touch point inactive  */
+    data[37 + off] = 0x80;            /* second touch point inactive */
+}
+
 static bool ds5_chord_held(const uint8_t *data, size_t len)
 {
     size_t off;

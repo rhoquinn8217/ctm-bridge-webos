@@ -64,6 +64,19 @@ typedef struct {
      * -- it runs in the relay path. */
     void (*on_input_report)(ctm_controller_t *c, const uint8_t *data, size_t len);
 
+    /* ⭐⭐ Blank an INBOUND report in place: buttons up, sticks centred, triggers
+     * released -- and nothing else touched. Used while the TV's own overlay is
+     * open, so the host keeps receiving reports at the usual rate and simply
+     * sees nothing pressed.
+     *
+     * ⛔ WHY NOT SIMPLY DROP THE REPORT: a host holds the last state it was
+     * given, so a button held when the overlay opened would stay held in the
+     * game. Sending a blank report is what releases it. ⓘ It also keeps the
+     * cadence steady, so nothing upstream concludes the controller has gone.
+     *
+     * NULL => this type cannot be blanked and its input is relayed unchanged. */
+    void (*blank_input)(uint8_t *data, size_t len);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -241,6 +254,20 @@ bool ctm_controller_light_held(ctm_controller_t *c);
 /* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
  * bridge half of the gesture; this is the half it cannot see. Defaults on. */
 void ctm_gesture_set_enabled(int on);
+
+/* ⭐⭐ Hold a bridged controller's INPUT while the TV's own overlay is open.
+ *
+ * ⛔ THE FAULT: with the streaming overlay up, a bridged controller's presses
+ * still reached the game behind it, so navigating the panel played the game at
+ * the same time. An UNBRIDGED controller does not do this -- the app routes SDL
+ * events and stops forwarding them while the overlay is open. A bridged
+ * controller produces no SDL events at all; its reports go TV -> USB/IP -> PC
+ * and pass nothing that could hold them.
+ *
+ * ⭐ While held, reports are BLANKED rather than dropped -- see blank_input.
+ * ⓘ Everything else keeps flowing: audio, rumble, the lightbar, and the
+ * unbridge chord, which is read from the REAL report before it is blanked. */
+void ctm_input_set_held(int held);
 
 /* Open the controller's own USB audio playback device, for wired audio and
  * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */

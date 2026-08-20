@@ -451,6 +451,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_on_input_report,
+    .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
 };
@@ -467,6 +468,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_on_input_report,
+    .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
 };

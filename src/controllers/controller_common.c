@@ -526,6 +526,21 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c)
     return c && c->unplug_requested != 0;
 }
 
+/* ⭐ Is a bridged controller's input being held right now? See
+ * ctm_input_set_held. ⓘ Read once per report in the relay path, so it is a
+ * plain int rather than anything that could block. */
+static volatile int g_input_held;
+
+void ctm_input_set_held(int held)
+{
+    g_input_held = held ? 1 : 0;
+}
+
+static int ctm_input_is_held(void)
+{
+    return g_input_held;
+}
+
 bool ctm_controller_light_held(ctm_controller_t *c)
 {
     if (!c || !c->light_hold_until_ms) return false;
@@ -1680,6 +1695,23 @@ static void *input_thread_main(void *arg)
                     ctl_log(c, "mic-safety: shutting down, see stderr");
                     exit(1);
                 }
+                /* ⭐⭐ LOOK FIRST WHEN INPUT IS HELD, because the copy the host
+                 * gets is about to be blanked and the chord lives in the real
+                 * one.
+                 *
+                 * ⓘ The order used to be "relay first, look second", which was
+                 * right when the two saw the same bytes. While the TV's overlay
+                 * is open they do not: the type still needs the true report to
+                 * find an unbridge chord in it, and the host must see nothing
+                 * pressed. ➡️ So the peek moves ahead of the send, and only for
+                 * that case -- see ctm_input_set_held. */
+                const int held = ctm_input_is_held();
+                if (held && c->ops && c->ops->on_input_report) {
+                    c->ops->on_input_report(c, buf, (size_t)n);
+                }
+                if (held && c->ops && c->ops->blank_input) {
+                    c->ops->blank_input(buf, (size_t)n);
+                }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
                     c->stop = 1;
                     break;
@@ -1687,7 +1719,7 @@ static void *input_thread_main(void *arg)
                 c->st_reports_in++;
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
-                if (c->ops && c->ops->on_input_report) {
+                if (!held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
                 }
                 continue;
