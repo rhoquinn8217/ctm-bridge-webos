@@ -74,9 +74,26 @@ static bool ds5_chord_held(const uint8_t *data, size_t len)
  * thread, once per relayed report. The timestamp lives in the controller's own
  * type state, never in a file-level variable -- two controllers each have their
  * own thread calling this. */
+/* ⭐ THE UNBRIDGE HALF OF THE GESTURE SETTING.
+ *
+ * ⓘ The BRIDGE chord is detected in the app, which can see an unbridged
+ * controller's touchpad. Once bridged those reports come through here instead,
+ * so the app is blind to them and this side owns the other half. Both read the
+ * same user setting; the app hands it over when a bridge starts.
+ *
+ * ⓘ Defaults ON, so a core built without an app telling it anything behaves as
+ * it always has. */
+static int g_gesture_enabled = 1;
+
+void ctm_gesture_set_enabled(int on)
+{
+    g_gesture_enabled = on ? 1 : 0;
+}
+
 static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c) return;
+    if (!g_gesture_enabled) return;
 
     /* ⛔⛔ AN AUDIO REPORT IS ALSO 0x31, AND CARRIES NO TOUCHPAD.
      *

@@ -6,6 +6,10 @@
 
 #include "ctm_controller.h"
 
+/* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
+ * arriving through some other header until a 2026-08-19 upstream merge changed
+ * what that header pulls in. Included directly so it cannot happen again. */
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>

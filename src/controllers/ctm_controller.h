@@ -238,6 +238,10 @@ void ctm_feedback_note_appeared(const char *node);
  * opaque outside controller_common.c. */
 bool ctm_controller_light_held(ctm_controller_t *c);
 
+/* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
+ * bridge half of the gesture; this is the half it cannot see. Defaults on. */
+void ctm_gesture_set_enabled(int on);
+
 /* Open the controller's own USB audio playback device, for wired audio and
  * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */
 void ctm_controller_open_alsa_playback(ctm_controller_t *c);
