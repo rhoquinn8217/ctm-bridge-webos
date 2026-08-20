@@ -157,6 +157,14 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * writes no lightbar at all. It belongs to the player colour from the app side
  * and to the Bluetooth confirmation signal, which BT_LAYER_LIGHT already
  * covers. */
+/* ⭐ How long after a session opens the relay withholds the host's lightbar
+ * claim, so the app's confirmation pattern has the light to itself.
+ *
+ * ⓘ Slightly longer than one breath (1100 ms), and far shorter than anything a
+ * game would notice. ⛔ Not a policy about who owns the lightbar -- the host
+ * does. This is the handover. */
+#define LIGHT_HOLD_MS    1400
+
 #define BT_FEAT_AUDIO    1
 #define BT_FEAT_LATENCY  1
 #define BT_FEAT_HAPTICS  1
@@ -218,6 +226,17 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
 /* How this controller is attached: "USB" or "BT". When: a type behaves
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
+
+/* Tell the core a device node has appeared, so a tone can wait for its audio
+ * to become usable. ⭐ A cable's speaker takes seconds to work after plug-in. */
+void ctm_feedback_note_appeared(const char *node);
+
+/* Should the host's lightbar claim be withheld right now?
+ *
+ * ⭐ True only for the moment after a session opens, while the app draws its
+ * confirmation pattern. See LIGHT_HOLD_MS. ⓘ An accessor because the struct is
+ * opaque outside controller_common.c. */
+bool ctm_controller_light_held(ctm_controller_t *c);
 
 /* Open the controller's own USB audio playback device, for wired audio and
  * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */

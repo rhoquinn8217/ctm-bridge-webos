@@ -143,6 +143,9 @@ struct ctm_controller {
     volatile int tone_frame_next;
     pthread_t mic_cap_thread;
     int mic_cap_started;
+    /* ⭐ Has this controller's decoder been given a stream yet? Per CONTROLLER,
+     * not per app run -- see the prime in ctm_bt_signal.inl. */
+    int btsig_primed;
     /* Which sound card is genuinely this controller's, worked out by muting
      * it and seeing which card falls silent. -1 until answered, and -1 stays
      * if the answer could not be trusted -- see ctm_cardmatch.inl. */
@@ -151,6 +154,9 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
+    /* ⭐ Until when the relay should NOT let the host claim the lightbar.
+     * Monotonic milliseconds; 0 means never. See ds5_patch_output. */
+    unsigned long long light_hold_until_ms;
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
@@ -518,6 +524,18 @@ void ctm_controller_request_unplug(ctm_controller_t *c)
 bool ctm_controller_unplug_requested(const ctm_controller_t *c)
 {
     return c && c->unplug_requested != 0;
+}
+
+bool ctm_controller_light_held(ctm_controller_t *c)
+{
+    if (!c || !c->light_hold_until_ms) return false;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long now_ms = (unsigned long long)ts.tv_sec * 1000ull
+                              + (unsigned long long)(ts.tv_nsec / 1000000);
+    if (now_ms < c->light_hold_until_ms) return true;
+    c->light_hold_until_ms = 0;   /* over; stop checking */
+    return false;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -1814,6 +1832,10 @@ void ctm_controller_tone_start(ctm_controller_t *c);
 /* The Bluetooth confirmation signal. Included BEFORE the feedback file, which
  * calls into it. Fork-only: deleting these two lines and the file removes the
  * feature. */
+/* ⭐ Ahead of every signal file, because all three consult it -- and the wired
+ * signal is included before the feedback one, so it cannot live there. */
+#include "ctm_settle.inl"
+
 #include "ctm_bt_signal.inl"
 
 /* Signals with no session behind them, for a refused plug. Included after the
@@ -2135,6 +2157,32 @@ static void *session_main(void *arg)
          * in on_plug_init just above. */
         if (c->alsa_fd < 0) btsig_wake_speaker(c);
 
+        /* ⭐⭐ HOLD THE LIGHTBAR FOR THE MOMENT THE APP IS DRAWING ON IT.
+         *
+         * ⛔ THE FAULT: the green confirmation breathes correctly and flickers
+         * the whole time. rhoquinn8217, 2026-08-19: "I could notice it gradually
+         * getting brighter and darker but it was flickering the whole time."
+         * ⭐ The shape being right and the light still stuttering is the
+         * signature of a SECOND WRITER, not a bad curve.
+         *
+         * ⓘ That writer is the host, through this relay: its reports claim the
+         * lightbar about 25 times a second, and a bridge hands the controller
+         * over just as the app starts drawing. An unbridge has no such problem
+         * because nothing is being relayed by then -- which is exactly the
+         * asymmetry that was seen.
+         *
+         * ⚠️ THIS IS NOT "THE TV TAKES THE LIGHTBAR". That was considered and
+         * rejected the same day: some games drive it meaningfully and the
+         * emulated pad is a DS4, so they reach it. ⭐ This hands it straight
+         * back -- it is the second or two of a handover, nothing more. */
+        {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            c->light_hold_until_ms = (unsigned long long)ts.tv_sec * 1000ull
+                                   + (unsigned long long)(ts.tv_nsec / 1000000)
+                                   + LIGHT_HOLD_MS;
+        }
+
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
 
@@ -2161,6 +2209,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->hid_fd = -1;
     c->alsa_fd = -1;
     c->mic_cap_started = 0;
+    c->btsig_primed = 0;
     c->matched_card = -1;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the

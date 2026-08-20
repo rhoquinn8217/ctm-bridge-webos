@@ -283,7 +283,46 @@ static void btsig_wait_for(const struct timespec *t0, int n)
     nanosleep(&ts, NULL);
 }
 
-static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_to)
+/* ⭐⭐ WHICH CONTROLLERS HAVE HAD THEIR DECODER STARTED, BY MAC.
+ *
+ * ⛔ THE FLAG WAS ON THE CONTROLLER OBJECT, AND THAT IS THE WRONG LIFETIME. The
+ * object is created at a bridge and destroyed at an unbridge, so it reset every
+ * time and EVERY bridge took the long prime -- 2.4 seconds of tone rather than
+ * 1.2. The log said so the same day it was written: `call #1 (prime 180)`,
+ * `#3 (prime 180)`, `#5 (prime 180)`, when only the first should be.
+ *
+ * ⓘ And the short prime IS right for the rest. Before any of this, with the
+ * short prime everywhere, only the first bridge of an app run was silent and
+ * every one after it played -- so the decoder stays warm between bridges.
+ *
+ * ⚠️ Keyed by MAC, because that is what outlives a controller object. Empty on
+ * a cable, which costs nothing: a wired controller never reaches this file.
+ *
+ * ⓘ Four entries and no eviction. The fleet is four controllers, and the cost
+ * of a fifth would be one long prime. */
+/* ⚠️ Both MACs and device nodes go in here -- a session knows the MAC, a
+ * refusal only knows the node -- so a controller can occupy two slots. Sized
+ * for that: four controllers, either way round. ⛔ A FULL TABLE MEANS EVERY
+ * TONE TAKES THE LONG PRIME, which is why it is not sized to the fleet exactly. */
+#define BTSIG_PRIMED_MAX 12
+static char g_btsig_primed[BTSIG_PRIMED_MAX][40];
+static int  g_btsig_primed_n;
+
+static bool btsig_mark_primed(const char *key)
+{
+    if (!key || !key[0]) return false;   /* unknown: prime long, it is the safe way to be wrong */
+    for (int i = 0; i < g_btsig_primed_n; ++i) {
+        if (strcmp(g_btsig_primed[i], key) == 0) return true;
+    }
+    if (g_btsig_primed_n < BTSIG_PRIMED_MAX) {
+        snprintf(g_btsig_primed[g_btsig_primed_n], sizeof(g_btsig_primed[0]), "%s", key);
+        ++g_btsig_primed_n;
+    }
+    return false;
+}
+
+static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_to,
+                         const char *prime_key)
 {
     if (fd < 0) return -1;
 
@@ -362,9 +401,29 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * speaker not being configured (it was, first try), a failed wake write
      * (rc=0 and still silent), and the report flags. ⭐ The log line that
      * settled it was one that already existed. */
-    static int s_primed;
-    const int prime_frames = s_primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
-    s_primed = 1;
+    /* ⛔⛔ PER CONTROLLER, NOT PER APP RUN. Corrected the same day the long
+     * prime was added.
+     *
+     * ⚠️ It was a single static, which is the wrong scope: THE DECODER IS THE
+     * CONTROLLER'S. rhoquinn8217 found it at once -- pair a ds5 during a running stream
+     * and its first tone is silent, because an earlier controller had already
+     * set the flag. ⓘ A second controller would have hit it every time.
+     *
+     * ⭐ A signal with no controller behind it -- the refusal path -- keeps the
+     * short prime. A refusal is meant to arrive immediately, and 1.8 s of
+     * silence in front of it would be worse than a quiet one. */
+    /* ⛔ A REFUSAL NEEDS THIS TOO. It was given the short prime deliberately --
+     * "a refusal should arrive at once" -- and the consequence was that the
+     * FIRST refusal of a run played no sound at all. rhoquinn8217, 2026-08-19: connect
+     * a controller mid-stream, refuse it, and there is no tone; the second time
+     * there is. ⚠️ A refusal is the one signal worth being certain of, so a
+     * silent one is worse than a late one.
+     *
+     * ⓘ Keyed on whatever identity the caller has: a MAC from a session, the
+     * device node from a refusal, which has no controller object. Different
+     * keys for the same controller cost one extra long prime, no more. */
+    const int primed = btsig_mark_primed(prime_key);
+    const int prime_frames = primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
     for (int i = 0; i < prime_frames; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         f.configure = (i == 0);   /* the first report only -- see btsig_build */
@@ -381,9 +440,16 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * you asked" and "you still have it because the bridge failed". Red
      * separates them, and a failure is the one signal worth being unmistakable
      * about. */
-    const uint8_t R = 0xff;
-    const uint8_t G = (pattern == BTSIG_HANDED_BACK) ? 0xff : 0x00;
-    const uint8_t B = (pattern == BTSIG_HANDING_OVER) ? 0xff : 0x00;
+    /* ⛔ A BRIDGE IS GREEN NOW, NOT MAGENTA. Changed 2026-08-19.
+     *
+     * ⓘ Magenta was right when this pattern meant "asking" -- it once ran
+     * before the plug. It now fires at bridge COMPLETION, alongside the
+     * confirmation tone, so it means SUCCESS and green is the word for that.
+     * ⭐ The app still shows magenta while the chord is held, so nothing is
+     * lost: magenta asks, green confirms. */
+    const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
+    const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
+    const uint8_t B = 0x00;
 
     /* TWO NOTES, and their order is the message.
      *
@@ -440,7 +506,33 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
          * and then stays -- releasing a claim only stops writing, it does not
          * restore anything.
          *
-         * ⭐ ON AN UNBRIDGE THE CORE SHOULD PAINT, and the app cannot. The
+         * ⭐⭐ THE CORE PAINTS EVERY PATTERN NOW, INCLUDING A BRIDGE. rhoquinn8217, 2026-08-19.
+ *
+ * ⓘ A bridge was excluded for a good reason and the reason still holds: that
+ * signal fires as the controller changes hands -- Moonlight's emulated pad is
+ * retired and the real DualSense arrives on the host -- so the green WILL
+ * stutter. Nothing drawn there can be clean.
+ *
+ * ⭐ It is included anyway, deliberately, because the alternative was worse:
+ * the app drew green when the plug call returned, about a second BEFORE the
+ * tone, so the light and the sound never arrived together. Painting here makes
+ * them simultaneous by construction -- the same code writes both.
+ *
+ * ⭐ And it makes the design one rule instead of two: green, yellow and red all
+ * come from this side, each with its own sound, on both transports. The app
+ * only ever puts the player colour back.
+ *
+ * ⚠️ THE TRADE IS THE FLICKER, KNOWINGLY TAKEN. If it ever reads worse than the
+ * gap did, this line is the one to change back.
+ *
+ * ⭐ EVERYWHERE ELSE THE CORE SHOULD PAINT -- a handback AND a refusal.
+ *
+ * ⛔ It was written as "handback only" on 2026-08-19 and that silently killed
+ * the refusal's three red flashes: on Bluetooth the app deliberately skips its
+ * own red because it believes this side lit it. The tone and the rumble
+ * survived, which is why it read as "no red" rather than "no refusal".
+ *
+ * ⭐ ON AN UNBRIDGE THE CORE SHOULD PAINT, and the app cannot. The
          * unbridge chord is detected HERE, not in the app: a bridged
          * controller's touchpad reports come through the core, so the app is
          * blind to it. It only learns of the unplug from its plugged-check,
@@ -449,7 +541,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
          *
          * ➡️ So the light and the tone travel together on the way back, and
          * the app restores the player colour when it catches up. */
-        f.claim_led = (pattern == BTSIG_HANDED_BACK);
+        f.claim_led = 1;   /* every pattern, including a bridge */
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -468,7 +560,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         f.audio = NULL; f.seq = seq++;
         f.haptics = 1; f.haptic_n = hn; hn += 32;
         /* Ours only on the way back -- see the note on the first of these. */
-        f.claim_led = (pattern == BTSIG_HANDED_BACK);
+        f.claim_led = 1;   /* every pattern, including a bridge */
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -585,7 +677,7 @@ static int btsig_wake_speaker(ctm_controller_t *c)
 static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
 {
     if (!c) return -1;
-    return btsig_play_fd(c->hid_fd, pattern, c);
+    return btsig_play_fd(c->hid_fd, pattern, c, c->dev.mac);
 }
 
 /* A REFUSAL, WHICH HAS NO SESSION TO PLAY THROUGH.
@@ -604,7 +696,7 @@ int ctm_signal_refused_bt(const char *node)
     if (!node || !node[0]) return -1;
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    int rc = btsig_play_fd(fd, BTSIG_REFUSED, NULL);
+    int rc = btsig_play_fd(fd, BTSIG_REFUSED, NULL, node);
     close(fd);
     return rc;
 }

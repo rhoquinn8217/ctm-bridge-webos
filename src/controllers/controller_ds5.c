@@ -288,6 +288,25 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
 
+        /* ⭐ Withhold the host's lightbar claim for the moment after a bridge,
+         * while the app draws its confirmation. See light_hold_until_ms. */
+        if (block_id == 0x90 && payload_len >= 2 && ctm_controller_light_held(c)) {
+            if (data[pos + 3] & 0x04) {              /* lightbar control */
+                data[pos + 3] &= (uint8_t)~0x04;
+                patched = 1;
+                /* ⭐ COUNTED, because "the light still flickers" cannot say
+                 * whether this ran. ⛔ Silence in the log means the hold never
+                 * fired -- the deadline was not set, or the window had already
+                 * closed. A count means it fired and the colour arrived some
+                 * other way. ⓘ Logged once per session, not per report. */
+                static int s_held_logged;
+                if (!s_held_logged) {
+                    s_held_logged = 1;
+                    ctl_log(c, "lightbar: withholding the host's claim during the handover");
+                }
+            }
+        }
+
         if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
             /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.
              *
