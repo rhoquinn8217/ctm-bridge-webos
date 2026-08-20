@@ -161,11 +161,32 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
      * speaker once when the session opens and never again; every report after
      * that is pure carriage.
      *
-     * ⭐ FLAGS2 is copied from the host as well -- 0x14, against our previous
-     * 0x00. What it enables is not documented in anything we have; it is set
-     * because it is present in every report the controller accepts. */
+     * ⛔⛔ FLAGS2 IS NOT COPIED FROM THE HOST, AND THE ATTEMPT IS A WARNING.
+     *
+     * The host sends 0x14 and it was copied here on the reasoning that the
+     * controller must need it. ⚠️ It IS documented -- in the Linux kernel's own
+     * DualSense driver, and one search found it:
+     *
+     *     0x01 mic mute LED     0x08 release LEDs
+     *     0x02 POWER SAVE       0x10 player indicator LEDs
+     *     0x04 lightbar         0x80 audio control 2
+     *
+     * So 0x14 asks the controller to apply the PLAYER LEDS and the LIGHTBAR --
+     * with the colour bytes beside them at zero, on all 122 frames of a tone.
+     * That was the flicker.
+     *
+     * ⛔ AND IT CAME BACK ONCE. The fix worked at build 184 and was never
+     * committed: a sandbox reset discarded it and later deliveries carried the
+     * old value back, which cost most of an afternoon chasing handovers and
+     * relays. There is a test for it now. */
     out[BTSIG_S_FLAGS1]     = f->configure ? BTSIG_F1_AUDIO : 0x00;
-    out[BTSIG_S_FLAGS2]     = BTSIG_F2_HOST | (f->claim_led ? BTSIG_F2_LED : 0x00);
+    /* ⛔⛔ CLAIM NOTHING WE DO NOT SET. Removed 2026-08-19, then LOST, then
+     * removed again -- see the note on BTSIG_F2_HOST above.
+     *
+     * ⓘ 0x14 is "apply the player LEDs" and "apply the lightbar". On a pattern
+     * that sets the colour bytes it is merely redundant; on one that does not,
+     * it paints them black a hundred times a second. */
+    out[BTSIG_S_FLAGS2]     = f->claim_led ? BTSIG_F2_LED : 0x00;
     if (f->configure) {
         out[BTSIG_S_SPK_VOL]   = BTSIG_SPK_VOL;
         out[BTSIG_S_AUDIO_CTL] = BTSIG_AUDIO_CTL;
