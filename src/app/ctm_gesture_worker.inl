@@ -227,6 +227,7 @@ static void *agent_probe_thread(void *arg)
             g_probe_entered_us = t0;
             g_agent_online =
                 send_agent_command("STATUS", probe, sizeof(probe)) == 0;
+            g_agent_probed = true;
             g_probe_entered_us = 0;
             uint64_t took_ms = (probe_now_us() - t0) / 1000;
             if (took_ms > 250) {

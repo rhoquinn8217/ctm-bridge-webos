@@ -28,6 +28,10 @@ int g_settings_count;
 char g_agent_host[64];
 int g_agent_port = CTM_AGENT_PORT;
 bool g_agent_online;
+/* ⭐ Has anything actually asked yet? ⛔ g_agent_online starts false, so without
+ * this the panel reports OFFLINE before a single probe has completed -- which is
+ * usually right and is still a claim we have not earned. */
+bool g_agent_probed;
 bool g_running = true;
 pthread_t g_stop_sniff_thread;
 bool g_stop_sniff_thread_started;

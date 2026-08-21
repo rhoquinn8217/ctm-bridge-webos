@@ -154,6 +154,9 @@ extern char g_agent_host[64];
 extern int g_agent_port;
 extern bool g_agent_online;
 
+/* True once a probe or a command has actually reached a verdict. */
+extern bool g_agent_probed;
+
 /* ⭐ Ask the agent probe to run now instead of waiting out its interval.
  *
  * ⓘ Called when the USB Bridge panel opens -- the one moment somebody is

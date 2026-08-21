@@ -310,6 +310,7 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
         g_agent_online = false;
+        g_agent_probed = true;
         return -1;
     }
 
@@ -323,6 +324,19 @@ int send_agent_command(const char *command, char *response, size_t response_len)
     close(fd);
     if (response_len > 0) {
         response[n > 0 ? n : 0] = '\0';
+    }
+    /* ⭐⭐ A COMMAND THAT GOT THROUGH IS PROOF THE AGENT IS THERE.
+     *
+     * ⛔ The failure path above already sets g_agent_online false; nothing set
+     * it TRUE except the probe, so a successful bridge left the panel still
+     * claiming the server was down until the next probe came round.
+     *
+     * ⭐ It also means a bridge attempted while the state is UNKNOWN resolves
+     * it either way, which is what makes pressing a row a reasonable thing to
+     * do before anything has been probed. */
+    if (n > 0) {
+        g_agent_online = true;
+        g_agent_probed = true;
     }
     return n > 0 && response && starts_with(response, "OK") ? 0 : -1;
 }
