@@ -269,6 +269,28 @@ void ctm_gesture_set_enabled(int on);
  * unbridge chord, which is read from the REAL report before it is blanked. */
 void ctm_input_set_held(int held);
 
+/* ⭐⭐ WHICH CONFIRMATION SIGNALS THIS SIDE IS ALLOWED TO MAKE.
+ *
+ * ⓘ The light, the felt pulse and the tone, each on or off, for a handover, a
+ * handback AND a refusal. The app owns the settings and hands them in when a
+ * stream starts, the same way it hands in the host address.
+ *
+ * ⚠️ These are "I do not want that" switches -- a bright light in a dark room,
+ * a buzz at midnight, a chirp while someone is asleep. ⓘ The battery saving is
+ * small for rumble and the tone and negligible for the light, so it is not what
+ * they are for.
+ *
+ * ⛔ WITH ALL THREE OFF A REFUSAL IS INVISIBLE: the chord does nothing, and
+ * there is no way to tell that from a gesture that was not recognised. The
+ * settings screen says so.
+ *
+ * ⓘ All default ON, so a core told nothing behaves as it always has. */
+void ctm_signals_set_enabled(int light, int rumble, int tone);
+
+/* Capture the controller's microphone while it is bridged. ⭐ Only useful for
+ * voice chat through the controller itself. ⓘ Defaults on. */
+void ctm_mic_capture_set_enabled(int on);
+
 /* Open the controller's own USB audio playback device, for wired audio and
  * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */
 void ctm_controller_open_alsa_playback(ctm_controller_t *c);

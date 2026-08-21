@@ -203,6 +203,8 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         return;
     }
 
+    const int tone_on = ctm_sig_tone_on();
+    const int rumble_on = ctm_sig_rumble_on();
     for (int b = 0; b < beeps; ++b) {
         const int base = lead_frames + b * (frames_per + gap_frames);
         const int attack  = frames_per / 10;
@@ -224,17 +226,23 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
             const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
             const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
 
+            /* ⭐ ONE WRITE CARRIES BOTH, so a switch zeroes its channels
+             * rather than skipping anything -- see the note at the top of this
+             * file. ⓘ Silence in the speaker channels is exactly what "no tone"
+             * means here, and zero in the haptic ones is "no pulse". */
             const int f = (base + i) * FEEDBACK_CHANNELS;
-            buf[f + 0] = s;   /* speaker left  */
-            buf[f + 1] = s;   /* speaker right */
-            buf[f + 2] = r;   /* haptic left   */
-            buf[f + 3] = r;   /* haptic right  */
+            buf[f + 0] = tone_on ? s : 0;   /* speaker left  */
+            buf[f + 1] = tone_on ? s : 0;   /* speaker right */
+            buf[f + 2] = rumble_on ? r : 0; /* haptic left   */
+            buf[f + 3] = rumble_on ? r : 0; /* haptic right  */
         }
     }
 
     /* ⭐ THE LIGHT GOES OUT WITH THE SOUND, not after it -- every pattern,
      * bridge included. See feedback_paint_wired, and the long note on the
      * Bluetooth side about why a bridge is painted despite the handover. */
+    /* ⓘ Always written: the switches zeroed whichever channels are off, and the
+     * buffer carries the tone and the felt pulse together. */
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
 
@@ -289,7 +297,7 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * ⚠️ Restores nothing at the end. The claim is released by writing the last
      * frame at zero, and whoever owns the light next writes over it -- on a
      * handback that is the app's player colour, a moment later. */
-    if (c && c->alsa_fd >= 0 && wait_ms > 0) {
+    if (c && c->alsa_fd >= 0 && wait_ms > 0 && ctm_sig_light_on()) {
         const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
         const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
         const long step_ms = 20;

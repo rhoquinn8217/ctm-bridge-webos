@@ -444,7 +444,13 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * device node from a refusal, which has no controller object. Different
      * keys for the same controller cost one extra long prime, no more. */
     const int primed = btsig_mark_primed(prime_key);
-    const int prime_frames = primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
+    int prime_frames = primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
+    /* ⭐ With the tone switched off the report still carries the light and the
+     * felt pulse, so it is sent -- with silence where the audio would be. ⓘ
+     * That also skips the prime, which only exists to warm a decoder we are no
+     * longer feeding. */
+    const int tone_on = ctm_sig_tone_on();
+    if (!tone_on) prime_frames = 0;
     for (int i = 0; i < prime_frames; ++i) {
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         f.configure = (i == 0);   /* the first report only -- see btsig_build */
@@ -517,8 +523,9 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
                           * BTSIG_FRAME_BYTES;
         }
         int lvl = btsig_level(pattern, i, LIT);
-        f.audio = note; f.seq = seq++;
-        f.haptics = 1; f.haptic_n = hn; hn += 32;
+        f.audio = tone_on ? note : NULL;   /* silence when the tone is off */
+        f.seq = seq++;
+        f.haptics = ctm_sig_rumble_on(); f.haptic_n = hn; hn += 32;
         /* ⭐⭐ THE LIGHT IS OURS ONLY ON THE WAY BACK. Settled 2026-08-19 after
          * getting it wrong in both directions.
          *
@@ -562,7 +569,11 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
          *
          * ➡️ So the light and the tone travel together on the way back, and
          * the app restores the player colour when it catches up. */
-        f.claim_led = 1;   /* every pattern, including a bridge */
+        /* ⭐ The user's switches. ⓘ Turning the light off does not stop the
+         * report going out -- the tone and the felt pulse ride in the same one
+         * -- it stops us CLAIMING the lightbar, so the controller leaves it
+         * alone. */
+        f.claim_led = ctm_sig_light_on();   /* every pattern, including a bridge */
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);
@@ -579,9 +590,13 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         /* The pulse carries on past the sound, for the same reason the light
          * does: it is what makes you look down in the first place. */
         f.audio = NULL; f.seq = seq++;
-        f.haptics = 1; f.haptic_n = hn; hn += 32;
+        f.haptics = ctm_sig_rumble_on(); f.haptic_n = hn; hn += 32;
         /* Ours only on the way back -- see the note on the first of these. */
-        f.claim_led = 1;   /* every pattern, including a bridge */
+        /* ⭐ The user's switches. ⓘ Turning the light off does not stop the
+         * report going out -- the tone and the felt pulse ride in the same one
+         * -- it stops us CLAIMING the lightbar, so the controller leaves it
+         * alone. */
+        f.claim_led = ctm_sig_light_on();   /* every pattern, including a bridge */
         f.r = (uint8_t)((R * lvl) / 255);
         f.g = (uint8_t)((G * lvl) / 255);
         f.b = (uint8_t)((B * lvl) / 255);

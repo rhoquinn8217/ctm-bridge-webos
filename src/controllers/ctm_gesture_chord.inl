@@ -28,7 +28,9 @@
  * fallback is trivial -- pull the cable -- so a long, obviously intentional
  * hold costs nothing and cannot happen by accident mid-game. It also matches
  * what a hold means elsewhere: powering a phone down, a PC's power button. */
-#define DS5_CHORD_HOLD_MS 5000
+/* ⭐ Four seconds, down from five on 2026-08-20. ⓘ Still longer than the bridge
+ * hold, and deliberately: this is the destructive direction. */
+#define DS5_CHORD_HOLD_MS 4000
 
 
 

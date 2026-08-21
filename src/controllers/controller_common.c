@@ -536,6 +536,41 @@ void ctm_input_set_held(int held)
     g_input_held = held ? 1 : 0;
 }
 
+/* ⭐ Which signals are allowed, and whether the microphone is captured. Read
+ * once per event rather than per report, so plain ints are enough. */
+static volatile int g_sig_light = 1, g_sig_rumble = 1, g_sig_tone = 1;
+static volatile int g_mic_capture = 1;
+
+void ctm_signals_set_enabled(int light, int rumble, int tone)
+{
+    g_sig_light  = light  ? 1 : 0;
+    g_sig_rumble = rumble ? 1 : 0;
+    g_sig_tone   = tone   ? 1 : 0;
+    /* ⭐ SAYS WHAT IT WAS TOLD. ⛔ Green kept appearing with the lightbar switch
+     * off, and there was no way to tell "the setting never arrived" from
+     * "something else paints it". ⓘ Once per call, not per report. */
+    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    if (lf) {
+        fprintf(lf, "signals: light=%d rumble=%d tone=%d\n",
+                g_sig_light, g_sig_rumble, g_sig_tone);
+        fclose(lf);
+    }
+}
+
+void ctm_mic_capture_set_enabled(int on)
+{
+    g_mic_capture = on ? 1 : 0;
+    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    if (lf) {
+        fprintf(lf, "mic capture: %d\n", g_mic_capture);
+        fclose(lf);
+    }
+}
+
+static int ctm_sig_light_on(void)  { return g_sig_light; }
+static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
+static int ctm_sig_tone_on(void)   { return g_sig_tone; }
+
 static int ctm_input_is_held(void)
 {
     return g_input_held;
@@ -1084,6 +1119,12 @@ static void *mic_capture_thread(void *arg)
  * it looks identical to code that never ran. */
 static void mic_capture_start(ctm_controller_t *c)
 {
+    /* ⭐ The user's switch, checked before anything is opened. ⓘ Capture used to
+     * start on every session without being asked. */
+    if (!g_mic_capture) {
+        if (c) ctl_log(c, "mic: capture not started -- switched off in settings");
+        return;
+    }
     if (!c) {
         return;                 /* nothing to log against */
     }
