@@ -172,13 +172,51 @@ static void *gesture_worker(void *arg)
 static pthread_t g_probe_thread;
 static volatile bool g_probe_running;
 
-#define AGENT_PROBE_INTERVAL_US 4000000   /* every 4 seconds */
+/* ⭐ TEN SECONDS, not four. ⓘ Raised on 2026-08-20 because the probe no longer
+ * needs to be quick: opening the panel asks for one immediately, so the
+ * interval only has to catch changes nobody is watching for. ⚠️ Each probe
+ * against a host that is not answering costs a full second of this thread, so a
+ * long interval is worth having. */
+#define AGENT_PROBE_INTERVAL_US 10000000
+
+/* ⭐⭐ THE PROBE OUTLIVES A STREAM, and that is the fix rather than a preference.
+ *
+ * ⛔ THE FAULT: the loop used to run `while (g_running)`, and ctm_bridge_stop
+ * sets that false at the end of every stream. The restart is guarded by
+ * `if (!g_probe_running)`, which is correct on its own -- but the thread sleeps
+ * for seconds at a time, so a stream ending and a new one starting inside one
+ * sleep meant the restart was DECLINED (the flag was still set) and the thread
+ * then woke and exited anyway. ➡️ After that there was no probe at all, and the
+ * panel reported whatever it last saw -- stuck ONLINE or stuck OFFLINE.
+ *
+ * ⓘ Confirmed by timestamp: `agent probe thread exiting` at 1787282211, and two
+ * hours later the app was still streaming with a frozen reading on screen.
+ *
+ * ⭐ Nothing about asking whether a host is reachable depends on a bridge
+ * running, so the coupling was wrong as well as broken. */
+static volatile bool g_probe_want;
+
+/* ⭐⭐ ASK FOR A PROBE NOW, rather than waiting out the interval.
+ *
+ * ⓘ Set when the USB Bridge panel opens -- the one moment somebody is
+ * definitely looking at the answer. The thread wakes, probes, and the panel
+ * picks the result up on its next refresh.
+ *
+ * ⛔ NOT A PROBE ON THE CALLER'S THREAD. The call takes up to a second against
+ * a host that is not answering, and the panel opens on the interface thread --
+ * a second of frozen overlay is exactly the fault T-062 is about. */
+static volatile bool g_probe_now;
+
+void ctm_agent_probe_soon(void)
+{
+    g_probe_now = true;
+}
 
 static void *agent_probe_thread(void *arg)
 {
     (void)arg;
     ctm_gesture_log(NULL, "agent probe thread started");
-    while (g_running) {
+    while (g_probe_want) {
         if (g_agent_host[0]) {
             char probe[256];
             /* Marked for the whole call, so a gesture raised while this runs
@@ -189,6 +227,7 @@ static void *agent_probe_thread(void *arg)
             g_probe_entered_us = t0;
             g_agent_online =
                 send_agent_command("STATUS", probe, sizeof(probe)) == 0;
+            g_agent_probed = true;
             g_probe_entered_us = 0;
             uint64_t took_ms = (probe_now_us() - t0) / 1000;
             if (took_ms > 250) {
@@ -197,8 +236,26 @@ static void *agent_probe_thread(void *arg)
                                 g_agent_online ? "online" : "OFFLINE");
             }
         }
-        usleep(AGENT_PROBE_INTERVAL_US);
+        /* ⓘ Slept in short steps so a request can be answered promptly without
+         * probing any harder when nobody has asked. */
+        for (int i = 0; i < 20 && g_probe_want && !g_probe_now; ++i) {
+            usleep(AGENT_PROBE_INTERVAL_US / 20);
+        }
+        g_probe_now = false;
     }
+    /* ⛔⛔ THIS FLAG MUST BE CLEARED HERE, AND FOR YEARS IT WAS NOT ENOUGH.
+     *
+     * ⚠️ THE FAULT IT CAUSED: the thread loops `while (g_running)`, and
+     * ctm_bridge_stop sets g_running false at the end of every stream -- so the
+     * probe died with the first stream that ended. The start below is guarded
+     * by `if (!g_probe_running)`, which is correct, but the thread has to
+     * actually reach this line for a later start to be allowed.
+     *
+     * ⓘ Confirmed by timestamp on 2026-08-20: `agent probe thread exiting` at
+     * 1787282211, and two hours later the app was still streaming with the
+     * panel showing a frozen ONLINE while the last real reading had been
+     * OFFLINE. ➡️ After it dies the panel reports whatever it last saw, in
+     * either direction. */
     g_probe_running = false;
     ctm_gesture_log(NULL, "agent probe thread exiting");
     return NULL;
@@ -226,7 +283,11 @@ void ctm_bridge_gesture_init(void)
     }
 
     /* Started alongside, and separately: a probe that cannot start must not
-     * stop unplugs from working. */
+     * stop unplugs from working.
+     *
+     * ⭐ Set BEFORE the check: if a thread is already running it simply keeps
+     * going, and if one was on its way out this is what a fresh one will read. */
+    g_probe_want = true;
     if (!g_probe_running) {
         g_probe_running = true;
         if (pthread_create(&g_probe_thread, NULL, agent_probe_thread, NULL) == 0) {

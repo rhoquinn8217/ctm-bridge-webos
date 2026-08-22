@@ -143,6 +143,9 @@ struct ctm_controller {
     volatile int tone_frame_next;
     pthread_t mic_cap_thread;
     int mic_cap_started;
+    /* ⭐ Has this controller's decoder been given a stream yet? Per CONTROLLER,
+     * not per app run -- see the prime in ctm_bt_signal.inl. */
+    int btsig_primed;
     /* Which sound card is genuinely this controller's, worked out by muting
      * it and seeing which card falls silent. -1 until answered, and -1 stays
      * if the answer could not be trusted -- see ctm_cardmatch.inl. */
@@ -151,6 +154,9 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
+    /* ⭐ Until when the relay should NOT let the host claim the lightbar.
+     * Monotonic milliseconds; 0 means never. See ds5_patch_output. */
+    unsigned long long light_hold_until_ms;
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
@@ -520,6 +526,68 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c)
     return c && c->unplug_requested != 0;
 }
 
+/* ⭐ Is a bridged controller's input being held right now? See
+ * ctm_input_set_held. ⓘ Read once per report in the relay path, so it is a
+ * plain int rather than anything that could block. */
+static volatile int g_input_held;
+
+void ctm_input_set_held(int held)
+{
+    g_input_held = held ? 1 : 0;
+}
+
+/* ⭐ Which signals are allowed, and whether the microphone is captured. Read
+ * once per event rather than per report, so plain ints are enough. */
+static volatile int g_sig_light = 1, g_sig_rumble = 1, g_sig_tone = 1;
+static volatile int g_mic_capture = 1;
+
+void ctm_signals_set_enabled(int light, int rumble, int tone)
+{
+    g_sig_light  = light  ? 1 : 0;
+    g_sig_rumble = rumble ? 1 : 0;
+    g_sig_tone   = tone   ? 1 : 0;
+    /* ⭐ SAYS WHAT IT WAS TOLD. ⛔ Green kept appearing with the lightbar switch
+     * off, and there was no way to tell "the setting never arrived" from
+     * "something else paints it". ⓘ Once per call, not per report. */
+    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    if (lf) {
+        fprintf(lf, "signals: light=%d rumble=%d tone=%d\n",
+                g_sig_light, g_sig_rumble, g_sig_tone);
+        fclose(lf);
+    }
+}
+
+void ctm_mic_capture_set_enabled(int on)
+{
+    g_mic_capture = on ? 1 : 0;
+    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    if (lf) {
+        fprintf(lf, "mic capture: %d\n", g_mic_capture);
+        fclose(lf);
+    }
+}
+
+static int ctm_sig_light_on(void)  { return g_sig_light; }
+static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
+static int ctm_sig_tone_on(void)   { return g_sig_tone; }
+
+static int ctm_input_is_held(void)
+{
+    return g_input_held;
+}
+
+bool ctm_controller_light_held(ctm_controller_t *c)
+{
+    if (!c || !c->light_hold_until_ms) return false;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long now_ms = (unsigned long long)ts.tv_sec * 1000ull
+                              + (unsigned long long)(ts.tv_nsec / 1000000);
+    if (now_ms < c->light_hold_until_ms) return true;
+    c->light_hold_until_ms = 0;   /* over; stop checking */
+    return false;
+}
+
 const char *ctm_controller_bus(const ctm_controller_t *c)
 {
     return c ? c->dev.bus : "";
@@ -553,9 +621,28 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
     const char *kind = c->ops ? c->ops->kind : "ctl";
+
+    /* ⛔⛔ TIMESTAMPED, AT LAST. Flagged on 2026-07-31 as the obstacle to the
+     * hang investigation -- "the TV log has no wall-clock time, so duration and
+     * ordering across a gap cannot be read from it" -- and still true on
+     * 2026-08-18, when a Bluetooth bridge took eight seconds against a cable's
+     * two and this file could not say where they went.
+     *
+     * ⭐ MILLISECONDS, not seconds. log_append() prints hh:mm:ss, which is
+     * enough to see an eight-second gap and useless for the sub-second ones
+     * that make it up. This is the file that covers the session's own work --
+     * the HID open, the connect, the evdev grabs -- so it is the one that needs
+     * the resolution.
+     *
+     * ⓘ Monotonic rather than wall-clock: a gap is what is being read, and a
+     * clock that can step is the wrong instrument for measuring one. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double t = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+
     fprintf(stderr, "[%s] %s\n", kind, body);
     if (c->log) {
-        fprintf(c->log, "%s\n", body);
+        fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
     pthread_mutex_lock(&c->status_mutex);
@@ -1032,6 +1119,12 @@ static void *mic_capture_thread(void *arg)
  * it looks identical to code that never ran. */
 static void mic_capture_start(ctm_controller_t *c)
 {
+    /* ⭐ The user's switch, checked before anything is opened. ⓘ Capture used to
+     * start on every session without being asked. */
+    if (!g_mic_capture) {
+        if (c) ctl_log(c, "mic: capture not started -- switched off in settings");
+        return;
+    }
     if (!c) {
         return;                 /* nothing to log against */
     }
@@ -1096,14 +1189,51 @@ static int hex_equals(const char *text, unsigned int value)
 
 /* Sony feature-0x05 "full BT mode" probe. When: at HID open, DS only
  * (gated by ops->request_bt_mode). */
-static void request_full_bt_mode(int fd)
+/* ⛔⛔ THE FOUR SECONDS BETWEEN A WIRED BRIDGE AND A BLUETOOTH ONE.
+ *
+ * Measured 2026-08-18 with every layer of signalling gated off (T-120 step 1):
+ * a bare panel-button bridge took ~2s on a cable and ~8s over Bluetooth. Same
+ * code, same button, same gates -- and this is the ONLY transport-dependent
+ * call in the open path.
+ *
+ * The app makes the same request when a controller first appears and it was
+ * timed there: 4.99s over Bluetooth against 17ms on a cable. Here it runs
+ * inside open_hid, on the session thread, immediately after the bridge is
+ * handed over -- which is where the interface freezes.
+ *
+ * ⭐ It cannot be skipped. Where a controller binds to hid-generic nothing else
+ * makes this request, and without it the controller stays in its reduced
+ * ten-byte report and no input arrives at all. So it is still asked -- from a
+ * thread of its own, so the session opens at once and the answer, or the
+ * timeout, lands whenever it lands.
+ *
+ * ⚠️ The fd is dup'd: the session may close its own before the request
+ * returns, and the controller does not care which descriptor asked. */
+static void *request_full_bt_mode_thread(void *arg)
 {
+    int fd = (int)(intptr_t)arg;
     uint8_t feature[64];
     memset(feature, 0, sizeof(feature));
     feature[0] = 0x05;
     if (ioctl(fd, HIDIOCGFEATURE(sizeof(feature)), feature) < 0) {
         fprintf(stderr, "controller: feature 0x05 failed errno=%d\n", errno);
     }
+    close(fd);
+    return NULL;
+}
+
+static void request_full_bt_mode(int fd)
+{
+    int dup_fd = dup(fd);
+    if (dup_fd < 0) return;
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &attr, request_full_bt_mode_thread, (void *)(intptr_t)dup_fd) != 0) {
+        close(dup_fd);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 /* INVESTIGATION, 2026-08-08 -- read only, changes nothing.
@@ -1606,6 +1736,23 @@ static void *input_thread_main(void *arg)
                     ctl_log(c, "mic-safety: shutting down, see stderr");
                     exit(1);
                 }
+                /* ⭐⭐ LOOK FIRST WHEN INPUT IS HELD, because the copy the host
+                 * gets is about to be blanked and the chord lives in the real
+                 * one.
+                 *
+                 * ⓘ The order used to be "relay first, look second", which was
+                 * right when the two saw the same bytes. While the TV's overlay
+                 * is open they do not: the type still needs the true report to
+                 * find an unbridge chord in it, and the host must see nothing
+                 * pressed. ➡️ So the peek moves ahead of the send, and only for
+                 * that case -- see ctm_input_set_held. */
+                const int held = ctm_input_is_held();
+                if (held && c->ops && c->ops->on_input_report) {
+                    c->ops->on_input_report(c, buf, (size_t)n);
+                }
+                if (held && c->ops && c->ops->blank_input) {
+                    c->ops->blank_input(buf, (size_t)n);
+                }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
                     c->stop = 1;
                     break;
@@ -1613,7 +1760,7 @@ static void *input_thread_main(void *arg)
                 c->st_reports_in++;
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
-                if (c->ops && c->ops->on_input_report) {
+                if (!held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
                 }
                 continue;
@@ -1758,6 +1905,10 @@ void ctm_controller_tone_start(ctm_controller_t *c);
 /* The Bluetooth confirmation signal. Included BEFORE the feedback file, which
  * calls into it. Fork-only: deleting these two lines and the file removes the
  * feature. */
+/* ⭐ Ahead of every signal file, because all three consult it -- and the wired
+ * signal is included before the feedback one, so it cannot live there. */
+#include "ctm_settle.inl"
+
 #include "ctm_bt_signal.inl"
 
 /* Signals with no session behind them, for a refused plug. Included after the
@@ -1986,11 +2137,25 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
 static void *session_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    /* First line the session writes. If the eight seconds is BEFORE this, the
+     * cost is in the app or in ctm_controller_plug_in, not in the session. */
+    ctl_log(c, "session thread running");
     ctmb_device_caps_t caps;
     uint8_t report_desc[MAX_REPORT_DESCRIPTOR];
     uint32_t report_desc_len = 0;
 
+    /* ⏱️ TIMED, because a Bluetooth bridge takes eight seconds and every other
+     * stage has been measured and cleared: the TV's own work is 138ms, the
+     * session's logged work is 8ms, and the connect succeeds on the FIRST
+     * attempt -- so the retry loop is not it either. open_hid is the only
+     * stretch left that logs nothing at all. */
+    struct timespec oh0, oh1;
+    clock_gettime(CLOCK_MONOTONIC, &oh0);
     c->hid_fd = open_hid(c, &caps, report_desc, &report_desc_len);
+    clock_gettime(CLOCK_MONOTONIC, &oh1);
+    ctl_log(c, "open_hid took %ldms",
+            (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
+                   (oh1.tv_nsec - oh0.tv_nsec) / 1000000));
     if (c->hid_fd < 0) {
         ctl_log(c, "hid open failed path=%s errno=%d", c->dev.path, errno);
         c->stop = 1;
@@ -2007,15 +2172,90 @@ static void *session_main(void *arg)
     (void)fcntl(c->wake_pipe[1], F_SETFL, fcntl(c->wake_pipe[1], F_GETFL, 0) | O_NONBLOCK);
 
     while (!c->stop) {
+        /* ⛔⛔ THIS LOOP IS WHERE A SLOW BRIDGE GOES, AND IT LOGGED NOTHING.
+         *
+         * Measured 2026-08-18: the TV finished its side of a Bluetooth bridge
+         * in 138ms, the session's own log covered 8ms, and the controller was
+         * unusable for ~7 seconds. The listener put it plainly -- ready=1 at
+         * age_ms=7000 on Bluetooth against 2000 on a cable -- and the gap sat
+         * here, invisible, because a failed attempt said nothing.
+         *
+         * Each pass costs ENet's 400ms timeout plus a 500ms sleep, so seven
+         * seconds is about eight attempts before the host's listener is up.
+         *
+         * ⭐ Counted and logged now: the number of attempts is what says whether
+         * the answer is to wait less, retry faster, or start later. */
+        int attempts = 0;
+        struct timespec w0;
+        clock_gettime(CLOCK_MONOTONIC, &w0);
         while (!c->stop &&
                ctm_transport_connect_once(&c->xport, c->host, c->port, 400) != 0) {
+            ++attempts;
             for (int slept = 0; slept < 500 && !c->stop; slept += 50) usleep(50000);
         }
         if (c->stop) break;
+        if (attempts > 0) {
+            struct timespec w1;
+            clock_gettime(CLOCK_MONOTONIC, &w1);
+            const long waited_ms = (long)((w1.tv_sec - w0.tv_sec) * 1000 +
+                                          (w1.tv_nsec - w0.tv_nsec) / 1000000);
+            ctl_log(c, "connect took %ldms over %d failed attempt(s)", waited_ms, attempts);
+        }
         ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
 
         if (c->ops->grab_evdev) grab_matching_evdev(c);
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
+
+        /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE
+         * THE CONFIRMATION.
+         *
+         * ⛔ THE FAULT: the FIRST bridge of a session played no tone. Every one
+         * after it did, and so did the first unbridge seconds later, so the
+         * speaker worked by then -- it was not ready yet. ⚠️ And it had no
+         * chance to be: the speaker settings rode on the tone's OWN first
+         * report, so configure and play happened in the same breath.
+         *
+         * ⛔⛔ FIRST ATTEMPT PUT THIS IN feedback_play_connected AND IT BROUGHT
+         * THE FLICKER BACK. That runs at the instant the app draws its green
+         * breath, so a 398-byte write landed in the middle of the app's own
+         * light writes -- two writers on one light, which is what flickering
+         * has meant every time. ⓘ It also gave almost no head start, which was
+         * the entire point.
+         *
+         * ⭐ Here it is before the session loop and well before anything is
+         * drawn. Same place the wired path opens its audio device, and for the
+         * same reason.
+         *
+         * ⓘ Wired takes the other branch: it has a real audio device, opened
+         * in on_plug_init just above. */
+        if (c->alsa_fd < 0) btsig_wake_speaker(c);
+
+        /* ⭐⭐ HOLD THE LIGHTBAR FOR THE MOMENT THE APP IS DRAWING ON IT.
+         *
+         * ⛔ THE FAULT: the green confirmation breathes correctly and flickers
+         * the whole time. rhoquinn8217, 2026-08-19: "I could notice it gradually
+         * getting brighter and darker but it was flickering the whole time."
+         * ⭐ The shape being right and the light still stuttering is the
+         * signature of a SECOND WRITER, not a bad curve.
+         *
+         * ⓘ That writer is the host, through this relay: its reports claim the
+         * lightbar about 25 times a second, and a bridge hands the controller
+         * over just as the app starts drawing. An unbridge has no such problem
+         * because nothing is being relayed by then -- which is exactly the
+         * asymmetry that was seen.
+         *
+         * ⚠️ THIS IS NOT "THE TV TAKES THE LIGHTBAR". That was considered and
+         * rejected the same day: some games drive it meaningfully and the
+         * emulated pad is a DS4, so they reach it. ⭐ This hands it straight
+         * back -- it is the second or two of a handover, nothing more. */
+        {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            c->light_hold_until_ms = (unsigned long long)ts.tv_sec * 1000ull
+                                   + (unsigned long long)(ts.tv_nsec / 1000000)
+                                   + LIGHT_HOLD_MS;
+        }
+
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
 
@@ -2042,6 +2282,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->hid_fd = -1;
     c->alsa_fd = -1;
     c->mic_cap_started = 0;
+    c->btsig_primed = 0;
     c->matched_card = -1;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
@@ -2108,6 +2349,15 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     }
     ctm_transport_init(&c->xport, c->enet);
 
+    /* ⏱️ ON THE SAME CLOCK AS THE SESSION'S OWN LINES, deliberately.
+     *
+     * The gesture log and this one use different clocks, so the gap between
+     * "plugged" over there and "session thread running" over here has been
+     * invisible. Everything on each side measures fast -- the plug call is
+     * 15ms, the session is 1s -- while the host reports seven seconds between
+     * asking and the TV connecting. The missing stretch is between this line
+     * and the thread's first, and only one clock can show it. */
+    ctl_log(c, "spawning session thread");
     if (pthread_create(&c->session_thread, NULL, session_main, c) != 0) {
         ctl_log(c, "session thread failed errno=%d", errno);
         ctm_transport_destroy(&c->xport);

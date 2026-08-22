@@ -94,6 +94,40 @@ static double feedback_note_level(int hz)
     return 1.25;
 }
 
+/* ⭐⭐ PAINT THE LIGHTBAR ON A CABLE, so it arrives WITH the tone.
+ *
+ * ⛔ THE FAULT: on wired, the yellow handback flashes arrive noticeably after
+ * the sound. Same cause as the Bluetooth version, fixed the same day: the
+ * unbridge chord is detected in the CORE, so this side knows first. The app
+ * only learns of the unplug from its plugged-check a second or more later, and
+ * a pulse armed there is always late.
+ *
+ * ⭐ Bluetooth solved it by letting the core's signal carry the light. The
+ * wired signal never touched the light at all -- it is audio and haptics only
+ * -- so it needs its own write. This is that write.
+ *
+ * ⓘ The wired output report, 48 bytes, report 0x02. The lightbar sits at the
+ * end and is claimed by bit 2 of flag panel 2, the same panel the mute uses.
+ * ⚠️ Claimed ONLY while painting: releasing the claim stops us writing, and the
+ * colour we last wrote stays until someone else writes one. */
+#define DS5_F1_ALLOW_LIGHTBAR   0x04   /* byte 2, bit 2 */
+#define DS5_IDX_LIGHT_R         45
+#define DS5_IDX_LIGHT_G         46
+#define DS5_IDX_LIGHT_B         47
+
+static void feedback_paint_wired(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!c || c->hid_fd < 0) return;
+    uint8_t rep[DS5_OUT_REPORT_LEN];
+    memset(rep, 0, sizeof(rep));
+    rep[0] = DS5_OUT_REPORT_ID;
+    rep[DS5_IDX_VALID_FLAG1] = DS5_F1_ALLOW_LIGHTBAR;
+    rep[DS5_IDX_LIGHT_R] = r;
+    rep[DS5_IDX_LIGHT_G] = g;
+    rep[DS5_IDX_LIGHT_B] = b;
+    (void)!write(c->hid_fd, rep, sizeof(rep));
+}
+
 static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out,
                           btsig_pattern_t pattern)
 {
@@ -117,6 +151,14 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
          * starves the very thing being waited for. An earlier version made
          * things WORSE by waiting longer, which is how that was found. The
          * caller says which thread it is on. */
+        /* T-120 gate: the Bluetooth tone waits for BT_LAYER_CORE_SIGNAL. This is the
+         * alsa_fd < 0 branch, which is Bluetooth by definition -- wired takes
+         * the other branch below and never sees this. See the T-120 note in
+         * aurora's ctm_bridge_gesture.c for the layer plan. */
+        if (!BT_LAYER_CORE_SIGNAL) {
+            ctl_log(c, "feedback: %s -- T-120: Bluetooth tone gated off (BT_LAYER_CORE_SIGNAL=0)", what);
+            return;
+        }
         if (!wait_out) {
             ctl_log(c, "feedback: %s -- not signalled, wrong thread to wait on", what);
             return;
@@ -143,7 +185,17 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
     beeps = 2;
     const int frames_per = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
     const int gap_frames = (FEEDBACK_RATE * FEEDBACK_GAP_MS) / 1000;
-    const int frames = beeps * frames_per + (beeps - 1) * gap_frames;
+    /* ⭐ HOLD UNTIL THE CABLE'S AUDIO IS READY. See the note on
+     * feedback_settle_left_ms -- usually zero, and never more than a few
+     * seconds on a controller plugged in moments ago. */
+    const long settle_ms = feedback_settle_left_ms(c->dev.path);
+    if (settle_ms > 0) {
+        struct timespec sts = {(time_t)(settle_ms / 1000),
+                               (long)(settle_ms % 1000) * 1000000L};
+        nanosleep(&sts, NULL);
+    }
+    const int lead_frames = 0;
+    const int frames = lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
     int16_t *buf = (int16_t *)calloc(1, bytes);
     if (!buf) {
@@ -151,8 +203,10 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         return;
     }
 
+    const int tone_on = ctm_sig_tone_on();
+    const int rumble_on = ctm_sig_rumble_on();
     for (int b = 0; b < beeps; ++b) {
-        const int base = b * (frames_per + gap_frames);
+        const int base = lead_frames + b * (frames_per + gap_frames);
         const int attack  = frames_per / 10;
         const int release = (frames_per * 18) / 100;
         const double level = feedback_note_level(hz[b]);
@@ -172,14 +226,23 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
             const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
             const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
 
+            /* ⭐ ONE WRITE CARRIES BOTH, so a switch zeroes its channels
+             * rather than skipping anything -- see the note at the top of this
+             * file. ⓘ Silence in the speaker channels is exactly what "no tone"
+             * means here, and zero in the haptic ones is "no pulse". */
             const int f = (base + i) * FEEDBACK_CHANNELS;
-            buf[f + 0] = s;   /* speaker left  */
-            buf[f + 1] = s;   /* speaker right */
-            buf[f + 2] = r;   /* haptic left   */
-            buf[f + 3] = r;   /* haptic right  */
+            buf[f + 0] = tone_on ? s : 0;   /* speaker left  */
+            buf[f + 1] = tone_on ? s : 0;   /* speaker right */
+            buf[f + 2] = rumble_on ? r : 0; /* haptic left   */
+            buf[f + 3] = rumble_on ? r : 0; /* haptic right  */
         }
     }
 
+    /* ⭐ THE LIGHT GOES OUT WITH THE SOUND, not after it -- every pattern,
+     * bridge included. See feedback_paint_wired, and the long note on the
+     * Bluetooth side about why a bridge is painted despite the handover. */
+    /* ⓘ Always written: the switches zeroed whichever channels are off, and the
+     * buffer carries the tone and the felt pulse together. */
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
 
@@ -220,9 +283,50 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
     const long wait_ms = play_ms + 40;
     struct timespec ts = {(time_t)(wait_ms / 1000),
                           (long)(wait_ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
-    ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms",
-            what, beeps, c->matched_card, (int)wait_ms);
+    /* ⭐⭐ THE LIGHT BREATHES THROUGH THE WAIT, instead of the wait being idle.
+     *
+     * ⛔ The first version wrote ONE report at full brightness and never
+     * animated, so the light sat solid for the whole signal -- rhoquinn8217,
+     * 2026-08-19: "yellow is solid". ⭐ Painting in steps across the same
+     * period the sound occupies makes the two one event rather than a colour
+     * that happens to be on while a tone plays.
+     *
+     * ⓘ Driven by the clock, like the app's pulses: a late step lands at the
+     * brightness that moment deserves rather than shifting the whole shape.
+     *
+     * ⚠️ Restores nothing at the end. The claim is released by writing the last
+     * frame at zero, and whoever owns the light next writes over it -- on a
+     * handback that is the app's player colour, a moment later. */
+    if (c && c->alsa_fd >= 0 && wait_ms > 0 && ctm_sig_light_on()) {
+        const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
+        const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
+        const long step_ms = 20;
+        const long pulses = (pattern == BTSIG_HANDING_OVER) ? 1 : 2;
+        const long span   = wait_ms / pulses;
+        for (long done = 0; done < wait_ms; done += step_ms) {
+            const long within = done % span;
+            const long half   = span / 2;
+            long lvl = half ? ((within < half) ? (within * 255) / half
+                                               : ((span - within) * 255) / half)
+                            : 0;
+            if (lvl > 255) lvl = 255;
+            feedback_paint_wired(c, (uint8_t)((R * lvl) / 255),
+                                    (uint8_t)((G * lvl) / 255), 0x00);
+            struct timespec st = {0, step_ms * 1000000L};
+            nanosleep(&st, NULL);
+        }
+        feedback_paint_wired(c, 0x00, 0x00, 0x00);
+    } else {
+        nanosleep(&ts, NULL);
+    }
+    /* ⭐ SAYS WHAT IT DECIDED, not just what it did. The silent-first-tone
+     * hunt went four rounds on guesses because this line could not distinguish
+     * "the lead-in ran and did not help" from "the lead-in never ran". */
+    ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms"
+               " (settled %dms, key=%s)",
+            what, beeps, c->matched_card, (int)wait_ms,
+            (int)settle_ms,
+            c->dev.path[0] ? c->dev.path : "wired");
 }
 
 /* Bridged. */

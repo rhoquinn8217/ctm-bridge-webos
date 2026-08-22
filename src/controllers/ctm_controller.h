@@ -64,6 +64,19 @@ typedef struct {
      * -- it runs in the relay path. */
     void (*on_input_report)(ctm_controller_t *c, const uint8_t *data, size_t len);
 
+    /* ⭐⭐ Blank an INBOUND report in place: buttons up, sticks centred, triggers
+     * released -- and nothing else touched. Used while the TV's own overlay is
+     * open, so the host keeps receiving reports at the usual rate and simply
+     * sees nothing pressed.
+     *
+     * ⛔ WHY NOT SIMPLY DROP THE REPORT: a host holds the last state it was
+     * given, so a button held when the overlay opened would stay held in the
+     * game. Sending a blank report is what releases it. ⓘ It also keeps the
+     * cadence steady, so nothing upstream concludes the controller has gone.
+     *
+     * NULL => this type cannot be blanked and its input is relayed unchanged. */
+    void (*blank_input)(uint8_t *data, size_t len);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -115,6 +128,59 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * It becomes a real setting when the status page exists -- deliberately no
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
+
+/* T-120: the Bluetooth confirmation tone, gated separately so the layered
+ * rebuild in aurora can add it last. Bluetooth-only by construction -- it is
+ * read inside the alsa_fd < 0 branch of feedback_play(). Wired is untouched.
+ * The matching gates for gesture, light and rumble live in aurora's
+ * ctm_bridge_gesture.c. */
+/* ⚠️ NAMED BT_LAYER_TONE UNTIL STEP 5, WHICH WAS MISLEADING. It gates the
+ * core's WHOLE Bluetooth signal -- light, sound and feel together. On Bluetooth
+ * the controller's speaker and its haptics are the same audio device and the
+ * lightbar rides the same report, so the three arrive as one stream and cannot
+ * be gated apart. The old name cost a step to notice: BT_LAYER_RUMBLE could do
+ * nothing while this was off, and nobody expected a "tone" switch to silence a
+ * rumble. */
+#define BT_LAYER_CORE_SIGNAL 1
+
+/* ⭐⭐ T-120: WHAT THE BRIDGE WRITES TO A CONTROLLER WHILE IT IS BRIDGED.
+ *
+ * The BT_LAYER_ gates above cover the CONFIRMATION signals -- the things that
+ * happen once, at the moment of bridging. These cover the ongoing ones: what
+ * the output patcher puts into every report the host sends.
+ *
+ * ⛔ Separate on purpose. A confirmation that costs five seconds is a bad
+ * bridge; an ongoing write that costs anything is a bad SESSION, and the two
+ * fail in ways that look nothing alike.
+ *
+ * ⚠️ THESE ARE NOT BLUETOOTH-ONLY. The patcher runs on the Bluetooth report
+ * format, so a cable never reaches it -- but that is a property of the report,
+ * not of a check, and it is worth knowing the difference. A wired controller
+ * gets its audio through ALSA and its haptics inside the same reports.
+ *
+ * ⓘ All 1: nothing is switched off. They exist so a layer can be removed for
+ * one build and put back, the way the confirmation gates were.
+ *
+ *   BT_FEAT_AUDIO    block 0x90 -- volumes, routing, echo cancellation
+ *                    and 0x93-0x96 -- the speaker's own audio frames
+ *   BT_FEAT_LATENCY  block 0x91 -- the audio buffer, host-owned
+ *   BT_FEAT_HAPTICS  block 0x92 -- haptics gain
+ *
+ * ⛔ THE LIGHTBAR HAS NO GATE HERE, and that is not an oversight: the core
+ * writes no lightbar at all. It belongs to the player colour from the app side
+ * and to the Bluetooth confirmation signal, which BT_LAYER_LIGHT already
+ * covers. */
+/* ⭐ How long after a session opens the relay withholds the host's lightbar
+ * claim, so the app's confirmation pattern has the light to itself.
+ *
+ * ⓘ Slightly longer than one breath (1100 ms), and far shorter than anything a
+ * game would notice. ⛔ Not a policy about who owns the lightbar -- the host
+ * does. This is the handover. */
+#define LIGHT_HOLD_MS    1400
+
+#define BT_FEAT_AUDIO    1
+#define BT_FEAT_LATENCY  1
+#define BT_FEAT_HAPTICS  1
 
 /* Signal a REFUSED plug, with no session behind it.
  *
@@ -185,6 +251,57 @@ bool ctm_bt_capture_enabled(void);
 /* How this controller is attached: "USB" or "BT". When: a type behaves
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
+
+/* Tell the core a device node has appeared, so a tone can wait for its audio
+ * to become usable. ⭐ A cable's speaker takes seconds to work after plug-in. */
+void ctm_feedback_note_appeared(const char *node);
+
+/* Should the host's lightbar claim be withheld right now?
+ *
+ * ⭐ True only for the moment after a session opens, while the app draws its
+ * confirmation pattern. See LIGHT_HOLD_MS. ⓘ An accessor because the struct is
+ * opaque outside controller_common.c. */
+bool ctm_controller_light_held(ctm_controller_t *c);
+
+/* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
+ * bridge half of the gesture; this is the half it cannot see. Defaults on. */
+void ctm_gesture_set_enabled(int on);
+
+/* ⭐⭐ Hold a bridged controller's INPUT while the TV's own overlay is open.
+ *
+ * ⛔ THE FAULT: with the streaming overlay up, a bridged controller's presses
+ * still reached the game behind it, so navigating the panel played the game at
+ * the same time. An UNBRIDGED controller does not do this -- the app routes SDL
+ * events and stops forwarding them while the overlay is open. A bridged
+ * controller produces no SDL events at all; its reports go TV -> USB/IP -> PC
+ * and pass nothing that could hold them.
+ *
+ * ⭐ While held, reports are BLANKED rather than dropped -- see blank_input.
+ * ⓘ Everything else keeps flowing: audio, rumble, the lightbar, and the
+ * unbridge chord, which is read from the REAL report before it is blanked. */
+void ctm_input_set_held(int held);
+
+/* ⭐⭐ WHICH CONFIRMATION SIGNALS THIS SIDE IS ALLOWED TO MAKE.
+ *
+ * ⓘ The light, the felt pulse and the tone, each on or off, for a handover, a
+ * handback AND a refusal. The app owns the settings and hands them in when a
+ * stream starts, the same way it hands in the host address.
+ *
+ * ⚠️ These are "I do not want that" switches -- a bright light in a dark room,
+ * a buzz at midnight, a chirp while someone is asleep. ⓘ The battery saving is
+ * small for rumble and the tone and negligible for the light, so it is not what
+ * they are for.
+ *
+ * ⛔ WITH ALL THREE OFF A REFUSAL IS INVISIBLE: the chord does nothing, and
+ * there is no way to tell that from a gesture that was not recognised. The
+ * settings screen says so.
+ *
+ * ⓘ All default ON, so a core told nothing behaves as it always has. */
+void ctm_signals_set_enabled(int light, int rumble, int tone);
+
+/* Capture the controller's microphone while it is bridged. ⭐ Only useful for
+ * voice chat through the controller itself. ⓘ Defaults on. */
+void ctm_mic_capture_set_enabled(int on);
 
 /* Open the controller's own USB audio playback device, for wired audio and
  * haptics. When: on plug, for a wired DualSense or Edge. Idempotent. */

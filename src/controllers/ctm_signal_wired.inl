@@ -74,11 +74,14 @@ static double wired_sig_level(int hz)
  * note dwindling on a speaker this small is inaudible before it has finished,
  * which made every signal ending low sound cut off. */
 static int16_t *wired_sig_render(btsig_pattern_t pattern, int *frames_out,
-                                 size_t *bytes_out)
+                                 size_t *bytes_out, int lead_frames)
 {
     const int per = (WIRED_SIG_RATE * WIRED_SIG_MS) / 1000;
     const int gap = (WIRED_SIG_RATE * WIRED_SIG_GAP_MS) / 1000;
-    const int frames = per * 2 + gap;
+    /* ⭐ lead_frames is silence in front, for a device whose audio has only
+     * just been opened -- it swallows the start of the first thing written.
+     * See the matching note in ctm_feedback.inl. */
+    const int frames = lead_frames + per * 2 + gap;
     const size_t bytes = (size_t)frames * WIRED_SIG_CHANNELS * sizeof(int16_t);
 
     int16_t *buf = (int16_t *)calloc(1, bytes);
@@ -90,7 +93,7 @@ static int16_t *wired_sig_render(btsig_pattern_t pattern, int *frames_out,
     for (int n = 0; n < 2; ++n) {
         const int hz = wired_sig_hz(pattern, n);
         const double level = wired_sig_level(hz);
-        const int base = n * (per + gap);
+        const int base = lead_frames + n * (per + gap);
 
         for (int i = 0; i < per; ++i) {
             double env;
@@ -357,7 +360,21 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
 
     int frames = 0;
     size_t bytes = 0;
-    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes);
+    /* ⭐⭐ HOLD UNTIL THE CABLE'S AUDIO IS READY.
+     *
+     * ⛔ This path could never be fixed by waiting BEFORE the gesture, which is
+     * how it was found: waiting fifteen seconds then bridging gave a tone, and
+     * waiting then refusing did not. The card is opened at the moment of
+     * refusal, so it is always freshly opened -- but the clock that matters
+     * started when the CABLE went in, and this asks about that. */
+    const long settle_ms = feedback_settle_left_ms(node);
+    if (settle_ms > 0) {
+        wired_sig_log("wired signal: holding %ldms for %s to settle", settle_ms, node);
+        struct timespec sts = {(time_t)(settle_ms / 1000),
+                               (long)(settle_ms % 1000) * 1000000L};
+        nanosleep(&sts, NULL);
+    }
+    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes, 0);
     if (!buf) {
         close(fd);
         pthread_mutex_unlock(&g_cardmatch_lock);

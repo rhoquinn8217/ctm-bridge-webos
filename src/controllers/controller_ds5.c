@@ -6,6 +6,10 @@
 
 #include "ctm_controller.h"
 
+/* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
+ * arriving through some other header until a 2026-08-19 upstream merge changed
+ * what that header pulls in. Included directly so it cannot happen again. */
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
@@ -162,6 +166,68 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 
     if (!data || len < 12 || (data[0] != 0x36 && data[0] != 0x32)) return 0;
 
+    /* ⭐ THE SHAPE OF THE FIRST FEW REPORTS, AND THEN NOTHING.
+     *
+     * ⛔ An earlier version of this only logged once an AUDIO block appeared,
+     * and built a 512-byte string on EVERY report until then. No report ever
+     * had one, so it ran on all of them and the extra work killed the link --
+     * the controller powered itself off. Measured 2026-08-19, build 176.
+     *
+     * ⚠️ So: a hard count, decremented on every call, and NOTHING is built once
+     * it reaches zero. Whatever the first few reports look like is what we get.
+     *
+     * ⭐ Why it is wanted: the TV's own Bluetooth signal invents a 398-byte
+     * report with ONE audio block, so it needs 100 reports a second. The link
+     * delivers about 25. If the host's reports carry four frames each, that is
+     * the shape to copy. */
+    {
+        static int s_shape_left = 3;
+        if (s_shape_left > 0) {
+            --s_shape_left;
+            char line[400];
+            int n = snprintf(line, sizeof(line), "report_shape: id=0x%02x len=%zu:", data[0], len);
+            size_t p2 = 2;
+            while (p2 + 2 <= len - 4 && n > 0 && (size_t)n < sizeof(line) - 24) {
+                uint8_t bid = data[p2];
+                size_t blen = data[p2 + 1];
+                if (bid == 0x00) break;
+                n += snprintf(line + n, sizeof(line) - n, " [%02x len=%zu at=%zu]", bid, blen, p2);
+                p2 += blen + 2;
+            }
+            ctl_log(c, "%s", line);
+
+            /* ⭐⭐ AND THE BYTES OF THE BLOCKS WE FILL OURSELVES.
+             *
+             * The host's reports and ours have the SAME shape -- same id, same
+             * length, same blocks at the same offsets. Yet the host's flow at
+             * full rate and ours take 89 ms each and kill the link. So the
+             * difference is in the CONTENTS, and these are the three blocks
+             * where we choose values rather than copy them.
+             *
+             * ⓘ Audio payload is skipped: it is Opus, and 200 bytes of it says
+             * nothing we can read. */
+            char hx[300];
+            int m = 0;
+            m += snprintf(hx + m, sizeof(hx) - m, "host_bytes: hdr %02x %02x |", data[0], data[1]);
+            m += snprintf(hx + m, sizeof(hx) - m, " 90:");
+            for (int k = 0; k < 12 && (size_t)(2 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[2 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 91:");
+            for (int k = 0; k < 9 && (size_t)(67 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[67 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 95hdr:");
+            for (int k = 0; k < 4 && (size_t)(76 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[76 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | 92hdr:");
+            for (int k = 0; k < 6 && (size_t)(278 + k) < len; ++k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[278 + k]);
+            m += snprintf(hx + m, sizeof(hx) - m, " | tail:");
+            for (int k = 4; k >= 1; --k)
+                m += snprintf(hx + m, sizeof(hx) - m, " %02x", data[len - k]);
+            ctl_log(c, "%s", hx);
+        }
+    }
+
     int patched = 0;
     size_t pos = 2;
     size_t limit = len - 4;
@@ -193,7 +259,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                     patched = 1;
                 }
             }
-            if (block_id == 0x91 && payload_len >= 6) {
+            if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
                 for (size_t i = 3; i <= 7; ++i) {
                     if (data[pos + i] != auto_latency) {
                         data[pos + i] = auto_latency;
@@ -201,7 +267,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                     }
                 }
                 if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
-            } else if (block_id == 0x90 && payload_len >= 8) {
+            } else if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
                 /* AUTO MEANS "FOLLOW THE HOST" -- AND THE HOST ASKS FOR
                  * NOTHING.
                  *
@@ -273,7 +339,26 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
 
-        if (block_id == 0x90 && payload_len >= 8) {
+        /* ⭐ Withhold the host's lightbar claim for the moment after a bridge,
+         * while the app draws its confirmation. See light_hold_until_ms. */
+        if (block_id == 0x90 && payload_len >= 2 && ctm_controller_light_held(c)) {
+            if (data[pos + 3] & 0x04) {              /* lightbar control */
+                data[pos + 3] &= (uint8_t)~0x04;
+                patched = 1;
+                /* ⭐ COUNTED, because "the light still flickers" cannot say
+                 * whether this ran. ⛔ Silence in the log means the hold never
+                 * fired -- the deadline was not set, or the window had already
+                 * closed. A count means it fired and the colour arrived some
+                 * other way. ⓘ Logged once per session, not per report. */
+                static int s_held_logged;
+                if (!s_held_logged) {
+                    s_held_logged = 1;
+                    ctl_log(c, "lightbar: withholding the host's claim during the handover");
+                }
+            }
+        }
+
+        if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
             /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.
              *
              * Recorded because two builds of logging were spent finding it,
@@ -319,12 +404,12 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             if (ctm_controller_tone_take(c, &data[pos + 2], (int)payload_len) > 0) {
                 patched = 1;
             }
-        } else if ((block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
+        } else if (BT_FEAT_AUDIO && (block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
             if (data[pos] != audio_block) {
                 data[pos] = audio_block;
                 patched = 1;
             }
-        } else if (block_id == 0x91 && payload_len >= 6) {
+        } else if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
             for (size_t i = 3; i <= 7; ++i) {
                 if (data[pos + i] != latency) {
                     data[pos + i] = latency;
@@ -336,7 +421,7 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
              * user who changes the audio mode should not silently lose the
              * microphone. */
             if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
-        } else if (block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
+        } else if (BT_FEAT_HAPTICS && block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
             double gain = ds5_haptics_gain(settings->haptics_gain_centi);
             for (size_t i = 2; i < block_len; ++i) {
                 int sample = (int)(int8_t)data[pos + i];
@@ -399,6 +484,11 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
     if (strcmp(ctm_controller_bus(c), "USB") == 0)
         ctm_controller_open_alsa_playback(c);
 
+    /* ⓘ Over Bluetooth there is nothing to open, but the speaker still has to
+     * be told its volume and routing before anything plays. That is done in
+     * controller_common.c, beside the code that owns the Bluetooth signal --
+     * this file cannot see it. */
+
     return 0;
 }
 
@@ -413,6 +503,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_on_input_report,
+    .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
 };
@@ -429,6 +520,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_on_input_report,
+    .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
 };

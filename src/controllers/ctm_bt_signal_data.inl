@@ -26,6 +26,10 @@
  * exactly 200 bytes, so a frame is a copy rather than an offset calculation. */
 
 #define BTSIG_FRAME_BYTES 200
+/* ⓘ Restored 2026-08-19 after the POC that cut these down. The report count
+ * was never the problem: the feature preload on the host was competing for the
+ * same Bluetooth link. With that delayed, 122 reports deliver 1220 ms of audio
+ * in 1220 ms. */
 #define BTSIG_TONE_FRAMES 14    /* 140 ms per note */
 #define BTSIG_GAP_FRAMES  4     /* 40 ms, so two notes read as two */
 #define BTSIG_PRIME_FRAMES 60   /* 600 ms; the decoder needs a stream to start */

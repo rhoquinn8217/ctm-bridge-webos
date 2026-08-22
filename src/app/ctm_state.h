@@ -153,6 +153,17 @@ extern int g_settings_count;
 extern char g_agent_host[64];
 extern int g_agent_port;
 extern bool g_agent_online;
+
+/* True once a probe or a command has actually reached a verdict. */
+extern bool g_agent_probed;
+
+/* ⭐ Ask the agent probe to run now instead of waiting out its interval.
+ *
+ * ⓘ Called when the USB Bridge panel opens -- the one moment somebody is
+ * definitely reading the answer. ⛔ It only REQUESTS: the probe blocks for up to
+ * a second against an unreachable host, and the panel opens on the interface
+ * thread. The result arrives on the panel's next refresh. */
+void ctm_agent_probe_soon(void);
 extern bool g_running;
 extern pthread_t g_stop_sniff_thread;
 extern bool g_stop_sniff_thread_started;

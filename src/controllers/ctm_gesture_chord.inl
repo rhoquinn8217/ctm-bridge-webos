@@ -28,7 +28,9 @@
  * fallback is trivial -- pull the cable -- so a long, obviously intentional
  * hold costs nothing and cannot happen by accident mid-game. It also matches
  * what a hold means elsewhere: powering a phone down, a PC's power button. */
-#define DS5_CHORD_HOLD_MS 5000
+/* ⭐ Four seconds, down from five on 2026-08-20. ⓘ Still longer than the bridge
+ * hold, and deliberately: this is the destructive direction. */
+#define DS5_CHORD_HOLD_MS 4000
 
 
 
@@ -47,6 +49,56 @@
  * An unbridged Bluetooth controller is not sending fingers to detect. */
 #define DS5_BT_REPORT_ID   0x31
 #define DS5_BT_OFFSET      1
+
+/* ⭐⭐ BLANK A DUALSENSE INPUT REPORT: nothing pressed, sticks centred, triggers
+ * released. Used while the TV's overlay is open -- see ctm_input_set_held.
+ *
+ * ⛔ THE POINT IS THE HELD BUTTON. A host keeps the last state it was given, so
+ * dropping reports would leave a button that was down when the overlay opened
+ * down in the game, indefinitely. A blank report is what releases it, and
+ * sending one per real report keeps the cadence normal so nothing upstream
+ * decides the controller has gone away.
+ *
+ * ⓘ Offsets are the chord detector's, from the same measurement: wired report
+ * 0x01 at offset 0, Bluetooth 0x31 one byte further along.
+ *
+ * ⚠️ THE TOUCHPAD IS DELIBERATELY LEFT ALONE. The unbridge chord is read from
+ * the real report before this runs, but a game that reads touch data should see
+ * fingers stop, not freeze -- and the touch bytes already read "no finger" as
+ * 0x80, which is what they are set to here.
+ *
+ * ⓘ Everything not named is left untouched: the gyro and accelerometer, the
+ * battery byte, the timestamp and the report's own counter all keep moving, so
+ * the host sees a live controller doing nothing rather than a stalled one. */
+static void ds5_blank_input(uint8_t *data, size_t len)
+{
+    size_t off;
+    if (!data) return;
+    if (data[0] == 0x01) {
+        off = 0;
+    } else if (data[0] == DS5_BT_REPORT_ID) {
+        off = DS5_BT_OFFSET;
+    } else {
+        return;                       /* not a pad report -- audio, say */
+    }
+    if (len < 41 + off) return;
+
+    data[1 + off] = 0x80;             /* left stick X, centred  */
+    data[2 + off] = 0x80;             /* left stick Y           */
+    data[3 + off] = 0x80;             /* right stick X          */
+    data[4 + off] = 0x80;             /* right stick Y          */
+    data[5 + off] = 0x00;             /* left trigger, released */
+    data[6 + off] = 0x00;             /* right trigger          */
+
+    /* Buttons and the d-pad share byte 8: the low nibble is the d-pad as a
+     * direction, and 8 is its neutral value -- 0 would read as "up". */
+    data[8 + off] = 0x08;
+    data[9 + off] = 0x00;
+    data[10 + off] = 0x00;            /* also clears the touchpad-pressed bit */
+
+    data[33 + off] = 0x80;            /* first touch point inactive  */
+    data[37 + off] = 0x80;            /* second touch point inactive */
+}
 
 static bool ds5_chord_held(const uint8_t *data, size_t len)
 {
@@ -74,9 +126,26 @@ static bool ds5_chord_held(const uint8_t *data, size_t len)
  * thread, once per relayed report. The timestamp lives in the controller's own
  * type state, never in a file-level variable -- two controllers each have their
  * own thread calling this. */
+/* ⭐ THE UNBRIDGE HALF OF THE GESTURE SETTING.
+ *
+ * ⓘ The BRIDGE chord is detected in the app, which can see an unbridged
+ * controller's touchpad. Once bridged those reports come through here instead,
+ * so the app is blind to them and this side owns the other half. Both read the
+ * same user setting; the app hands it over when a bridge starts.
+ *
+ * ⓘ Defaults ON, so a core built without an app telling it anything behaves as
+ * it always has. */
+static int g_gesture_enabled = 1;
+
+void ctm_gesture_set_enabled(int on)
+{
+    g_gesture_enabled = on ? 1 : 0;
+}
+
 static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c) return;
+    if (!g_gesture_enabled) return;
 
     /* ⛔⛔ AN AUDIO REPORT IS ALSO 0x31, AND CARRIES NO TOUCHPAD.
      *
