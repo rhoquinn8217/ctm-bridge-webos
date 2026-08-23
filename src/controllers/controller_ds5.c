@@ -146,6 +146,34 @@ static int ds5_keep_mic_armed(uint8_t *data, size_t pos, size_t payload_len)
 {
 #if MICSAFE_EXPERIMENTAL_ARMING
     if (payload_len < 1) return 0;
+    /* ⛔ INSTRUMENTATION, 2026-08-22. REMOVE once the fault is found.
+     *
+     * ⚠️ FOUR THEORIES HAVE BEEN WRONG TONIGHT, each one plausible against the
+     * evidence already in hand. This says what actually happens instead.
+     *
+     * ⓘ Every 0x91 block reaching here, with its payload length and whether the
+     * host had already set the bit. ⭐ Capped so it cannot flood: the host sends
+     * these ~30 times a second and an unbounded log killed the link once
+     * already (build 176, 2026-08-19).
+     *
+     * ➡️ WHAT TO READ:
+     *   len=1  ... was_set=0  -> the short disarm packet, and we DO see it
+     *   no len=1 lines at all -> it never reaches this function; the fault is
+     *                            upstream of here, in the branch that calls it
+     *   len=1 patched, mic still stops -> something LATER clears the bit, and
+     *                            no amount of guarding here will help */
+    {
+        static int s_left = 40;
+        if (s_left > 0) {
+            --s_left;
+            FILE *lf = fopen("/tmp/ctm-mic-safety.log", "a");
+            if (lf) {
+                fprintf(lf, "[mic-arm] 0x91 len=%zu was_set=%d\n",
+                        payload_len, (data[pos + 2] & 0x01u) ? 1 : 0);
+                fclose(lf);
+            }
+        }
+    }
     if (!ctm_bt_capture_enabled()) return 0;
     if (data[pos + 2] & 0x01u) return 0;          /* already set by the host */
     data[pos + 2] = (uint8_t)(data[pos + 2] | 0x01u);
@@ -158,6 +186,31 @@ static int ds5_keep_mic_armed(uint8_t *data, size_t pos, size_t payload_len)
 
 static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 {
+    /* ⛔ INSTRUMENTATION, 2026-08-22. REMOVE once the question is answered.
+     *
+     * ⚠️ ds5_keep_mic_armed logged NOTHING on a run where Bluetooth capture,
+     * recording and playback all worked. That function is called from inside
+     * THIS one, so either this never runs over Bluetooth, or it runs and never
+     * sees a 0x91 block.
+     *
+     * ⛔ IF THIS NEVER RUNS, THE MICROPHONE IS THE SMALL PART. The speaker
+     * volume in AUTO mode, the audio routing and the lightbar hold all live
+     * here too, and we would be believing we do four things we do not do.
+     *
+     * ⓘ Capped hard: the host sends output ~30 times a second, and an
+     * unbounded log killed the Bluetooth link once already (build 176). */
+    {
+        static int s_out_left = 25;
+        if (s_out_left > 0) {
+            --s_out_left;
+            FILE *lf = fopen("/tmp/ctm-mic-safety.log", "a");
+            if (lf) {
+                fprintf(lf, "[patch-out] id=0x%02x len=%zu\n",
+                        data ? data[0] : 0, len_io ? *len_io : 0);
+                fclose(lf);
+            }
+        }
+    }
     tv_bridge_worker_settings_t s;
     ctm_controller_get_settings(c, &s);
     const tv_bridge_worker_settings_t *settings = &s;
@@ -244,6 +297,26 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             size_t block_len = payload_len + 2;
             if (block_id == 0 && payload_len == 0) break;
             if (block_len > limit - pos) break;
+
+            /* ⭐⭐ RE-ARM ON *ANY* 0x91 BLOCK, including a one-byte one.
+             *
+             * ⛔ THE FAULT, measured 2026-08-22: the microphone streamed perfectly for
+             * 125 seconds and stopped the instant Windows opened the recording
+             * endpoint. 12500 frames decoded with no failures, then nothing.
+             *
+             * ⚠️ THE DISARM PACKET IS A SHORT 0x91 BLOCK -- payload length ONE, bit 0
+             * clear. A host sends it when it opens or closes the microphone interface.
+             * ⛔ The re-arm below lives inside `payload_len >= 6`, a guard that belongs
+             * to the LATENCY loop, so the one packet that actually turns the microphone
+             * off was the one packet we never answered.
+             *
+             * ⭐ This reads payload byte 0 and nothing else, so it needs no length
+             * beyond 1. ⓘ The later call is left in place: the function returns 0 when
+             * the bit is already set, so calling twice costs nothing and REMOVING code
+             * to tidy it is what went wrong the first time this was attempted. */
+            if (block_id == 0x91 && payload_len >= 1) {
+                if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
+            }
             if (ctm_controller_tone_pending(c) &&
                 (block_id == 0x93 || block_id == 0x94 ||
                  block_id == 0x95 || block_id == 0x96)) {
@@ -338,6 +411,13 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         size_t block_len = payload_len + 2;
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
+
+        /* ⭐ Same as the AUTO loop above: answer SHORT 0x91 blocks too. ⓘ The
+         * disarm packet a host sends when it opens the microphone interface has
+         * a payload of ONE byte, and the branch further down requires six. */
+        if (block_id == 0x91 && payload_len >= 1) {
+            if (ds5_keep_mic_armed(data, pos, payload_len)) patched = 1;
+        }
 
         /* ⭐ Withhold the host's lightbar claim for the moment after a bridge,
          * while the app draws its confirmation. See light_hold_until_ms. */
