@@ -68,21 +68,68 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #define DS5_IDX_VALID_FLAG0            1
 #define DS5_IDX_VALID_FLAG1            2
 #define DS5_IDX_SPEAKER_VOLUME         6
+#define DS5_IDX_MIC_VOLUME             7
 #define DS5_IDX_AUDIO_CONTROL          8
 
 /* valid_flag0 -- claim bits for the settings we care about */
 #define DS5_F0_ALLOW_SPEAKER_VOLUME    0x20
+/* ⭐ Bit 6. DERIVED, not guessed: the claim bits run in the same order as the
+ * payload bytes they govern. `spk_route` used 0x90 = headphone volume (bit 4) +
+ * audio control (bit 7); `spk_vol` used 0xa0 = speaker volume (bit 5) + audio
+ * control. Bytes 5/6/7/8 are headphone/speaker/mic/audio-control, so mic volume
+ * is bit 6.
+ *
+ * ⛔ BITS 0 AND 1 MUST STAY CLEAR -- they govern the rumble path, and claiming a
+ * field without setting it applies ZERO. ⓘ Claiming mute in panel 1 rather than
+ * panel 2 was the same class of mistake and cost a session. */
+#define DS5_F0_ALLOW_MIC_VOLUME        0x40
 #define DS5_F0_ALLOW_AUDIO_CONTROL     0x80
 
 /* audio_control (byte 8) fields */
 #define DS5_AUDIO_OUT_PATH_SPEAKER     0x30  /* route playback to the controller speaker */
-#define DS5_AUDIO_ECHO_NOISE_CANCEL    0x0c  /* echo + noise cancellation ON.
-                                              * The controller suppresses its own speaker
-                                              * when this is off -- feedback protection,
-                                              * since the mic sits centimetres away. This
-                                              * is THE attenuation lever: measured on C1,
-                                              * attenuated -> 80 dB -> 94 dB with this bit
-                                              * alone, volume held constant. */
+/* ⭐⭐ ECHO CANCEL ONLY -- NOISE CANCEL IS DELIBERATELY OFF (2026-08-23).
+ *
+ * ⓘ Byte 8 packs two independent switches: bit 2 echo cancel, bit 3 noise
+ * cancel. They were set together because games send 0x3c, and only ONE of them
+ * was ever justified.
+ *
+ * ⭐ ECHO CANCEL (bit 2) IS PROVEN NECESSARY. The controller suppresses its own
+ * speaker without it -- feedback protection, the mic sits centimetres away.
+ * Measured on a C1: attenuated -> 80 dB -> 94 dB with this bit alone, volume
+ * held constant.
+ *
+ * ⛔ NOISE CANCEL (bit 3) WAS NEVER TESTED, and it is beamforming: on a
+ * MICROPHONE ARRAY it combines the capsules to isolate one voice and suppress
+ * the rest. ⚠️ MEASURED 2026-08-23 on the Monitor -- through our capture path
+ * ch0 peaked at 4-31 while ch1 reached 1369, and `arecord` on the same
+ * controller minutes later gave ch0 740 and ch1 1939. `arecord` sends no such
+ * report. ➡️ One channel effectively cancelled away, and the other quiet.
+ *
+ * ⚠️ IF THE SPEAKER ATTENUATES AGAIN, PUT BIT 3 BACK AND SAY SO HERE -- that
+ * would mean the two bits are not independent after all, which the staged
+ * measurement suggests they are but never proved. */
+#define DS5_AUDIO_ECHO_CANCEL          0x04  /* bit 2 only */
+/* ⭐⭐ MICROPHONE VOLUME -- byte 7, and this project has NEVER SET IT (2026-08-23).
+ *
+ * ⛔ THE MEASUREMENT: a recording made through the bridge peaked at -26.2 dBFS
+ * with an RMS of -49.8. Normal speech sits near -20 peak and -28 RMS, so the
+ * captured voice was about 20 dB down -- a tenth of the level it should be, and
+ * it sounded distant to everyone who heard it.
+ *
+ * ⚠️ Flag panel 1 claimed only speaker volume and audio control, so byte 7 was
+ * never touched and the controller kept whatever it powered up with.
+ *
+ * ⭐ THIS IS THE SAME FAULT THE SPEAKER HAD. Its default was also too quiet to
+ * be usable, and setting it to 0x64 is what fixed it. ⓘ The speaker's usable
+ * range was found to be roughly 0x3d..0x64; the microphone's is NOT documented
+ * anywhere we have, so this is the maximum and a starting point rather than a
+ * tuned value.
+ *
+ * ➡️ IF IT WORKS, THIS BECOMES A SETTING, not a constant -- Windows-side beside
+ * speaker_volume and haptics_gain, because gain is per-controller and two
+ * people on two pads will not want the same. */
+#define DS5_MIC_VOLUME_MAX             0x64
+
 #define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
                                               * dualsensectl all use */
 
@@ -2288,7 +2335,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
     c->audio_spk_vol = DS5_SPEAKER_VOLUME_MAX;
-    c->audio_control = DS5_AUDIO_OUT_PATH_SPEAKER | DS5_AUDIO_ECHO_NOISE_CANCEL;
+    c->audio_control = DS5_AUDIO_OUT_PATH_SPEAKER | DS5_AUDIO_ECHO_CANCEL;
     c->tone_frame_next = -1;   /* nothing queued; the struct is memset to 0,
                                 * which would otherwise read as "frame 0" */
     c->wake_pipe[0] = -1;
@@ -2382,13 +2429,16 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c)
     uint8_t spk_init[DS5_OUT_REPORT_LEN] = {0};
     spk_init[0]                      = DS5_OUT_REPORT_ID;
     spk_init[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
+                                       DS5_F0_ALLOW_MIC_VOLUME |
                                        DS5_F0_ALLOW_AUDIO_CONTROL;
     spk_init[DS5_IDX_VALID_FLAG1]    = 0x00;  /* claim nothing else */
     spk_init[DS5_IDX_SPEAKER_VOLUME] = c->audio_spk_vol;
+    spk_init[DS5_IDX_MIC_VOLUME]     = DS5_MIC_VOLUME_MAX;
     spk_init[DS5_IDX_AUDIO_CONTROL]  = c->audio_control;
     int svrc = hid_write_report(c, spk_init, sizeof(spk_init));
-    ctl_log(c, "alsa: speaker init (merged, %zu bytes) vol=0x%02x ctrl=0x%02x rc=%d hid_fd=%d",
-            sizeof(spk_init), c->audio_spk_vol, c->audio_control, svrc, c->hid_fd);
+    ctl_log(c, "alsa: speaker init (merged, %zu bytes) vol=0x%02x mic=0x%02x ctrl=0x%02x rc=%d hid_fd=%d",
+            sizeof(spk_init), c->audio_spk_vol, DS5_MIC_VOLUME_MAX,
+            c->audio_control, svrc, c->hid_fd);
 }
 
 void ctm_controller_open_alsa_playback(ctm_controller_t *c)
