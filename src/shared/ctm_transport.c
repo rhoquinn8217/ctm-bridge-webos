@@ -3,7 +3,9 @@
 #include "ctm_transport.h"
 
 #include <errno.h>
+#include <fcntl.h>      /* ⓘ connect_with_deadline -- O_NONBLOCK */
 #include <netdb.h>
+#include <poll.h>       /* ⓘ connect_with_deadline -- the deadline itself */
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -53,6 +55,74 @@ static void tune_tcp(int fd)
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
 }
 
+/* ⭐⭐ A CONNECT THAT COMES BACK. T-127, 2026-08-23.
+ *
+ * ⛔ THE FAULT: kill the listener while a controller is bridged and the app
+ * hangs, and pressing Release in the panel crashes it. ⚠️ It is not the panel
+ * and it is not the missing teardown -- IT IS THE JOIN. Release runs on the UI
+ * thread, sets the session's stop flag, then waits for that thread. The thread
+ * is parked inside connect(), and a thread inside a blocking call cannot see a
+ * flag. The interface is frozen for whatever is left of the attempt.
+ *
+ * ⭐ AND A DEAD LISTENER DROPS PACKETS RATHER THAN REFUSING THEM. Observed on
+ * the TV as `tcp 0 1 ...:60290 ...:48055 SYN_SENT`. A refused connection
+ * returns instantly; a dropped one waits out the KERNEL'S SYN TIMEOUT, which is
+ * around a minute. ⓘ That is also why the hang looked intermittent -- the wait
+ * is whatever remains of the attempt in flight, so the same button gives a
+ * different answer every time.
+ *
+ * ⛔ NOTHING ELSE HERE BOUNDS IT. `ui_bridge.c` sets SO_RCVTIMEO and
+ * SO_SNDTIMEO, which bound reads and writes and NOT connect -- a note in the
+ * docs claiming it hand-rolls a bounded connect is wrong, and was believed long
+ * enough to be written into T-127.
+ *
+ * ⚠️ THE TIMEOUT IS DELIBERATELY GENEROUS. Two seconds is far longer than any
+ * reachable host on a LAN needs and far shorter than a minute of frozen
+ * interface. ⓘ A REMOTE host over the internet is the case to watch: if this
+ * ever starts refusing connections that would have succeeded, raise it -- do
+ * not remove it. */
+#define CTM_CONNECT_TIMEOUT_MS 2000
+
+static int connect_with_deadline(int fd, const struct sockaddr *addr,
+                                 socklen_t addrlen, int timeout_ms)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+
+    int rc = connect(fd, addr, addrlen);
+    if (rc != 0 && errno != EINPROGRESS) {
+        (void)fcntl(fd, F_SETFL, flags);
+        return -1;
+    }
+
+    if (rc != 0) {
+        /* ⓘ POLLOUT fires on success AND on failure; the error is read back
+         * from the socket rather than inferred from poll's return. */
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0) {                       /* 0 = timed out, -1 = error */
+            (void)fcntl(fd, F_SETFL, flags);
+            return -1;
+        }
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+            (void)fcntl(fd, F_SETFL, flags);
+            return -1;
+        }
+    }
+
+    /* ⭐ Blocking again for the caller. Everything downstream reads and writes
+     * this socket expecting blocking semantics; only the CONNECT was the
+     * problem. */
+    if (fcntl(fd, F_SETFL, flags) < 0) return -1;
+    return 0;
+}
+
 static int connect_tcp(const char *host, int port)
 {
     char port_text[16];
@@ -69,7 +139,8 @@ static int connect_tcp(const char *host, int port)
     for (struct addrinfo *rp = result; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        if (connect_with_deadline(fd, rp->ai_addr, rp->ai_addrlen,
+                                  CTM_CONNECT_TIMEOUT_MS) == 0) break;
         close(fd);
         fd = -1;
     }
