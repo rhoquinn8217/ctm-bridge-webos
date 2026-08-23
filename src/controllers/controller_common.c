@@ -128,7 +128,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
  * ➡️ IF IT WORKS, THIS BECOMES A SETTING, not a constant -- Windows-side beside
  * speaker_volume and haptics_gain, because gain is per-controller and two
  * people on two pads will not want the same. */
-#define DS5_MIC_VOLUME_MAX             0x64
+#define DS5_MIC_VOLUME_MAX             0x20
 
 #define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
                                               * dualsensectl all use */
