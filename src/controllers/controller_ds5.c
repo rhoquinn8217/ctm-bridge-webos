@@ -70,9 +70,30 @@ static uint64_t ds5_now_ms(void)
  *
  * Same two bits, same fix, the other transport. */
 #define DS5_BT_AUDIO_OUT_PATH_SPEAKER  0x30
-#define DS5_BT_AUDIO_ECHO_NOISE_CANCEL 0x0c
+/* ⭐⭐ ECHO CANCEL ONLY -- NOISE CANCEL IS DELIBERATELY OFF (2026-08-23).
+ *
+ * ⓘ Byte 8 packs two independent switches: bit 2 echo cancel, bit 3 noise
+ * cancel. They were set together because games send 0x3c, and only ONE of them
+ * was ever justified.
+ *
+ * ⭐ ECHO CANCEL (bit 2) IS PROVEN NECESSARY. The controller suppresses its own
+ * speaker without it -- feedback protection, the mic sits centimetres away.
+ * Measured on a C1: attenuated -> 80 dB -> 94 dB with this bit alone, volume
+ * held constant.
+ *
+ * ⛔ NOISE CANCEL (bit 3) WAS NEVER TESTED, and it is beamforming: on a
+ * MICROPHONE ARRAY it combines the capsules to isolate one voice and suppress
+ * the rest. ⚠️ MEASURED 2026-08-23 on the Monitor -- through our capture path
+ * ch0 peaked at 4-31 while ch1 reached 1369, and `arecord` on the same
+ * controller minutes later gave ch0 740 and ch1 1939. `arecord` sends no such
+ * report. ➡️ One channel effectively cancelled away, and the other quiet.
+ *
+ * ⚠️ IF THE SPEAKER ATTENUATES AGAIN, PUT BIT 3 BACK AND SAY SO HERE -- that
+ * would mean the two bits are not independent after all, which the staged
+ * measurement suggests they are but never proved. */
+#define DS5_BT_AUDIO_ECHO_CANCEL       0x04  /* bit 2 only */
 #define DS5_BT_AUDIO_SPEAKER_ON \
-    (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_NOISE_CANCEL)
+    (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_CANCEL)
 
 /* One Opus frame at the settings the tone is encoded with: 48 kHz, 10 ms,
  * 160 kbps constant bitrate. Named here rather than including the generated

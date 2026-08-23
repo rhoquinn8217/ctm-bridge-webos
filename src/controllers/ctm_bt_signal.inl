@@ -81,7 +81,13 @@
 #define BTSIG_F2_LED       0x04   /* AllowLedColor, and nothing else */
 
 #define BTSIG_SPK_VOL      0x64   /* full scale; below ~0x3c is inaudible */
-#define BTSIG_AUDIO_CTL    0x3c   /* speaker route WITH echo cancel */
+/* ⭐ Speaker route with echo cancel, and NOISE CANCEL OFF (0x34, was 0x3c).
+ *
+ * ⓘ This plays on every bridge, so leaving 0x3c here would re-enable the
+ * beamforming the rest of the change turns off -- and it would do it at exactly
+ * the moment a controller is handed over. ⚠️ See the note in
+ * controller_common.c for why bit 3 is out. */
+#define BTSIG_AUDIO_CTL    0x34
 
 /* The timing block's first byte and its latency values, taken verbatim from a
  * report the controller was accepting. ⚠️ The latency is the user's to set --
