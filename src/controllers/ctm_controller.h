@@ -93,6 +93,22 @@ typedef struct {
     unsigned long reports_in;    /* input reports forwarded to the host */
     unsigned long reports_out;   /* output reports written to the device */
     char last_event[96];         /* most recent controller log line */
+
+    /* ⭐⭐ THE HOST IS GONE AND THE SESSION HAS STOPPED TRYING. T-127.
+     *
+     * ⛔ NOT the same as `connected` being false. A session disconnects and
+     * reconnects routinely -- a listener restart, a stream hiccup -- and the
+     * reconnect loop is meant to ride that out. **This says the loop has given
+     * up**, after fifteen seconds of a host that will not answer.
+     *
+     * ⭐ WHY THE CORE CANNOT ACT ON IT ITSELF: releasing a controller is
+     * app-side work. The emulated pad has to be retired, Moonlight's input
+     * restored for that pad, the panel row updated and the light pulsed. ⓘ None
+     * of that is reachable from here, and the app already has a release path
+     * that does all of it -- the one the panel button calls.
+     *
+     * ➡️ So this is a FLAG, and the app's existing status tick acts on it. */
+    bool host_gone;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
