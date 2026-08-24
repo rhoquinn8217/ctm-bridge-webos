@@ -91,9 +91,28 @@ static uint64_t ds5_now_ms(void)
  * ⚠️ IF THE SPEAKER ATTENUATES AGAIN, PUT BIT 3 BACK AND SAY SO HERE -- that
  * would mean the two bits are not independent after all, which the staged
  * measurement suggests they are but never proved. */
-#define DS5_BT_AUDIO_ECHO_CANCEL       0x04  /* bit 2 only */
+/* ⛔⛔ BLUETOOTH KEEPS BIT 3. WIRED DOES NOT. Measured 2026-08-24.
+ *
+ * ⚠️ THE TWO BITS ARE INDEPENDENT ON A CABLE AND NOT OVER BLUETOOTH. Dropping
+ * noise cancel fixed the microphone's dead channel on wired, and the speaker
+ * stayed nominal -- so it was applied to both transports. ⛔ On Bluetooth it
+ * ATTENUATES THE SPEAKER, and the haptics with it, because over that transport
+ * the speaker and the haptics ride the same stream.
+ *
+ * ⭐ Bisected on hardware: build 260 nominal, 261 attenuated. 261 changed this
+ * byte and nothing else.
+ *
+ * ⓘ WHY IT WAS MISSED: the staged measurement that isolated echo cancel as the
+ * speaker lever was done on a C1 OVER A CABLE, and the re-check after the
+ * change was wired too. **Neither bit was ever tested independently on
+ * Bluetooth.**
+ *
+ * ⚠️ AND THE MICROPHONE FIX DOES NOT TRANSFER. Bluetooth capture goes through
+ * the controller's own encoder rather than an ALSA device, so the array is not
+ * read the same way and the dead-channel fault does not apply here. */
+#define DS5_BT_AUDIO_ECHO_NOISE_CANCEL 0x0c  /* bits 2 AND 3 -- Bluetooth needs both */
 #define DS5_BT_AUDIO_SPEAKER_ON \
-    (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_CANCEL)
+    (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_NOISE_CANCEL)
 
 /* One Opus frame at the settings the tone is encoded with: 48 kHz, 10 ms,
  * 160 kbps constant bitrate. Named here rather than including the generated

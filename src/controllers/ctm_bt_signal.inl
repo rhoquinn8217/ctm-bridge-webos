@@ -87,7 +87,11 @@
  * beamforming the rest of the change turns off -- and it would do it at exactly
  * the moment a controller is handed over. ⚠️ See the note in
  * controller_common.c for why bit 3 is out. */
-#define BTSIG_AUDIO_CTL    0x34
+/* ⛔ BACK TO 0x3c 2026-08-24 -- Bluetooth needs noise cancel for its speaker.
+ * ⓘ See the note beside DS5_BT_AUDIO_ECHO_NOISE_CANCEL in controller_ds5.c.
+ * ⚠️ This plays on every bridge, so leaving it at 0x34 would attenuate the
+ * confirmation tone even with the report patcher corrected. */
+#define BTSIG_AUDIO_CTL    0x3c
 
 /* The timing block's first byte and its latency values, taken verbatim from a
  * report the controller was accepting. ⚠️ The latency is the user's to set --
