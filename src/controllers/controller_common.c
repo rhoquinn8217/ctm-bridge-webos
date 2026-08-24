@@ -228,6 +228,8 @@ struct ctm_controller {
      * connected/transport/last_event are guarded by status_mutex. */
     pthread_mutex_t status_mutex;
     volatile int st_connected;
+    /* ⭐ T-127: the reconnect loop gave up. Set once, read by the UI tick. */
+    volatile int st_host_gone;
     volatile int st_transport_enet;
     volatile unsigned long st_reports_in;
     volatile unsigned long st_reports_out;
@@ -1857,6 +1859,11 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
 /* Dispatch one inbound message: OUTPUT (paced or direct write), FEATURE_GET/SET
  * (hidraw ioctl + reply), HOST_CONFIG (pacing params). When: per message
  * decoded in the session loop. */
+/* ⭐ How long the reconnect loop tries before deciding the host is gone.
+ * ⭐⭐ FIFTEEN SECONDS BECAUSE THE LISTENER USES FIFTEEN. Not a guess -- see the
+ * note at the give-up itself in session_main. */
+#define CTM_HOST_GONE_MS 15000
+
 static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                            queued_report_t *paced_q, int *paced_head, int *paced_count,
                            const ctmb_header_t *h, uint8_t *payload)
@@ -2239,6 +2246,73 @@ static void *session_main(void *arg)
                ctm_transport_connect_once(&c->xport, c->host, c->port, 400) != 0) {
             ++attempts;
             for (int slept = 0; slept < 500 && !c->stop; slept += 50) usleep(50000);
+
+            /* ⭐⭐ GIVE UP AFTER FIFTEEN SECONDS. T-127, 2026-08-23.
+             *
+             * ⛔ THE FAULT: this loop used to retry FOREVER. Close the
+             * listener's window and the controller stayed claimed by a host that
+             * no longer exists -- no speaker, no triggers, no microphone, and
+             * nothing on screen saying why. ⚠️ **The user's only way out was to
+             * know to press Release.**
+             *
+             * ⭐⭐⭐ FIFTEEN SECONDS, BECAUSE THAT IS THE LISTENER'S OWN
+             * WINDOW. Read out of CTM-USBIP 2026-08-23, and it is the reason
+             * this number is not a guess.
+             *
+             * ⛔ THIS LOOP REDIALS THE BRIDGE SESSION PORT (48055), NOT THE
+             * AGENT (48054). The agent is always listening; the session port
+             * exists only while a bridge is running, and the agent creates it
+             * when the TV asks. ➡️ **A freshly restarted listener has NOTHING on
+             * 48055 -- nothing has asked it to bridge yet -- so the reconnect
+             * can never succeed after a restart, however long it waits.**
+             *
+             * ⭐ SO THE ONLY THING THE WAIT PROTECTS IS A DROP WHERE THE
+             * LISTENER PROCESS SURVIVES and its session port stays open -- a
+             * WiFi hiccup or a router blip, with both ends perfectly healthy.
+             *
+             * ⭐⭐⭐ AND THE LISTENER HOLDS THAT PORT FOR EXACTLY FIFTEEN
+             * SECONDS. `agent.inl`: `set_session_timeouts(30000, 15000)` -- an
+             * initial connect must arrive within thirty, a RECONNECT gets a
+             * fifteen-second grace, after which the session declares itself dead
+             * and unplugs the device. ⓘ Its own comment gives the reason: *"a
+             * parked listener is what produced zombie devices and stole the next
+             * plug's handshake."*
+             *
+             * ➡️ **SO WE GIVE UP WHEN THEY GIVE UP, AND NOT BEFORE.** Stopping
+             * earlier abandons a session that was still recoverable, and the
+             * listener would have unplugged it moments later anyway.
+             *
+             * ⛔ IT WAS BRIEFLY 5000, ON THE REASONING THAT ONLY A MILLISECOND
+             * BLIP COULD EVER RECOVER. ⚠️ That was wrong by omission -- it never
+             * checked what the other side does, and the other side waits fifteen
+             * seconds. ⭐ **The number stopped being a judgement call the moment
+             * that was read.**
+             *
+             * ⓘ For scale: one attempt costs up to ~2.9s -- 400ms of ENet
+             * timeout, a 500ms sleep, and up to 2s of bounded TCP -- so fifteen
+             * seconds is about six attempts.
+             *
+             * ➡️ **The cost of being wrong is small either way: the controller
+             * returns to Moonlight's own path and still works, just without the
+             * extras, and re-bridging is one gesture.**
+             *
+             * ⛔ THIS IS NOT WHAT CAUSED THE HANG. That was the LENGTH of a
+             * single connect -- a dead host drops packets, so connect() waited
+             * out the kernel's SYN timeout. Bounded to two seconds in the commit
+             * before this one. ⓘ The loop always checked `stop` between
+             * attempts; it simply could not while parked inside one. */
+            struct timespec wn;
+            clock_gettime(CLOCK_MONOTONIC, &wn);
+            const long waited_ms = (long)((wn.tv_sec - w0.tv_sec) * 1000 +
+                                          (wn.tv_nsec - w0.tv_nsec) / 1000000);
+            if (waited_ms >= CTM_HOST_GONE_MS) {
+                ctl_log(c, "host gone: no answer for %ldms over %d attempt(s) -- giving up",
+                        waited_ms, attempts);
+                pthread_mutex_lock(&c->status_mutex);
+                c->st_host_gone = 1;
+                pthread_mutex_unlock(&c->status_mutex);
+                c->stop = 1;
+            }
         }
         if (c->stop) break;
         if (attempts > 0) {
@@ -2610,6 +2684,7 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     memset(out, 0, sizeof(*out));
     pthread_mutex_lock(&c->status_mutex);
     out->connected = c->st_connected ? true : false;
+    out->host_gone = c->st_host_gone ? true : false;
     out->transport_enet = c->st_transport_enet ? true : false;
     snprintf(out->last_event, sizeof(out->last_event), "%s", c->st_last_event);
     pthread_mutex_unlock(&c->status_mutex);
