@@ -1383,6 +1383,43 @@ static void request_full_bt_mode(int fd)
  * layout is documented but unverified on this hardware, and guessing at
  * formats is what produced three sessions of wrong conclusions elsewhere in
  * this project. Read the bytes first, decide what they mean second. */
+static int reply_is_zero(const uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) if (p[i]) return 0;
+    return 1;
+}
+
+/* ⭐⭐⭐ THE LAYOUT IS NOW MEASURED, NOT DOCUMENTED. 2026-08-24.
+ *
+ * The investigation above asked whether a wired DualSense reports its own
+ * identity. It does, and this is the reply, read on the monitor from two
+ * different models:
+ *
+ *   ds5   09 ed 10 82 ef 66 7c  08 25 00  c9 40 7b e6 e6 34  00...
+ *   ds5e  09 9d f6 cb 9a 3a 14  08 25 00  06 be 0b 9e a2 88  00...
+ *
+ * ⭐ Byte 0 is the report id echoed back. **BYTES 1-6 ARE THE CONTROLLER'S OWN
+ * MAC, LITTLE-ENDIAN** -- reversed. Checked against the MACs the kernel reports
+ * for the same two units over Bluetooth: 7c-66-ef-82-10-ed and
+ * 14-3a-9a-cb-f6-9d. ⓘ Identical shape on both models.
+ *
+ * ⓘ Bytes 7-9 are 08 25 00 on both, a constant. ⚠️ Bytes 10-15 DIFFER between
+ * the two and are almost certainly the paired host's address -- which is what a
+ * pairing-info report is for. **Not parsed: not needed, and not verified.**
+ *
+ * ⛔ WHY THIS MATTERS: `dev.mac` comes from sysfs `/uniq`, which the kernel fills
+ * only when `hid-playstation` binds the device. **On a cable that happens on
+ * some televisions and not others** -- measured 2026-08-24: the B4 populates it,
+ * the monitor does not. ➡️ **So a wired controller had no identity on half the
+ * fleet, and the listener saw the constant `CTMUSBIP` instead.**
+ *
+ * ⭐ Reading 0x09 ourselves does not care which driver bound. */
+static void ds_mac_from_pairing_info(const uint8_t *reply, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%02x:%02x:%02x:%02x:%02x:%02x",
+             reply[6], reply[5], reply[4], reply[3], reply[2], reply[1]);
+}
+
 static void probe_pairing_info(ctm_controller_t *c, int fd)
 {
     uint8_t feature[20];
@@ -1398,6 +1435,27 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
         o += snprintf(hex + o, sizeof(hex) - (size_t)o, "%02x ", feature[i]);
     }
     ctl_log(c, "probe: feature 0x09 (pairing info) = %s", hex);
+
+    /* ⭐ FILL THE IDENTITY ONLY IF IT IS MISSING. Where the kernel already
+     * supplied one, that value stays -- it is the same MAC from a source that
+     * has been trusted for months, and replacing it would make this change
+     * capable of breaking a set that already worked.
+     *
+     * ⚠️ A REPLY OF ALL ZEROES IS NOT AN ANSWER. An unpaired controller, or one
+     * whose reply we misread, would otherwise be given the identity
+     * 00:00:00:00:00:00 -- and EVERY such controller would share it, which is
+     * exactly the silent-collision the listener's config store refuses to
+     * allow. Better to leave it empty and let the host use its constant. */
+    if (c->dev.mac[0] != '\0') return;
+
+    if (reply_is_zero(feature + 1, 6)) {
+        ctl_log(c, "identity: 0x09 answered with zeroes -- leaving the MAC empty");
+        return;
+    }
+
+    ds_mac_from_pairing_info(feature, c->dev.mac, sizeof(c->dev.mac));
+    ctl_log(c, "identity: MAC %s taken from feature 0x09 (the kernel gave none)",
+            c->dev.mac);
 }
 
 /* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
@@ -1463,6 +1521,14 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
     caps->feature_report_len = 64;
     caps->flags = 1;
     snprintf(caps->path, sizeof(caps->path), "%s", path);
+
+    /* ⛔⛔ BEFORE THE SERIAL IS COPIED, NOT AFTER. This fills dev.mac on a wired
+     * controller whose kernel driver supplied none, and the very next line is
+     * the only place that value reaches the host. ⚠️ It used to run at the end
+     * of this function, purely as an investigation -- moving it is the whole
+     * change on this side. */
+    if (strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
+
     snprintf(caps->serial, sizeof(caps->serial), "%s", c->dev.mac);
     snprintf(caps->manufacturer, sizeof(caps->manufacturer), "hidraw");
     if (ioctl(fd, HIDIOCGRAWNAME(sizeof(caps->product) - 1), caps->product) < 0 ||
@@ -1478,9 +1544,6 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
     }
 
     if (c->ops->request_bt_mode) request_full_bt_mode(fd);
-
-    /* Investigation only, wired DualSense. Read and log; nothing acts on it. */
-    if (strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
     return fd;
 }
 
