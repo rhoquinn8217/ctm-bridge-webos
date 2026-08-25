@@ -309,7 +309,7 @@ static void wired_sig_prepare(const char *node)
     /* ⓘ Echo cancel only -- noise cancel is beamforming and cost us the
      * microphone's second channel. See the note in controller_common.c. */
     rep[DS5_IDX_AUDIO_CONTROL]  = DS5_AUDIO_OUT_PATH_SPEAKER |
-                                  DS5_AUDIO_ECHO_CANCEL;
+                                  DS5_AUDIO_ECHO_NOISE_CANCEL;
     (void)!write(fd, rep, sizeof(rep));
     close(fd);
 }
