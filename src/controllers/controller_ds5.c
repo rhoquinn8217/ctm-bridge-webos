@@ -285,7 +285,67 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                  * headphone route ends up muted -- the documented trap from
                  * the wired investigation: "set the audio allow bits that
                  * match the bytes being patched". */
-                if (data[pos + 7] == 0 && data[pos + 9] == 0) {
+                if (settings->host_audio_set) {
+                    /* ⭐⭐ THE USER'S CONFIGURED VOLUME WINS, EVEN IN AUTO.
+                     * T-130, 2026-08-25.
+                     *
+                     * ⛔ THE FAULT: `speaker_volume = 0` on Windows left a
+                     * Bluetooth controller at FULL VOLUME. Heard, not inferred.
+                     *
+                     * ⓘ Two separate things had to be true for that. Windows
+                     * patches these settings into report 0x02 -- the WIRED id --
+                     * so over Bluetooth its own override never ran and the
+                     * report left the host carrying the GAME's 0x64. And then
+                     * the branch below, correctly, left it alone: AUTO only
+                     * fills in what the host left blank.
+                     *
+                     * ⚠️ AUTO WAS WRITTEN WHEN THERE WAS ONE HOST. There are now
+                     * two things asking -- the game, and the user's
+                     * per-controller configuration. **A user who sets a volume
+                     * means it.**
+                     *
+                     * ⭐ So a CONFIGURED volume is written unconditionally, which
+                     * is exactly how latency already behaves in this same
+                     * branch. ⓘ The two were never symmetrical and the header
+                     * note says so: AUTO *"touches only the latency block"*.
+                     *
+                     * ⛔ ONLY THE VOLUME. The audio ROUTE is not touched here --
+                     * that is what the explicit modes are for, and changing it
+                     * would make AUTO the second Speaker mode this file warns
+                     * against.
+                     *
+                     * ⚠️ AND THE CLAIM BIT MATTERS. Writing a field without
+                     * claiming it does nothing; claiming one and leaving the
+                     * host's zero in it is the documented trap from the wired
+                     * investigation. So 0x20 is set, and only 0x20. */
+                    /* ⛔⛔ NOT `if (data[pos+7] != auto_speaker)`. THE CLAIM
+                     * BIT IS THE POINT, NOT THE VALUE.
+                     *
+                     * ⚠️ Measured on build 287: the host sends
+                     * `cur=00 ctl=00 flags=00` -- volume zero and NOTHING
+                     * claimed. ⓘ **A zero with no claim bit does not mean
+                     * "volume zero", it means "not setting volume"**, so the
+                     * controller keeps whatever it had, which is full.
+                     *
+                     * ⛔ A first attempt skipped the write when the value
+                     * already matched. With a configured 0 that is `0 != 0`,
+                     * false -- so it wrote nothing AND shadowed the fallback
+                     * below, which does set the claim bit. **It made a working
+                     * default path stop working.**
+                     *
+                     * ⭐ This file's own note says it: *"A CLAIMED field is
+                     * applied even when it is zero."* ➡️ So claim and write
+                     * every time.
+                     *
+                     * ⓘ `patched` only when something actually changed, so an
+                     * unchanged report is not needlessly re-signed. */
+                    const uint8_t want_flags = (uint8_t)(data[pos + 2] | 0x20u);
+                    if (data[pos + 2] != want_flags || data[pos + 7] != auto_speaker) {
+                        data[pos + 2] = want_flags;
+                        data[pos + 7] = auto_speaker;
+                        patched = 1;
+                    }
+                } else if (data[pos + 7] == 0 && data[pos + 9] == 0) {
                     data[pos + 2] = (uint8_t)(data[pos + 2] | 0xa0u);  /* allow speaker vol + audio ctrl */
                     data[pos + 7] = auto_speaker;
                     data[pos + 9] = DS5_BT_AUDIO_SPEAKER_ON;
