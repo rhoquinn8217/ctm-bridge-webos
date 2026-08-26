@@ -2079,6 +2079,69 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                 ctl_log(c, "host set audio latency to %u ms", s.latency_ms);
             }
         }
+
+        /* ⭐⭐ AND THE AUDIO SETTINGS, THE SAME WAY. T-130, 2026-08-25.
+         *
+         * ⛔ THE FAULT: Windows patches these into the host's outbound report,
+         * and every one of those patchers checks for report id 0x02 -- the
+         * WIRED id. Over Bluetooth the host sends 0x36, so speaker volume,
+         * headset volume, routing and the three rumble gains silently did
+         * nothing. ⓘ Heard, not inferred: `speaker_volume = 0` left the
+         * controller at full.
+         *
+         * ⚠️ WHY THE VALUES TRAVEL RATHER THAN WINDOWS LEARNING 0x36: a
+         * Bluetooth output report is signed, and the TV re-signs only when it
+         * patched something itself. A report Windows edited alone would arrive
+         * with a stale signature and be dropped. ➡️ The TV already walks the
+         * 0x90 block and already re-signs; it only lacked the numbers.
+         *
+         * ⛔⛔ AN OLDER CLIENT SENDS ZEROES HERE, AND ZERO IS A LEGAL
+         * PERCENTAGE. Trusting it would mute every controller bridged from an
+         * unpatched host. ➡️ An all-zero triple is treated as unset, the same
+         * as 0xFF. */
+        {
+            const uint8_t spk  = host_cfg->speaker_volume_pct;
+            const uint8_t hset = host_cfg->headset_volume_pct;
+            const uint8_t mode = host_cfg->audio_mode;
+            const int all_zero = (spk == 0 && hset == 0 && mode == 0);
+
+            if (!all_zero) {
+                tv_bridge_worker_settings_t s;
+                int changed = 0;
+                ctm_controller_get_settings(c, &s);
+
+                if (spk != CTMB_AUDIO_UNSET && spk <= 100) {
+                    if (s.speaker_volume_percent != (unsigned int)spk) {
+                        s.speaker_volume_percent = (unsigned int)spk;
+                        changed = 1;
+                    }
+                    /* ⭐ Mark it as the USER'S, not a slider default. Without
+                     * this the AUTO path leaves it alone whenever the game has
+                     * asked for anything -- which it always has. */
+                    if (!s.host_audio_set) { s.host_audio_set = 1; changed = 1; }
+                }
+                if (hset != CTMB_AUDIO_UNSET && hset <= 100) {
+                    if (s.headset_volume_percent != (unsigned int)hset) {
+                        s.headset_volume_percent = (unsigned int)hset;
+                        changed = 1;
+                    }
+                    if (!s.host_audio_set) { s.host_audio_set = 1; changed = 1; }
+                }
+                /* ⓘ BOTH is the highest mode, not OFF -- the enum runs
+                 * AUTO, OFF, SPEAKER, HEADSET, BOTH. */
+                if (mode != CTMB_AUDIO_UNSET && mode <= TV_BRIDGE_AUDIO_BOTH &&
+                    s.audio_mode != (tv_bridge_audio_mode_t)mode) {
+                    s.audio_mode = (tv_bridge_audio_mode_t)mode;
+                    changed = 1;
+                }
+                if (changed) {
+                    ctm_controller_set_settings(c, &s);
+                    ctl_log(c, "host set audio: speaker %u%%, headset %u%%, mode %d",
+                            s.speaker_volume_percent, s.headset_volume_percent,
+                            (int)s.audio_mode);
+                }
+            }
+        }
     } else if (h->type == CTMB_MSG_ISO_AUDIO) {
         /* Wired speaker and haptics. A host that never sends this never
          * reaches here, and a controller with no audio device open drops it. */

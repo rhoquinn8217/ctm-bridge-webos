@@ -93,6 +93,16 @@ typedef struct {
  * older build on either side simply ignores it. */
 #define CTMB_LATENCY_UNSET 0xFFFFu
 
+/* ⭐ The same idea one byte wide, for the audio settings below.
+ *
+ * ⛔⛔ AND THE ZERO CASE IS THE TRAP. An OLDER client sends a zeroed reserved
+ * block, and zero is a legal percentage -- SILENT. **A TV that trusted a zero
+ * would mute every controller bridged from an unpatched host.**
+ * ➡️ So the TV treats 0xFF *and* an all-zero triple as "not set". ⓘ That costs
+ * the ability to set all three to zero at once from the host, which is not a
+ * configuration anyone wants: it is silent audio routed nowhere. */
+#define CTMB_AUDIO_UNSET 0xFFu
+
 typedef struct {
     uint32_t bt_pace_us;
     uint16_t input_report_len;
@@ -101,7 +111,35 @@ typedef struct {
     uint8_t paced_report_count;
     uint8_t paced_report_ids[16];
     uint16_t latency_ms;          /* CTMB_LATENCY_UNSET = leave the TV's value */
-    uint8_t reserved[29];
+
+    /* ⭐⭐ THE HOST'S PER-CONTROLLER AUDIO SETTINGS. Added 2026-08-25, T-130.
+     *
+     * ⛔ THE FAULT THEY FIX: on Windows, `ds5_output_overrides.inl` patches the
+     * host's outbound reports -- speaker volume, headset volume, audio routing,
+     * rumble gain -- and every one of those overrides begins
+     * `if (data[0] != 0x02) return;`. **0x02 is the WIRED report id.** Over
+     * Bluetooth the host sends 0x36, so six settings silently did nothing.
+     * ⓘ Confirmed by ear: `speaker_volume = 0` left the controller at full.
+     *
+     * ⚠️ WHY NOT JUST TEACH WINDOWS THE 0x36 LAYOUT: a Bluetooth output report
+     * is SIGNED, and the TV re-signs only when IT patched something
+     * (`if (patched) ctm_bt_sign_output(...)`). **A report Windows edited but
+     * the TV did not would arrive with a stale signature and be dropped by the
+     * controller.** ➡️ The TV already walks this block, already knows the
+     * offsets, and already re-signs. It only ever lacked the host's numbers.
+     *
+     * ⭐ SO THEY TRAVEL, exactly as latency_ms does -- same reserved block, same
+     * unset convention, same "write into the live settings so the next report
+     * carries it" application. ⓘ **That is why audio_latency_ms has always
+     * worked over Bluetooth while nothing else did: somebody solved this once,
+     * for one setting, and never generalised it.**
+     *
+     * ⓘ Volumes are PERCENT, matching tv_bridge_worker_settings_t, not the raw
+     * byte -- the TV owns the curve and it is not linear. */
+    uint8_t speaker_volume_pct;   /* CTMB_AUDIO_UNSET = leave the TV's value */
+    uint8_t headset_volume_pct;   /* CTMB_AUDIO_UNSET = leave the TV's value */
+    uint8_t audio_mode;           /* CTMB_AUDIO_UNSET = leave the TV's value */
+    uint8_t reserved[26];
 } ctmb_host_config_t;
 
 /* CTMB_MSG_ENUM payload (puck composite): the device's OWN enumeration, read
