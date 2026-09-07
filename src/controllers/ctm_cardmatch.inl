@@ -124,59 +124,10 @@ static void cardmatch_set_mic_mute(ctm_controller_t *c, int muted)
  * hand-driven action, so the wait is invisible in practice. */
 static pthread_mutex_t g_cardmatch_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- which card belongs to which controller, remembered ---------------------
- *
- * ⭐ SHARED BY BOTH PATHS, which is the whole point of it living here.
- *
- * Two places ask this question: a bridge, and a signal played with no session
- * behind it. They used to answer it separately, so the three seconds was paid
- * TWICE for the same controller -- refuse a plug, pay; start the listener and
- * bridge, pay again. With three controllers that is five probes where it
- * should be three.
- *
- * A card does not change while its controller stays plugged in, so whoever
- * answers first writes it down and everyone else reads it.
- *
- * ⚠️ KEYED BY DEVICE NODE, AND NODES ARE REUSED. Unplug a controller, plug in
- * another, and it may land on the same path with a different card -- and the
- * note would then be wrong, sending audio to someone else's controller.
- * ➡️ The proper fix is to forget a node when its controller goes away. */
-
-#define CARDMATCH_CACHE_MAX 4
-
-static struct {
-    char node[64];
-    int  card;
-} g_cardmatch_cache[CARDMATCH_CACHE_MAX];
-static int g_cardmatch_cached;
-
-/* ⚠️ Both of these want g_cardmatch_lock held. */
-static int cardmatch_cache_get(const char *node)
-{
-    if (!node || !node[0]) return -1;
-    for (int i = 0; i < g_cardmatch_cached; ++i) {
-        if (strcmp(g_cardmatch_cache[i].node, node) == 0) {
-            return g_cardmatch_cache[i].card;
-        }
-    }
-    return -1;
-}
-
-static void cardmatch_cache_put(const char *node, int card)
-{
-    if (!node || !node[0] || card < 0) return;
-    for (int i = 0; i < g_cardmatch_cached; ++i) {
-        if (strcmp(g_cardmatch_cache[i].node, node) == 0) {
-            g_cardmatch_cache[i].card = card;
-            return;
-        }
-    }
-    if (g_cardmatch_cached >= CARDMATCH_CACHE_MAX) return;
-    snprintf(g_cardmatch_cache[g_cardmatch_cached].node,
-             sizeof(g_cardmatch_cache[0].node), "%s", node);
-    g_cardmatch_cache[g_cardmatch_cached].card = card;
-    ++g_cardmatch_cached;
-}
+/* Which card belongs to which controller, remembered -- and checked against
+ * the card's own USB identity before it is believed. Its own file so the tests
+ * can drive it against a scratch directory. ⚠️ Wants g_cardmatch_lock held. */
+#include "cardmatch_cache.inl"
 
 typedef struct {
     int card;
@@ -389,7 +340,12 @@ static int cardmatch_run_probe(ctm_controller_t *c)
      * already determined. The refusal path had this and the bridge did not.
      *
      * ⓘ A card a bridged session holds never opened above, so it is not in
-     * this list at all -- that case eliminates itself. */
+     * this list at all -- that case eliminates itself.
+     *
+     * ⓘ The notes consulted here were checked a moment ago, in
+     * cardmatch_cache_get: any whose card is no longer the device it was
+     * written for has already been forgotten, so a reused node cannot
+     * mislead this. */
     {
         int unclaimed = -1, unclaimed_count = 0;
         for (int i = 0; i < n; ++i) {
@@ -500,9 +456,13 @@ static void cardmatch_identify(ctm_controller_t *c)
 
     int answer = cardmatch_cache_get(c->dev.path);
     if (answer >= 0) {
-        ctl_log(c, "cardmatch: card=%d already known for %s, no probe needed",
-                answer, c->dev.path);
+        /* The identity is on the line so a wrong hit can be read from the
+         * log rather than heard from the wrong controller. */
+        ctl_log(c, "cardmatch: card=%d already known for %s, no probe needed (usb %s, unchanged)",
+                answer, c->dev.path, cardmatch_cache_usbbus(c->dev.path));
     } else {
+        ctl_log(c, "cardmatch: nothing believable remembered for %s, probing",
+                c->dev.path);
         answer = cardmatch_run_probe(c);
         if (answer >= 0) cardmatch_cache_put(c->dev.path, answer);
     }
