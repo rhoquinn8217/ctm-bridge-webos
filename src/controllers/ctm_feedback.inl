@@ -39,6 +39,18 @@
 #define FEEDBACK_RUMBLE_HZ    60     /* low enough to be felt, not heard */
 #define FEEDBACK_MS           140
 #define FEEDBACK_GAP_MS       90     /* silence between beeps, so two read as two */
+/* SILENCE IN FRONT OF THE TONE, in the same buffer, all four channels.
+ *
+ * A MEASUREMENT BUILD (2026-09-07). The first tone after a controller is
+ * cabled has been silent since August while the pulse in the same buffer is
+ * felt, so the samples arrive and the haptic channels play. A lead of silence
+ * was added on 2026-08-19 and left at zero at both call sites, so it has never
+ * been tested. This sets it to the six hundred milliseconds the Bluetooth
+ * signal sends first, and the log line says so. If the first tone is still
+ * silent with this on, the lead is not the answer and the speaker settings
+ * report is the next thing to look at. Costs 600 ms on every signal, the
+ * unplug wait included, for as long as it stays on. */
+#define FEEDBACK_LEAD_MS      600
 /* How long to ask the host to keep the audio stream alive. Comfortably longer
  * than the tone -- 14 Opus frames at Bluetooth pacing take roughly 400 ms to
  * go out, and overshooting costs only a few silent reports. */
@@ -194,7 +206,7 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
                                (long)(settle_ms % 1000) * 1000000L};
         nanosleep(&sts, NULL);
     }
-    const int lead_frames = 0;
+    const int lead_frames = (FEEDBACK_RATE * FEEDBACK_LEAD_MS) / 1000;
     const int frames = lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
     int16_t *buf = (int16_t *)calloc(1, bytes);
@@ -323,9 +335,9 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * hunt went four rounds on guesses because this line could not distinguish
      * "the lead-in ran and did not help" from "the lead-in never ran". */
     ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms"
-               " (settled %dms, key=%s)",
+               " (lead %dms, settled %dms, key=%s)",
             what, beeps, c->matched_card, (int)wait_ms,
-            (int)settle_ms,
+            (int)FEEDBACK_LEAD_MS, (int)settle_ms,
             c->dev.path[0] ? c->dev.path : "wired");
 }
 

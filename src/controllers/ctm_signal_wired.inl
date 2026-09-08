@@ -48,6 +48,7 @@ static void wired_sig_log(const char *fmt, ...)
 #define WIRED_SIG_CHANNELS  4        /* speaker L/R, then haptics L/R */
 #define WIRED_SIG_MS        140
 #define WIRED_SIG_GAP_MS    40
+#define WIRED_SIG_LEAD_MS   600      /* see FEEDBACK_LEAD_MS: the same measurement */
 
 /* The same three notes as everywhere else. Kept beside the Bluetooth ones in
  * spirit: a cable and a radio must say the same thing, or the sound stops
@@ -373,7 +374,8 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
                                (long)(settle_ms % 1000) * 1000000L};
         nanosleep(&sts, NULL);
     }
-    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes, 0);
+    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes,
+                                    (WIRED_SIG_RATE * WIRED_SIG_LEAD_MS) / 1000);
     if (!buf) {
         close(fd);
         pthread_mutex_unlock(&g_cardmatch_lock);
@@ -431,7 +433,7 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
     close(fd);
     pthread_mutex_unlock(&g_cardmatch_lock);
 
-    wired_sig_log("node=%s card=%d pattern=%d rc=%d, %d of %d frames, %d stalls, waited %ldms",
-                  node, card, pattern, rc, done, frames, stalls, wait_ms);
+    wired_sig_log("node=%s card=%d pattern=%d rc=%d, %d of %d frames, %d stalls, waited %ldms, lead %dms",
+                  node, card, pattern, rc, done, frames, stalls, wait_ms, (int)WIRED_SIG_LEAD_MS);
     return rc < 0 ? -1 : 0;
 }
