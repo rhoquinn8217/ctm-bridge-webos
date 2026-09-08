@@ -212,14 +212,11 @@ static int wired_sig_find_card_locked(const char *node)
      * ⓘ A card a bridged session holds never got opened above, so it is not in
      * this list at all -- that case eliminates itself.
      *
-     * ⚠️ IT TRUSTS THE CACHE, and the cache is keyed by device node. Nodes are
-     * reused: unplug a controller, plug in another, and it may land on the
-     * same path with a different card. The cache would then be wrong, and so
-     * would an elimination based on it -- playing a signal on someone else's
-     * controller, which is the thing this whole probe exists to prevent.
-     * ➡️ The proper fix is to forget a node when its controller goes away.
-     * Until then the risk is the same one the cache already carries; this
-     * does not add a new kind, only more places it matters. */
+     * ⓘ IT TRUSTS THE CACHE, and the cache is keyed by device node, which
+     * gets reused. That used to be a live risk here. The notes consulted now
+     * were checked a moment ago in cardmatch_cache_get, which forgets any
+     * whose card is no longer the device it was written for -- so a reused
+     * node cannot mislead this. See cardmatch_cache.inl. */
     int unclaimed = -1, unclaimed_count = 0;
     for (int i = 0; i < n; ++i) {
         int owned_by_other = 0;
