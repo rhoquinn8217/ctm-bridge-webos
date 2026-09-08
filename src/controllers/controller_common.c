@@ -2169,10 +2169,6 @@ void ctm_controller_tone_start(ctm_controller_t *c);
 /* The Bluetooth confirmation signal. Included BEFORE the feedback file, which
  * calls into it. Fork-only: deleting these two lines and the file removes the
  * feature. */
-/* ⭐ Ahead of every signal file, because all three consult it -- and the wired
- * signal is included before the feedback one, so it cannot live there. */
-#include "ctm_settle.inl"
-
 #include "ctm_bt_signal.inl"
 
 /* Signals with no session behind them, for a refused plug. Included after the

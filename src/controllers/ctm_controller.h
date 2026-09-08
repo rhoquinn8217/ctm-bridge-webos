@@ -256,10 +256,6 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
 
-/* Tell the core a device node has appeared, so a tone can wait for its audio
- * to become usable. ⭐ A cable's speaker takes seconds to work after plug-in. */
-void ctm_feedback_note_appeared(const char *node);
-
 /* Should the host's lightbar claim be withheld right now?
  *
  * ⭐ True only for the moment after a session opens, while the app draws its

@@ -214,15 +214,13 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
     beeps = 2;
     const int frames_per = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
     const int gap_frames = (FEEDBACK_RATE * FEEDBACK_GAP_MS) / 1000;
-    /* ⭐ HOLD UNTIL THE CABLE'S AUDIO IS READY. See the note on
-     * feedback_settle_left_ms -- usually zero, and never more than a few
-     * seconds on a controller plugged in moments ago. */
-    const long settle_ms = feedback_settle_left_ms(c->dev.path);
-    if (settle_ms > 0) {
-        struct timespec sts = {(time_t)(settle_ms / 1000),
-                               (long)(settle_ms % 1000) * 1000000L};
-        nanosleep(&sts, NULL);
-    }
+    /* ⓘ Until 2026-09-08 a wait sat here for a freshly cabled controller's
+     * audio to "become usable", up to six seconds from the node appearing. Its
+     * premise did not survive the first-tone work: a controller cabled for
+     * thirty minutes was just as silent, and a second stream two seconds after
+     * the first sounded. The signal is played twice on a fresh cable instead
+     * (FEEDBACK_REPEAT_GAP_MS), and a bridge made three seconds after cabling
+     * sounded with no wait at all (C1, build 299). */
     const int lead_frames = (FEEDBACK_RATE * FEEDBACK_LEAD_MS) / 1000;
     const int frames = lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
@@ -386,9 +384,9 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * hunt went four rounds on guesses because this line could not distinguish
      * "the lead-in ran and did not help" from "the lead-in never ran". */
     ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms"
-               " (twice %d, lead %dms, settled %dms, key=%s)",
+               " (twice %d, lead %dms, key=%s)",
             what, beeps, c->matched_card, (int)wait_ms,
-            twice, (int)FEEDBACK_LEAD_MS, (int)settle_ms,
+            twice, (int)FEEDBACK_LEAD_MS,
             c->dev.path[0] ? c->dev.path : "wired");
 }
 
