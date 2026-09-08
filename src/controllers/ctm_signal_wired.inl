@@ -407,12 +407,27 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
     const int chunk = 480;                 /* 10 ms */
     int done = 0, stalls = 0, rc = 0;
     const long wait_ms = (long)frames * 1000L / WIRED_SIG_RATE + 40;
+    /* The first pass is for the speaker, which cannot hear it; the haptics
+     * can, so it goes out with the haptic channels zeroed and the user feels
+     * one pulse, with the signal that sounds. */
+    int16_t *quiet = NULL;
+    if (twice) {
+        quiet = (int16_t *)malloc(bytes);
+        if (quiet) {
+            memcpy(quiet, buf, bytes);
+            for (int i = 0; i < frames; ++i) {
+                quiet[i * WIRED_SIG_CHANNELS + 2] = 0;
+                quiet[i * WIRED_SIG_CHANNELS + 3] = 0;
+            }
+        }
+    }
     for (int pass = twice ? 0 : 1; pass < 2; ++pass) {
+        int16_t *src = (pass == 0 && quiet) ? quiet : buf;
         done = 0; stalls = 0; rc = 0;
         while (done < frames && stalls < 400) {
             struct snd_xferi xfer;
             memset(&xfer, 0, sizeof(xfer));
-            xfer.buf = buf + (size_t)done * WIRED_SIG_CHANNELS;
+            xfer.buf = src + (size_t)done * WIRED_SIG_CHANNELS;
             xfer.frames = (snd_pcm_uframes_t)((frames - done) < chunk
                                               ? (frames - done) : chunk);
             rc = ioctl(fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
@@ -448,6 +463,7 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
         }
     }
 
+    free(quiet);
     free(buf);
     close(fd);
     pthread_mutex_unlock(&g_cardmatch_lock);

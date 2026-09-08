@@ -283,7 +283,23 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * first samples or the settings, it was the first stream. */
     const int twice = c->card_fresh ? 1 : 0;
     if (twice) {
-        write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
+        /* The first play is for the speaker, which cannot hear it; the
+         * haptics can, and a pulse now and another with the tone read as two
+         * signals (rhoquinn8217, 2026-09-08). So the first play carries the
+         * tone alone: same length, same content on the speaker channels,
+         * zeros on the haptic ones. */
+        int16_t *first = (int16_t *)malloc(bytes);
+        if (first) {
+            memcpy(first, buf, bytes);
+            for (int i = 0; i < frames; ++i) {
+                first[i * FEEDBACK_CHANNELS + 2] = 0;
+                first[i * FEEDBACK_CHANNELS + 3] = 0;
+            }
+            write_iso_audio(c, (const uint8_t *)first, (uint32_t)bytes);
+            free(first);
+        } else {
+            write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
+        }
         const long first_ms = (long)frames * 1000L / FEEDBACK_RATE + 40 + FEEDBACK_REPEAT_GAP_MS;
         struct timespec fts = {(time_t)(first_ms / 1000),
                                (long)(first_ms % 1000) * 1000000L};
