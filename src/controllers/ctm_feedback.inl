@@ -258,6 +258,20 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
 
+    /* MEASUREMENT (2026-09-07): THE SPEAKER SETTINGS, SENT AGAIN NOW THAT THE
+     * STREAM IS RUNNING.
+     *
+     * The first tone after cabling stayed silent with 600 ms of silence in
+     * front (build 293) while the pulse in the same buffer was felt: the
+     * samples arrive and the haptic channels play, so it is the speaker that
+     * is not routed or not turned up. The settings report went out once, when
+     * the device was opened, before any stream had started. This sends it a
+     * second time while the lead is playing, so it lands after the stream
+     * start and before the tone. If the first tone sounds now, the report
+     * sent before the stream is the one the controller does not honour on
+     * its first use after enumeration, and the lead can be revisited. */
+    ctm_controller_send_speaker_init(c);
+
     /* WAIT FOR IT TO ACTUALLY COME OUT.
      *
      * Writing only hands the samples to the device; the sound emerges over
