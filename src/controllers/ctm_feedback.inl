@@ -68,6 +68,25 @@
  * a freshly cabled controller hears its one tone about two and a half
  * seconds late, once. The first play is inaudible there by definition. */
 #define FEEDBACK_REPEAT_GAP_MS 1500
+/* How long to ask the host to keep the audio stream alive. Comfortably longer
+ * than the tone -- 14 Opus frames at Bluetooth pacing take roughly 400 ms to
+ * go out, and overshooting costs only a few silent reports. */
+#define FEEDBACK_HOLD_MS      1500
+/* Longest to hold up a teardown waiting for the tone to leave.
+ *
+ * MEASURED, not estimated. 800 ms was tried first on the assumption that 14
+ * frames at Bluetooth's ~30 ms pacing would take about 400 ms. It does not:
+ * the connect tone timed out at 800 ms and then finished shortly after, so
+ * the frames leave at roughly 60 ms each -- about 840 ms for the set, just
+ * past the old cutoff. The connect survived it because the session carries on
+ * afterwards; the unplug did not, because it tears down the moment the wait
+ * gives up.
+ *
+ * Still bounded, so a stalled link cannot hold an unplug open indefinitely,
+ * and still shorter than the hold the host was asked for. */
+#define FEEDBACK_TONE_WAIT_MS 1200
+#define FEEDBACK_TONE_LEVEL   9000   /* ~28% of full scale: audible, not harsh */
+#define FEEDBACK_RUMBLE_LEVEL 14000  /* the motors need more than the speaker */
 
 /* Build and play `beeps` beep-and-pulse pairs on this controller's own audio
  * device. Everything below is a thin wrapper on this.
