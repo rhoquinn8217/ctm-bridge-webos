@@ -46,41 +46,28 @@
  * milliseconds; it loses the whole FIRST STREAM after the cable goes in. See
  * FEEDBACK_PRIME_MS. */
 #define FEEDBACK_LEAD_MS      0
-/* THE FIRST STREAM AFTER CABLING IS DEAD FOR THE SPEAKER, so start one and
- * throw it away before the tone.
+/* THE FIRST STREAM AFTER CABLING IS DEAD FOR THE SPEAKER, so on the first
+ * bridge since the cable went in the signal is played TWICE, with this gap
+ * between the plays.
  *
  * MEASURED 2026-09-08 on C1, DualSense, with no build in between: the bridge
  * tone on a freshly cabled controller was silent while its pulse was felt;
  * the release tone two seconds later, through the SAME open device, sounded.
- * Time plays no part -- the first burst the device plays after enumeration
- * comes out of the haptics and not the speaker, and every burst after it is
- * fine. That is also why a game never shows it: its audio underruns, and
- * each underrun restarts the stream.
+ * Time plays no part -- the first stream the device plays after enumeration
+ * comes out of the haptics and not the speaker, and the next stream is fine.
+ * That is also why a game never shows it: its audio underruns, and each
+ * underrun restarts the stream.
  *
- * So: a short silent write of its own, let it drain, stop and re-prepare the
- * stream, and the tone that follows is a fresh stream start. Costs about a
- * hundred milliseconds on every wired signal, which is cheaper than being
- * wrong once. Kept short so the amp has no time to doze and click. */
-#define FEEDBACK_PRIME_MS     60
-/* How long to ask the host to keep the audio stream alive. Comfortably longer
- * than the tone -- 14 Opus frames at Bluetooth pacing take roughly 400 ms to
- * go out, and overshooting costs only a few silent reports. */
-#define FEEDBACK_HOLD_MS      1500
-/* Longest to hold up a teardown waiting for the tone to leave.
+ * ⛔ NOT ANY FIRST STREAM: build 295 started a 60 ms silent stream, stopped
+ * it, and played the tone as a fresh start with no gap. Silent. What worked
+ * was the real tone, 970 ms of it, and about two seconds before the next
+ * start -- so that is what this replicates, exactly, and nothing cleverer
+ * until a measurement says which part of it matters.
  *
- * MEASURED, not estimated. 800 ms was tried first on the assumption that 14
- * frames at Bluetooth's ~30 ms pacing would take about 400 ms. It does not:
- * the connect tone timed out at 800 ms and then finished shortly after, so
- * the frames leave at roughly 60 ms each -- about 840 ms for the set, just
- * past the old cutoff. The connect survived it because the session carries on
- * afterwards; the unplug did not, because it tears down the moment the wait
- * gives up.
- *
- * Still bounded, so a stalled link cannot hold an unplug open indefinitely,
- * and still shorter than the hold the host was asked for. */
-#define FEEDBACK_TONE_WAIT_MS 1200
-#define FEEDBACK_TONE_LEVEL   9000   /* ~28% of full scale: audible, not harsh */
-#define FEEDBACK_RUMBLE_LEVEL 14000  /* the motors need more than the speaker */
+ * Gated on the matcher's fresh flag, so an ordinary bridge pays nothing and
+ * a freshly cabled controller hears its one tone about two and a half
+ * seconds late, once. The first play is inaudible there by definition. */
+#define FEEDBACK_REPEAT_GAP_MS 1500
 
 /* Build and play `beeps` beep-and-pulse pairs on this controller's own audio
  * device. Everything below is a thin wrapper on this.
@@ -151,27 +138,6 @@ static void feedback_paint_wired(ctm_controller_t *c, uint8_t r, uint8_t g, uint
     (void)!write(c->hid_fd, rep, sizeof(rep));
 }
 
-/* Start a throwaway stream on the open device and stop it again. See the
- * note at FEEDBACK_PRIME_MS. Returns the milliseconds it took, for the log. */
-static int feedback_prime_stream(ctm_controller_t *c)
-{
-    if (!c || c->alsa_fd < 0) return 0;
-    const int frames = (FEEDBACK_RATE * FEEDBACK_PRIME_MS) / 1000;
-    const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
-    uint8_t *zeros = (uint8_t *)calloc(1, bytes);
-    if (!zeros) return 0;
-    write_iso_audio(c, zeros, (uint32_t)bytes);
-    free(zeros);
-    /* Let it play out, then stop rather than let it underrun on its own: the
-     * tone must open a NEW stream, and the stop is what guarantees it. */
-    const int wait_ms = FEEDBACK_PRIME_MS + 40;
-    struct timespec ts = {0, (long)wait_ms * 1000000L};
-    nanosleep(&ts, NULL);
-    ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_DROP, NULL);
-    ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-    return wait_ms;
-}
-
 static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out,
                           btsig_pattern_t pattern)
 {
@@ -238,7 +204,6 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
                                (long)(settle_ms % 1000) * 1000000L};
         nanosleep(&sts, NULL);
     }
-    const int primed_ms = feedback_prime_stream(c);
     const int lead_frames = (FEEDBACK_RATE * FEEDBACK_LEAD_MS) / 1000;
     const int frames = lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
@@ -288,12 +253,26 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * Bluetooth side about why a bridge is painted despite the handover. */
     /* ⓘ Always written: the switches zeroed whichever channels are off, and the
      * buffer carries the tone and the felt pulse together. */
+    /* TWICE ON A FRESHLY CABLED CONTROLLER -- see FEEDBACK_REPEAT_GAP_MS. The
+     * first play goes into the dead first stream, where only the pulse comes
+     * through; the wait lets it drain and the device sit idle, as the working
+     * measurement did; the second play is a fresh stream start. One repeat per
+     * cabling: the flag is cleared here so the release tone is not doubled.
+     *
+     * ⓘ Builds 293 and 294 tried 600 ms of silence in front and a second
+     * settings report twelve milliseconds in. Both silent: it was never the
+     * first samples or the settings, it was the first stream. */
+    const int twice = c->card_fresh ? 1 : 0;
+    if (twice) {
+        write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
+        const long first_ms = (long)frames * 1000L / FEEDBACK_RATE + 40 + FEEDBACK_REPEAT_GAP_MS;
+        struct timespec fts = {(time_t)(first_ms / 1000),
+                               (long)(first_ms % 1000) * 1000000L};
+        nanosleep(&fts, NULL);
+        c->card_fresh = 0;
+    }
     write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
-
-    /* ⓘ Build 294 (2026-09-07) sent the speaker settings report a second time
-     * here, twelve milliseconds after the stream started. Silent all the same:
-     * the settings were never the problem, the first stream was. */
 
     /* WAIT FOR IT TO ACTUALLY COME OUT.
      *
@@ -372,9 +351,9 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * hunt went four rounds on guesses because this line could not distinguish
      * "the lead-in ran and did not help" from "the lead-in never ran". */
     ctl_log(c, "feedback: %s - %d tone(s) and pulse(s) on card=%d, waited %dms"
-               " (primed %dms, lead %dms, settled %dms, key=%s)",
+               " (twice %d, lead %dms, settled %dms, key=%s)",
             what, beeps, c->matched_card, (int)wait_ms,
-            primed_ms, (int)FEEDBACK_LEAD_MS, (int)settle_ms,
+            twice, (int)FEEDBACK_LEAD_MS, (int)settle_ms,
             c->dev.path[0] ? c->dev.path : "wired");
 }
 

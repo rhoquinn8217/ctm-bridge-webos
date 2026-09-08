@@ -223,6 +223,10 @@ struct ctm_controller {
      * it and seeing which card falls silent. -1 until answered, and -1 stays
      * if the answer could not be trusted -- see ctm_cardmatch.inl. */
     int matched_card;
+    /* Set by the matcher: no valid note existed for this node when it ran,
+     * which is the first bridge since the cable went in. The first audio
+     * stream after that is dead for the speaker; see ctm_feedback.inl. */
+    int card_fresh;
     int wake_pipe[2];
 
     pthread_t session_thread;
@@ -2611,6 +2615,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->mic_cap_started = 0;
     c->btsig_primed = 0;
     c->matched_card = -1;
+    c->card_fresh = 0;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
