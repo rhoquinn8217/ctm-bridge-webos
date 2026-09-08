@@ -48,6 +48,8 @@ static void wired_sig_log(const char *fmt, ...)
 #define WIRED_SIG_CHANNELS  4        /* speaker L/R, then haptics L/R */
 #define WIRED_SIG_MS        140
 #define WIRED_SIG_GAP_MS    40
+#define WIRED_SIG_LEAD_MS   0        /* measured useless; see FEEDBACK_LEAD_MS */
+#define WIRED_SIG_REPEAT_GAP_MS 1500 /* played twice on a fresh cable; see FEEDBACK_REPEAT_GAP_MS */
 
 /* The same three notes as everywhere else. Kept beside the Bluetooth ones in
  * spirit: a cable and a radio must say the same thing, or the sound stops
@@ -167,9 +169,10 @@ static void wired_sig_set_mute(const char *node, int muted)
  * ⚠️ THE CALLER MUST HOLD g_cardmatch_lock. Ported from cardmatch_identify,
  * which documents the same requirement: the lock covers the probe AND
  * everything that follows it on the card, not just the reading. */
-static int wired_sig_find_card_locked(const char *node)
+static int wired_sig_find_card_locked(const char *node, int *fresh)
 {
     int cached = cardmatch_cache_get(node);
+    if (fresh) *fresh = (cached < 0);   /* no valid note: first signal since cabling */
     if (cached >= 0) return cached;
 
     /* ⛔ ENUMERATE AND OPEN TOGETHER, skipping cards that will not open.
@@ -328,7 +331,8 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
      * can look like a hang for a few seconds. */
     pthread_mutex_lock(&g_cardmatch_lock);
 
-    const int card = wired_sig_find_card_locked(node);
+    int fresh = 0;
+    const int card = wired_sig_find_card_locked(node, &fresh);
     if (card < 0) {
         pthread_mutex_unlock(&g_cardmatch_lock);
         return -1;
@@ -373,7 +377,8 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
                                (long)(settle_ms % 1000) * 1000000L};
         nanosleep(&sts, NULL);
     }
-    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes, 0);
+    int16_t *buf = wired_sig_render((btsig_pattern_t)pattern, &frames, &bytes,
+                                    (WIRED_SIG_RATE * WIRED_SIG_LEAD_MS) / 1000);
     if (!buf) {
         close(fd);
         pthread_mutex_unlock(&g_cardmatch_lock);
@@ -391,47 +396,79 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
      * A period at a time, waiting when the device is full, exactly as the
      * session path does. Bounded, so a device that never drains cannot hold
      * this thread forever. */
+    /* TWICE ON A FRESHLY CABLED CONTROLLER. This device was opened moments ago
+     * and, on a controller whose card had no note when this ran, has never
+     * streamed: the first stream after cabling is dead for the speaker. The
+     * signal is played into it, allowed to drain and sit for the gap the
+     * working measurement had, then played again as a fresh stream start. See
+     * FEEDBACK_REPEAT_GAP_MS for the measurement, and for the 60 ms throwaway
+     * stream that did NOT do it. */
+    const int twice = fresh ? 1 : 0;
     const int chunk = 480;                 /* 10 ms */
     int done = 0, stalls = 0, rc = 0;
-    while (done < frames && stalls < 400) {
-        struct snd_xferi xfer;
-        memset(&xfer, 0, sizeof(xfer));
-        xfer.buf = buf + (size_t)done * WIRED_SIG_CHANNELS;
-        xfer.frames = (snd_pcm_uframes_t)((frames - done) < chunk
-                                          ? (frames - done) : chunk);
-        rc = ioctl(fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
-        if (rc < 0) {
-            if (errno == EPIPE) {          /* underrun: restart and carry on */
-                ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-                ++stalls;
-                continue;
-            }
-            if (errno == EAGAIN) {         /* full: wait for room */
-                struct timespec w = {0, 1000000};
-                nanosleep(&w, NULL);
-                ++stalls;
-                continue;
-            }
-            break;                         /* not recoverable */
-        }
-        done += (xfer.result > 0) ? (int)xfer.result : (int)xfer.frames;
-    }
-    if (done < frames) rc = -1;
-
-    /* Let it come out before the device closes -- closing throws away whatever
-     * is still queued, which is how the tone became a race on the unplug path
-     * and lost about half the time. Derived from the buffer so it cannot
-     * drift when the signal changes length. */
     const long wait_ms = (long)frames * 1000L / WIRED_SIG_RATE + 40;
-    struct timespec ts = {(time_t)(wait_ms / 1000),
-                          (long)(wait_ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
+    /* The first pass is for the speaker, which cannot hear it; the haptics
+     * can, so it goes out with the haptic channels zeroed and the user feels
+     * one pulse, with the signal that sounds. */
+    int16_t *quiet = NULL;
+    if (twice) {
+        quiet = (int16_t *)malloc(bytes);
+        if (quiet) {
+            memcpy(quiet, buf, bytes);
+            for (int i = 0; i < frames; ++i) {
+                quiet[i * WIRED_SIG_CHANNELS + 2] = 0;
+                quiet[i * WIRED_SIG_CHANNELS + 3] = 0;
+            }
+        }
+    }
+    for (int pass = twice ? 0 : 1; pass < 2; ++pass) {
+        int16_t *src = (pass == 0 && quiet) ? quiet : buf;
+        done = 0; stalls = 0; rc = 0;
+        while (done < frames && stalls < 400) {
+            struct snd_xferi xfer;
+            memset(&xfer, 0, sizeof(xfer));
+            xfer.buf = src + (size_t)done * WIRED_SIG_CHANNELS;
+            xfer.frames = (snd_pcm_uframes_t)((frames - done) < chunk
+                                              ? (frames - done) : chunk);
+            rc = ioctl(fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+            if (rc < 0) {
+                if (errno == EPIPE) {          /* underrun: restart and carry on */
+                    ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
+                    ++stalls;
+                    continue;
+                }
+                if (errno == EAGAIN) {         /* full: wait for room */
+                    struct timespec w = {0, 1000000};
+                    nanosleep(&w, NULL);
+                    ++stalls;
+                    continue;
+                }
+                break;                         /* not recoverable */
+            }
+            done += (xfer.result > 0) ? (int)xfer.result : (int)xfer.frames;
+        }
+        if (done < frames) rc = -1;
 
+        /* Let it come out before the device closes -- closing throws away
+         * whatever is still queued, which is how the tone became a race on the
+         * unplug path and lost about half the time. Derived from the buffer so
+         * it cannot drift when the signal changes length. */
+        struct timespec ts = {(time_t)(wait_ms / 1000),
+                              (long)(wait_ms % 1000) * 1000000L};
+        nanosleep(&ts, NULL);
+        if (pass == 0) {
+            struct timespec gap = {(time_t)(WIRED_SIG_REPEAT_GAP_MS / 1000),
+                                   (long)(WIRED_SIG_REPEAT_GAP_MS % 1000) * 1000000L};
+            nanosleep(&gap, NULL);
+        }
+    }
+
+    free(quiet);
     free(buf);
     close(fd);
     pthread_mutex_unlock(&g_cardmatch_lock);
 
-    wired_sig_log("node=%s card=%d pattern=%d rc=%d, %d of %d frames, %d stalls, waited %ldms",
-                  node, card, pattern, rc, done, frames, stalls, wait_ms);
+    wired_sig_log("node=%s card=%d pattern=%d rc=%d, %d of %d frames, %d stalls, waited %ldms, twice %d, lead %dms",
+                  node, card, pattern, rc, done, frames, stalls, wait_ms, twice, (int)WIRED_SIG_LEAD_MS);
     return rc < 0 ? -1 : 0;
 }

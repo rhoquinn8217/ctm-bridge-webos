@@ -41,11 +41,26 @@
  *
  * ⚠️ Every function here wants g_cardmatch_lock held, as before.
  *
+ * ⭐ THE NOTES OUTLIVE THE APP. Written to a file as they are made and read
+ * back on the first lookup after a start. Two reasons. The cheap one: a
+ * restart no longer costs a probe per controller. The one that matters: the
+ * signal code treats a controller with no note as freshly cabled, because its
+ * first audio stream since enumeration is dead for the speaker and has to be
+ * played through. Without the file, every controller looked fresh after a
+ * restart and the first bridge played its tone twice, audibly (measured on
+ * C1, 2026-09-08). With it, a missing note means nothing has matched this
+ * card since its cable went in. A TV reboot clears /tmp and re-enumerates
+ * every card, so that case stays right too. A loaded note is checked against
+ * the card's identity like any other before it is believed.
+ *
  * Its own file so tests/test_cardmatch_cache.c can drive it against a scratch
- * directory: the path below is a macro for exactly that reason. */
+ * directory: the paths below are macros for exactly that reason. */
 
 #ifndef CARDMATCH_USBBUS_PATH
 #define CARDMATCH_USBBUS_PATH "/proc/asound/card%d/usbbus"
+#endif
+#ifndef CARDMATCH_NOTES_PATH
+#define CARDMATCH_NOTES_PATH "/tmp/cardmatch-notes.txt"
 #endif
 
 #define CARDMATCH_CACHE_MAX   4
@@ -57,6 +72,46 @@ static struct {
     char usbbus[CARDMATCH_USBBUS_LEN];   /* "bus/dev", e.g. "002/014" */
 } g_cardmatch_cache[CARDMATCH_CACHE_MAX];
 static int g_cardmatch_cached;
+static int g_cardmatch_loaded;   /* the file has been read once this run */
+
+/* Write every note out. Called whenever the table changes. */
+static void cardmatch_cache_save(void)
+{
+    FILE *f = fopen(CARDMATCH_NOTES_PATH, "w");
+    if (!f) return;
+    for (int i = 0; i < g_cardmatch_cached; ++i) {
+        fprintf(f, "%s %d %s\n", g_cardmatch_cache[i].node,
+                g_cardmatch_cache[i].card, g_cardmatch_cache[i].usbbus);
+    }
+    fclose(f);
+}
+
+/* Read the notes a previous run left, once. They are believed no more than
+ * any other note: the next get prunes whatever no longer matches its card. */
+static void cardmatch_cache_load(void)
+{
+    if (g_cardmatch_loaded) return;
+    g_cardmatch_loaded = 1;
+    FILE *f = fopen(CARDMATCH_NOTES_PATH, "r");
+    if (!f) return;
+    char line[192];
+    int loaded = 0;
+    while (g_cardmatch_cached < CARDMATCH_CACHE_MAX && fgets(line, sizeof(line), f)) {
+        char node[64], usbbus[CARDMATCH_USBBUS_LEN];
+        int card;
+        if (sscanf(line, "%63s %d %15s", node, &card, usbbus) != 3) continue;
+        if (card < 0) continue;
+        snprintf(g_cardmatch_cache[g_cardmatch_cached].node,
+                 sizeof(g_cardmatch_cache[0].node), "%s", node);
+        g_cardmatch_cache[g_cardmatch_cached].card = card;
+        snprintf(g_cardmatch_cache[g_cardmatch_cached].usbbus,
+                 sizeof(g_cardmatch_cache[0].usbbus), "%s", usbbus);
+        ++g_cardmatch_cached;
+        ++loaded;
+    }
+    fclose(f);
+    alsa_log("[cardmatch]", "loaded %d note(s) left by an earlier run", loaded);
+}
 
 /* The card's USB bus and device number, as "bus/dev". Returns 1 and fills
  * `out`, or 0 with `out` empty when the file cannot be read or says nothing. */
@@ -105,6 +160,7 @@ static int cardmatch_cache_prune(void)
         cardmatch_cache_drop(i);
         ++dropped;
     }
+    if (dropped) cardmatch_cache_save();
     return dropped;
 }
 
@@ -114,6 +170,7 @@ static int cardmatch_cache_prune(void)
 static int cardmatch_cache_get(const char *node)
 {
     if (!node || !node[0]) return -1;
+    cardmatch_cache_load();
     cardmatch_cache_prune();
     for (int i = 0; i < g_cardmatch_cached; ++i) {
         if (strcmp(g_cardmatch_cache[i].node, node) == 0) {
@@ -149,6 +206,7 @@ static void cardmatch_cache_put(const char *node, int card)
         return;
     }
 
+    cardmatch_cache_load();
     cardmatch_cache_prune();
     for (int i = 0; i < g_cardmatch_cached; ) {
         if (g_cardmatch_cache[i].card == card &&
@@ -165,6 +223,7 @@ static void cardmatch_cache_put(const char *node, int card)
             g_cardmatch_cache[i].card = card;
             snprintf(g_cardmatch_cache[i].usbbus,
                      sizeof(g_cardmatch_cache[i].usbbus), "%s", usbbus);
+            cardmatch_cache_save();
             return;
         }
     }
@@ -179,4 +238,5 @@ static void cardmatch_cache_put(const char *node, int card)
     snprintf(g_cardmatch_cache[g_cardmatch_cached].usbbus,
              sizeof(g_cardmatch_cache[0].usbbus), "%s", usbbus);
     ++g_cardmatch_cached;
+    cardmatch_cache_save();
 }

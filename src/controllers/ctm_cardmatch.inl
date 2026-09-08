@@ -455,6 +455,7 @@ static void cardmatch_identify(ctm_controller_t *c)
     if (!c || strcmp(ctm_controller_bus(c), "USB") != 0) return;
 
     int answer = cardmatch_cache_get(c->dev.path);
+    c->card_fresh = (answer < 0);   /* no valid note: first bridge since cabling */
     if (answer >= 0) {
         /* The identity is on the line so a wrong hit can be read from the
          * log rather than heard from the wrong controller. */

@@ -33,7 +33,9 @@
 
 static char g_dir[128];
 static char g_usbbus_path[160];
+static char g_notes_path[160];
 #define CARDMATCH_USBBUS_PATH g_usbbus_path   /* "<dir>/card%d/usbbus" */
+#define CARDMATCH_NOTES_PATH  g_notes_path    /* "<dir>/notes" */
 
 static int  log_lines;
 static char last_log[512];
@@ -75,10 +77,20 @@ static void remove_usbbus(int card)
 static void reset(void)
 {
     for (int card = 0; card < 8; ++card) remove_usbbus(card);
+    unlink(g_notes_path);
     memset(g_cardmatch_cache, 0, sizeof(g_cardmatch_cache));
     g_cardmatch_cached = 0;
+    g_cardmatch_loaded = 0;
     log_lines = 0;
     last_log[0] = '\0';
+}
+
+/* What an app restart does to the cache: the table is gone, the file is not. */
+static void restart(void)
+{
+    memset(g_cardmatch_cache, 0, sizeof(g_cardmatch_cache));
+    g_cardmatch_cached = 0;
+    g_cardmatch_loaded = 0;
 }
 
 /* ── the harness ─────────────────────────────────────────────────────── */
@@ -191,6 +203,40 @@ static void test_an_update_keeps_the_latest_identity(void)
     ok(cardmatch_cache_get("/dev/hidraw2") == -1, "but the new card's does");
 }
 
+static void test_notes_outlive_a_restart(void)
+{
+    puts("a note outlives an app restart -- the 2026-09-08 double tone");
+    reset();
+    set_usbbus(2, "002/014");
+    cardmatch_cache_put("/dev/hidraw2", 2);
+    restart();
+    ok(g_cardmatch_cached == 0, "after the restart the table is empty");
+    ok(cardmatch_cache_get("/dev/hidraw2") == 2, "and the note comes back from the file");
+    ok(g_cardmatch_cached == 1, "one note loaded");
+}
+
+static void test_a_loaded_note_is_still_checked(void)
+{
+    puts("a note read back after a restart is checked like any other");
+    reset();
+    set_usbbus(2, "002/014");
+    cardmatch_cache_put("/dev/hidraw2", 2);
+    restart();
+    set_usbbus(2, "002/016");            /* re-cabled while the app was down */
+    ok(cardmatch_cache_get("/dev/hidraw2") == -1, "a stale loaded note is not believed");
+    ok(g_cardmatch_cached == 0, "and it is gone");
+    restart();
+    ok(cardmatch_cache_get("/dev/hidraw2") == -1, "and the file no longer carries it either");
+}
+
+static void test_no_file_is_no_notes(void)
+{
+    puts("no file, as after a TV reboot, means no notes and no complaint");
+    reset();
+    ok(cardmatch_cache_get("/dev/hidraw2") == -1, "nothing believed");
+    ok(g_cardmatch_cached == 0, "nothing loaded");
+}
+
 /* The real matcher must include this file and still ask it the two questions,
  * or the tests above are testing something the television never runs. */
 static void test_mirrors_the_real_source(void)
@@ -222,6 +268,7 @@ int main(void)
     snprintf(g_dir, sizeof(g_dir), "/tmp/ctm-cardmatch-cache-%ld", (long)getpid());
     if (mkdir(g_dir, 0700) != 0 && errno != EEXIST) { perror(g_dir); return 2; }
     snprintf(g_usbbus_path, sizeof(g_usbbus_path), "%s/card%%d/usbbus", g_dir);
+    snprintf(g_notes_path, sizeof(g_notes_path), "%s/notes", g_dir);
 
     puts("");
     test_remembers_while_the_card_is_the_same();   puts("");
@@ -231,9 +278,13 @@ int main(void)
     test_stale_notes_make_room();                  puts("");
     test_a_card_belongs_to_one_node();             puts("");
     test_an_update_keeps_the_latest_identity();    puts("");
+    test_notes_outlive_a_restart();                puts("");
+    test_a_loaded_note_is_still_checked();         puts("");
+    test_no_file_is_no_notes();                    puts("");
     test_mirrors_the_real_source();                puts("");
 
     reset();
+    unlink(g_notes_path);
     rmdir(g_dir);
     printf("%d checks, %d failed\n\n", checks, failed);
     return failed ? 1 : 0;
