@@ -470,26 +470,24 @@ static void cardmatch_identify(ctm_controller_t *c)
     c->matched_card = answer;
 
 
-    /* Move the SPEAKER onto the right card.
+    /* Put the SPEAKER on the right card.
      *
-     * The speaker is opened during session setup, which happens before this
-     * runs, so by now it is already holding whatever the scan gave it. The
-     * capture side has no such problem -- it starts after this and simply
-     * uses the answer.
+     * ⓘ Until 2026-09-07 the DS5 driver opened the speaker at plug time, before
+     * this ran, on the lowest free card -- so this had to MOVE it, and when the
+     * lowest free card was the other controller's, that controller chirped for
+     * the 65 ms the wrong device was held (measured on C1). That plug-time open
+     * is gone, and the first open now happens below, on the matched card.
      *
-     * Reopening rather than reordering: the self-heal already closes and
-     * reopens this device on a live session, so it is a proven path rather
-     * than a new one, and it leaves upstream's setup order alone.
-     *
-     * Done unconditionally when there is an answer, without checking which
-     * card is currently held. Knowing that would mean threading a card number
-     * back out of upstream's opener; reopening a device that was already
-     * correct costs a few milliseconds and cannot be wrong. */
+     * The move branch stays: the self-heal reopens a live device, and an
+     * earlier open may one day return. It opens the new card before closing
+     * the old one for the reason its own comment gives. */
     /* OPEN THE SPEAKER HERE, and nowhere earlier.
      *
      * This is the first moment the right card is known. Opening at plug time
      * meant grabbing whatever was free and swapping later, which crossed two
      * controllers so thoroughly that neither could get its own card back.
+     * ⓘ True from 2026-08-10, untrue from 2026-08-11 when the driver's
+     * plug-time open came back, true again from 2026-09-07.
      *
      * `matched_card` is already set above, so the ordinary opener picks the
      * right card by itself -- and it is the ordinary opener deliberately, so
