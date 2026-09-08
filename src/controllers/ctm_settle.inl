@@ -19,7 +19,14 @@
  *
  * ⓘ Usually costs nothing: a controller connected before the stream started is
  * long since ready and the wait is zero. */
-#define FEEDBACK_READY_MS   6000
+/* MEASUREMENT (2026-09-08): ZERO. The theory above -- that the audio
+ * interface needs seconds after cabling -- did not survive the T-122 run: a
+ * controller cabled for thirty minutes gave a silent first tone, and a
+ * release tone two seconds after a silent bridge tone sounded through the
+ * same device. What the speaker discards is its first stream, and the
+ * signal code now plays through it. This build asks whether the wait still
+ * buys anything: cable, bridge at once, listen. */
+#define FEEDBACK_READY_MS   0
 /* ⚠️ Node paths CLIMB rather than being reused -- hidraw4, hidraw5 and so on
  * within one session -- so this fills faster than the controller count
  * suggests. A full table means every signal waits, which is why it is generous
