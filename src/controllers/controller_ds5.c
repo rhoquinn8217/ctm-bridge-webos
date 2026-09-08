@@ -511,31 +511,32 @@ static bool ds5e_matches(const ctm_controller_dev_t *dev)
  *
  * Included rather than compiled separately because it is the on_input_report
  * hook for this controller type and reaches its private state. */
-/* on_plug_init: open the wired audio path. When: once, immediately after the
- * host accepts the device. */
+/* on_plug_init: once, immediately after the host accepts the device, before
+ * the session loop starts.
+ *
+ * ⛔ THE WIRED SPEAKER IS NOT OPENED HERE ANY MORE (2026-09-07). It was, from
+ * 2026-08-11. This hook runs before the card matcher, so the opener had no
+ * card to aim at and fell back to the scan: the LOWEST FREE DualSense card.
+ * With the other controller released, that was the other controller's card.
+ * It was opened, held for about 65 ms, then closed again when the matcher
+ * moved the speaker to the right card -- and the other controller chirped.
+ * Measured on C1 2026-09-07, predicted and confirmed twice in one run. When
+ * the scan happened to pick the right card, the matcher's reopen instead
+ * failed on our own handle and logged "playback busy, keeping fd".
+ *
+ * cardmatch_identify opens the speaker itself, on the matched card, with the
+ * settings report after it -- and it too runs before the session loop, so
+ * nothing the host sends can arrive ahead of it. Over Bluetooth there was
+ * never anything to open here: the controller's audio device is not ours, and
+ * the haptics travel inside the reports. */
 static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 {
-    (void)t;
+    (void)c; (void)t;
 
-    /* On a cable, open the controller's own speaker and haptics.
-     *
-     * Gated on how the controller is attached, not on a setting. Over
-     * Bluetooth the controller's audio device is not ours to open and the
-     * haptics already travel inside the reports themselves, so there is
-     * nothing to do; on a cable neither is true and both are silent without
-     * this.
-     *
-     * Here rather than earlier because the HID device is already open by this
-     * point, which the settings report needs, and later would be too late:
-     * this runs before the session loop starts, so the device is ready before
-     * the first chunk can arrive. Idempotent, and safe on a reconnect. */
-    if (strcmp(ctm_controller_bus(c), "USB") == 0)
-        ctm_controller_open_alsa_playback(c);
-
-    /* ⓘ Over Bluetooth there is nothing to open, but the speaker still has to
-     * be told its volume and routing before anything plays. That is done in
-     * controller_common.c, beside the code that owns the Bluetooth signal --
-     * this file cannot see it. */
+    /* ⓘ Over Bluetooth the speaker still has to be told its volume and
+     * routing before anything plays. That is done in controller_common.c,
+     * beside the code that owns the Bluetooth signal -- this file cannot see
+     * it. */
 
     return 0;
 }
