@@ -50,7 +50,7 @@ static void micsafe_log(const char *fmt, ...)
 
     fprintf(stderr, "[mic-safety] %s\n", body);
 
-    FILE *f = fopen("/tmp/ctm-mic-safety.log", "a");
+    FILE *f = ctm_log_open("ctm-mic-safety.log", "a");
     if (!f) return;
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);

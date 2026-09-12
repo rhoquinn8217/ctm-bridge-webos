@@ -35,7 +35,7 @@ static void wired_sig_log(const char *fmt, ...)
 
     fprintf(stderr, "[wiredsig] %s\n", body);
 
-    FILE *f = fopen("/tmp/ctm-signal.log", "a");
+    FILE *f = ctm_log_open("ctm-signal.log", "a");
     if (!f) return;
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);

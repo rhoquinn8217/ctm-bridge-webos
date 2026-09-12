@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>      /* FILE, for ctm_log_open below */
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -177,6 +178,26 @@ extern pthread_mutex_t g_log_mutex;   /* guards g_log + g_log_dirty */
 extern bool g_log_dirty;              /* set by log_append, cleared by ctm_ui_log_flush */
 
 /* ---- ctm_state.c: log + generic string/file helpers ---- */
+
+/* ⭐⭐ WHERE THE CORE MAY WRITE. Use these, never a "/tmp/..." literal.
+ *
+ * ⛔ webOS 26 (platform 11) made /tmp `d--x--x--x`: traversable, NOT writable.
+ * It is not a monitor quirk -- the community has it on C3, C6, G5, G6 and B6,
+ * and it is what breaks ipk installs through the old ares-cli. Every log the
+ * core opened under /tmp silently stopped being written there.
+ *
+ * ➡️ These resolve to `$HOME/logs`, which is inside the app's own install
+ * directory. ⭐ That is known-writable because the app already keeps
+ * `conf/moonlight.ini` beside it, and it is world-readable, so an ssh session
+ * can still collect the logs -- which is the whole point of having them.
+ * ⓘ Falls back to /tmp when HOME is unset (desktop builds and the unit tests),
+ * where /tmp is writable and this restriction does not apply.
+ *
+ * ⚠️ ctm_log_path() returns a SHARED STATIC BUFFER. Use it and be done with it;
+ * do not hold it across another call, and never use two in one expression. */
+const char *ctm_log_path(const char *name);
+FILE *ctm_log_open(const char *name, const char *mode);
+
 void log_append(const char *fmt, ...);
 int count_dir_entries(const char *path);
 int read_text_file(const char *path, char *out, size_t out_len);
