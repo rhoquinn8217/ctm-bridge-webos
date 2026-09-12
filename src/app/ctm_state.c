@@ -6,7 +6,11 @@
 #include "ctm_state.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +52,40 @@ bool g_log_dirty;
  * (buffer guarded by g_log_mutex, touches NO LVGL) so controller threads can
  * log through the sink. The on-screen console is refreshed separately by
  * ctm_ui_log_flush() on the UI thread. When: app + controller events. */
+/* Resolve once: $HOME/logs, created if missing. /tmp is the fallback for
+ * desktop builds and tests, where HOME is not an app sandbox. */
+static const char *ctm_log_dir(void)
+{
+    static char dir[PATH_MAX];
+    static int resolved = 0;
+    if (resolved) {
+        return dir;
+    }
+    resolved = 1;
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        snprintf(dir, sizeof(dir), "%s/logs", home);
+        /* EEXIST is success for our purposes; anything else falls back. */
+        if (mkdir(dir, 0755) == 0 || errno == EEXIST) {
+            return dir;
+        }
+    }
+    snprintf(dir, sizeof(dir), "/tmp");
+    return dir;
+}
+
+const char *ctm_log_path(const char *name)
+{
+    static char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", ctm_log_dir(), name ? name : "ctm.log");
+    return path;
+}
+
+FILE *ctm_log_open(const char *name, const char *mode)
+{
+    return fopen(ctm_log_path(name), mode ? mode : "a");
+}
+
 void log_append(const char *fmt, ...)
 {
     char body[512];

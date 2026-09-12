@@ -60,7 +60,9 @@
 #define CARDMATCH_USBBUS_PATH "/proc/asound/card%d/usbbus"
 #endif
 #ifndef CARDMATCH_NOTES_PATH
-#define CARDMATCH_NOTES_PATH "/tmp/cardmatch-notes.txt"
+/* ⓘ A CALL, not a literal, so it lands wherever the core may write -- see
+ * ctm_log_path(). The tests still override this macro with their own path. */
+#define CARDMATCH_NOTES_PATH ctm_log_path("cardmatch-notes.txt")
 #endif
 
 #define CARDMATCH_CACHE_MAX   4

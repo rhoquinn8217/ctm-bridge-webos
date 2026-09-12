@@ -26,6 +26,12 @@
 #include <sound/asound.h>
 #include <sys/socket.h>
 #include <time.h>
+
+/* ⓘ Declared here rather than by including ctm_state.h: that header also
+ * declares read_text_file(), and this file has its own static copy of it.
+ * ⭐ Defined in ctm_state.c -- see the /tmp note on the declaration there. */
+const char *ctm_log_path(const char *name);
+FILE *ctm_log_open(const char *name, const char *mode);
 #include <unistd.h>
 
 #ifdef __linux__
@@ -302,7 +308,7 @@ static void alsa_log(const char *tag, const char *fmt, ...)
 {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    FILE *f = fopen("/tmp/alsa_debug.log", "a");
+    FILE *f = ctm_log_open("alsa_debug.log", "a");
     if (!f) return;
     fprintf(f, "%s %.3f ", tag, (double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
     va_list ap;
@@ -425,11 +431,38 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
          * A hardcoded 48-frame period once mismatched the host's 480-frame
          * chunks and contributed to underruns. */
         /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
-         * host's chunks. */
+         * host's chunks.
+         *
+         * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
+         * upper bound, and the kernel is free to take what suits the hardware:
+         * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
+         * **49152 frames = 1.024 SECONDS**, which is exactly the delay
+         * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
+         * stayed on time. ⓘ The C1 does not do this, which is why the fault
+         * looked device-specific rather than like an unbounded parameter.
+         *
+         * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
+         * five times the floor, so there is still room for jitter. ⛔ A tighter
+         * cap risks underruns, which are worse than lag -- see the self-heal
+         * this file already carries for them.
+         *
+         * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
+         * fails and we would open no audio at all -- a SILENT speaker, worse than
+         * a late one. So the unbounded request is retried on failure. */
         hw.intervals[9].min = 960;
-        hw.intervals[9].max = 0xFFFFFFFFU;
+        hw.intervals[9].max = 4800;
         hw.intervals[9].integer = 0;
+        /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
+        struct snd_pcm_hw_params hw_unbounded = hw;
+        hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
         int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        if (hw_rc < 0) {
+            hw = hw_unbounded;
+            hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+            if (hw_rc >= 0) {
+                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused, reopened unbounded", card);
+            }
+        }
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
         if (hw_rc < 0 || prep_rc < 0) {
             close(fd);
@@ -572,7 +605,7 @@ void ctm_gesture_log(const ctm_controller_t *c, const char *fmt, ...)
 {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    FILE *f = fopen("/tmp/ctm-gesture.log", "a");
+    FILE *f = ctm_log_open("ctm-gesture.log", "a");
     if (!f) return;
     fprintf(f, "%.3f [%s] ", (double)ts.tv_sec + (double)ts.tv_nsec / 1e9,
             (c && c->ops && c->ops->kind) ? c->ops->kind : "app");
@@ -628,7 +661,7 @@ void ctm_signals_set_enabled(int light, int rumble, int tone)
     /* ⭐ SAYS WHAT IT WAS TOLD. ⛔ Green kept appearing with the lightbar switch
      * off, and there was no way to tell "the setting never arrived" from
      * "something else paints it". ⓘ Once per call, not per report. */
-    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    FILE *lf = ctm_log_open("ctm-signal.log", "a");
     if (lf) {
         fprintf(lf, "signals: light=%d rumble=%d tone=%d\n",
                 g_sig_light, g_sig_rumble, g_sig_tone);
@@ -639,7 +672,7 @@ void ctm_signals_set_enabled(int light, int rumble, int tone)
 void ctm_mic_capture_set_enabled(int on)
 {
     g_mic_capture = on ? 1 : 0;
-    FILE *lf = fopen("/tmp/ctm-signal.log", "a");
+    FILE *lf = ctm_log_open("ctm-signal.log", "a");
     if (lf) {
         fprintf(lf, "mic capture: %d\n", g_mic_capture);
         fclose(lf);
@@ -773,7 +806,7 @@ static int c_send(ctm_controller_t *c, uint16_t type, uint32_t flags,
 #define MIC_CAP_FRAMES     480          /* 10 ms, matching the host's request size */
 static void mic_cap_log(const char *fmt, ...)
 {
-    FILE *f = fopen("/tmp/mic_capture.log", "a");
+    FILE *f = ctm_log_open("mic_capture.log", "a");
     if (!f) return;
     /* Wall-clock, the same shape as the Windows session log (20:43:01.590) so
      * the three logs -- this one, the controller log, and the host's -- can be
@@ -2638,7 +2671,11 @@ static void open_log(ctm_controller_t *c)
         if (ch != ':') mac[o++] = ch;
     }
     mac[o] = '\0';
-    snprintf(name, sizeof(name), "/tmp/ctm-%s.log", mac[0] ? mac : c->ops->kind);
+    {
+        char leaf[128];
+        snprintf(leaf, sizeof(leaf), "ctm-%s.log", mac[0] ? mac : c->ops->kind);
+        snprintf(name, sizeof(name), "%s", ctm_log_path(leaf));
+    }
     c->log = fopen(name, "a");
 }
 
