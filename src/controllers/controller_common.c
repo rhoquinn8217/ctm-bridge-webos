@@ -431,11 +431,38 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
          * A hardcoded 48-frame period once mismatched the host's 480-frame
          * chunks and contributed to underruns. */
         /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
-         * host's chunks. */
+         * host's chunks.
+         *
+         * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
+         * upper bound, and the kernel is free to take what suits the hardware:
+         * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
+         * **49152 frames = 1.024 SECONDS**, which is exactly the delay
+         * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
+         * stayed on time. ⓘ The C1 does not do this, which is why the fault
+         * looked device-specific rather than like an unbounded parameter.
+         *
+         * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
+         * five times the floor, so there is still room for jitter. ⛔ A tighter
+         * cap risks underruns, which are worse than lag -- see the self-heal
+         * this file already carries for them.
+         *
+         * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
+         * fails and we would open no audio at all -- a SILENT speaker, worse than
+         * a late one. So the unbounded request is retried on failure. */
         hw.intervals[9].min = 960;
-        hw.intervals[9].max = 0xFFFFFFFFU;
+        hw.intervals[9].max = 4800;
         hw.intervals[9].integer = 0;
+        /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
+        struct snd_pcm_hw_params hw_unbounded = hw;
+        hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
         int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        if (hw_rc < 0) {
+            hw = hw_unbounded;
+            hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+            if (hw_rc >= 0) {
+                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused, reopened unbounded", card);
+            }
+        }
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
         if (hw_rc < 0 || prep_rc < 0) {
             close(fd);
