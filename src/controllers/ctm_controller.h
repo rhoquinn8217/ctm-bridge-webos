@@ -105,6 +105,35 @@ typedef struct {
 
     /* Live UI settings update (DS sliders). NULL => ignored. */
     void (*set_settings)(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
+
+    /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
+     *
+     * A wired Xbox pad under xpad has no hidraw node, so there are no reports
+     * to relay. These let a type read its input node and make the reports
+     * itself. All NULL for every hidraw type, which keeps the pump exactly as
+     * it was for them.
+     *
+     *   preflight       can the device be opened; 0 or the errno. Replaces
+     *                   the hidraw check before BRIDGE_START.
+     *   open_input      open the node, fill caps (no report descriptor),
+     *                   return the fd or -1. The pump then GRABS THIS FD
+     *                   ITSELF: a grab through another handle would take the
+     *                   events from this one too.
+     *   read_input      turn what the node has into one report; its length,
+     *                   0 for nothing complete yet, -1 on error.
+     *   current_report  the report for the present state, with no I/O. Sent
+     *                   at once when a session starts and again whenever
+     *                   `keepalive_ms` pass with nothing sent, because an
+     *                   input node is silent while nothing moves and the
+     *                   listener drops a pad that says nothing for 15 s.
+     *   write_output    act on a report from the host (rumble); 0 or -1. */
+    int (*preflight)(const ctm_controller_dev_t *dev);
+    int (*open_input)(ctm_controller_t *c, const ctm_controller_dev_t *dev,
+                      ctmb_device_caps_t *caps);
+    int (*read_input)(ctm_controller_t *c, int fd, uint8_t *report, size_t cap);
+    int (*current_report)(ctm_controller_t *c, uint8_t *report, size_t cap);
+    int (*write_output)(ctm_controller_t *c, int fd, const uint8_t *report, size_t len);
+    unsigned keepalive_ms;
 } ctm_controller_ops_t;
 
 /* Live bridging status — read-only snapshot for the UI status panel. */
@@ -137,13 +166,24 @@ typedef struct {
  * HID fd, transport, settings, and per-MAC log file. */
 
 /* Can this device be bridged at all? Opens the node the session would open,
- * checks it answers as a HID device with the expected vendor and product, and
- * closes it again. Returns 0, or the errno that refused it.
+ * checks it is the device the row says (a HID device, or the type's own check
+ * for an input-node type), and closes it again. Returns 0, or the errno that
+ * refused it.
  *
  * When: before BRIDGE_START. ⛔ A node that cannot be read used to be found out
  * on the session thread, after the host had built a session for it and the row
  * already read bridged -- and nothing then told either of them. */
-int ctm_controller_preflight(const ctm_controller_dev_t *dev);
+int controller_preflight(const ctm_controller_dev_t *dev);
+
+/* Somewhere for a TYPE to keep its own per-controller state, which the opaque
+ * struct otherwise gives it no room for. Freed with free() when the controller
+ * is destroyed. When: an input-node type keeps its pad state here. */
+void *controller_type_ctx(const ctm_controller_t *c);
+void controller_set_type_ctx(ctm_controller_t *c, void *ctx);
+
+/* Is this a Microsoft Xbox pad's product id? Shared by the Bluetooth type and
+ * the wired, input-node type. */
+bool xbox_known_pid(const char *pid);
 
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev);
 int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
@@ -329,6 +369,9 @@ void ctm_input_set_held(int held);
  *
  * ⓘ All default ON, so a core told nothing behaves as it always has. */
 void ctm_signals_set_enabled(int light, int rumble, int tone);
+/* Is the felt pulse allowed right now? For a type that confirms with a rumble
+ * of its own rather than the DualSense signal. */
+int signals_rumble_on(void);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for
  * voice chat through the controller itself. ⓘ Defaults on. */
@@ -384,6 +427,8 @@ extern const ctm_controller_ops_t ctm_controller_ds4_ops;
 extern const ctm_controller_ops_t ctm_controller_xbox_ops;
 extern const ctm_controller_ops_t ctm_controller_steam_puck_ops;
 extern const ctm_controller_ops_t ctm_controller_generic_ops;
+/* A wired Xbox pad, read through its input node (controller_xpad.c). */
+extern const ctm_controller_ops_t controller_xpad_ops;
 
 /* Pick ops for a device: specific types first (puck/ds5/ds4/xbox), generic
  * fallback. Never returns NULL. */

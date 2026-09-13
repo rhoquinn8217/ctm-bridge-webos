@@ -131,6 +131,7 @@ add_library(ctmcore STATIC
   src/controllers/controller_ds5.c
   src/controllers/controller_ds4.c
   src/controllers/controller_xbox.c
+  src/controllers/controller_xpad.c
   src/controllers/controller_steam_puck.c
   src/controllers/controller_generic.c
   src/monitor/ctm_monitor.c

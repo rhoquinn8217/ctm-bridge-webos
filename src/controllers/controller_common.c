@@ -268,6 +268,12 @@ struct ctm_controller {
      * serial, never the one we read from the pad. */
     char kernel_uniq[64];
     char hid_phys[64];
+    /* An input-node type grabs the fd it reads, not a second one. */
+    int self_grabbed;
+    /* When an input report last went to the host, for ops->keepalive_ms. */
+    uint64_t last_input_us;
+    /* Per-controller state owned by the type; freed at destroy. */
+    void *type_ctx;
 
     FILE *log;
 
@@ -693,6 +699,7 @@ void ctm_mic_capture_set_enabled(int on)
 
 static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
+int signals_rumble_on(void) { return CTM_SIGNALS_ENABLED && g_sig_rumble; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
@@ -1612,6 +1619,19 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
  * apart, and why vendor and product alone were not enough. */
 static void grab_matching_evdev(ctm_controller_t *c)
 {
+    /* ⭐ AN INPUT-NODE TYPE GRABS THE NODE IT READS, THROUGH THAT SAME FD. A
+     * grab hands events only to the grabbing handle, so grabbing through a
+     * second one would starve this session of its own input. ⓘ The grab still
+     * does its job: SDL, joydev and the compositor stop receiving the pad. */
+    if (c->ops->open_input) {
+        if (c->hid_fd >= 0 && ioctl(c->hid_fd, EVIOCGRAB, 1) == 0) {
+            c->self_grabbed = 1;
+            ctl_log(c, "evdev: grabbed the input node it reads");
+        } else {
+            ctl_log(c, "evdev: grab of the input node it reads refused errno=%d", errno);
+        }
+        return;
+    }
     DIR *dir = opendir("/sys/class/input");
     if (!dir) return;
     struct dirent *ent;
@@ -1667,6 +1687,10 @@ static void grab_matching_evdev(ctm_controller_t *c)
 /* Un-grab + close the evdev nodes. When: each time a session ends. */
 static void release_evdev_grabs(ctm_controller_t *c)
 {
+    if (c->self_grabbed) {
+        if (c->hid_fd >= 0) (void)ioctl(c->hid_fd, EVIOCGRAB, 0);
+        c->self_grabbed = 0;
+    }
     for (int i = 0; i < c->evdev_grab_count; ++i) {
         if (c->evdev_grabs[i].fd >= 0) {
             ioctl(c->evdev_grabs[i].fd, EVIOCGRAB, 0);
@@ -1772,6 +1796,13 @@ static void remember_audio_settings(ctm_controller_t *c, const uint8_t *data, si
 static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c || c->hid_fd < 0 || !data || len == 0) return -1;
+    /* An input-node type has no HID reports to write: it acts on the host's
+     * report itself (rumble, for a wired Xbox pad). */
+    if (c->ops->write_output) {
+        const int rc = c->ops->write_output(c, c->hid_fd, data, len);
+        if (rc == 0) c->st_reports_out++;
+        return rc;
+    }
     uint8_t patched[MAX_REPORT];
     if (len > sizeof(patched)) return -1;
     memcpy(patched, data, len);
@@ -1978,22 +2009,57 @@ static void *composite_reader_main(void *arg)
     return NULL;
 }
 
+/* ⭐ Send an input-node type's present state when nothing has gone to the host
+ * for ops->keepalive_ms -- and at once when the session starts, since
+ * last_input_us begins at 0. An input node says nothing while the pad is
+ * still, and the listener drops a pad that is silent for 15 s. Returns -1 if
+ * the link is gone. When: the input thread, whenever its poll times out. */
+static int send_keepalive(ctm_controller_t *c)
+{
+    if (!c->ops->keepalive_ms || !c->ops->current_report) return 0;
+    const uint64_t now = now_us();
+    if (c->last_input_us != 0 &&
+        now - c->last_input_us < (uint64_t)c->ops->keepalive_ms * 1000u) {
+        return 0;
+    }
+    uint8_t buf[MAX_REPORT];
+    const int n = c->ops->current_report(c, buf, sizeof(buf));
+    if (n <= 0) return 0;
+    if (ctm_input_is_held() && c->ops->blank_input) c->ops->blank_input(buf, (size_t)n);
+    if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
+        return -1;
+    }
+    c->last_input_us = now;
+    return 0;
+}
+
 static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    c->last_input_us = 0;
     while (!c->stop) {
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
         int pr = poll(pfds, 2, 1);
         if (pr < 0) { if (errno == EINTR) continue; break; }
-        if (pr == 0) continue;
+        if (pr == 0) {
+            if (send_keepalive(c) != 0) { c->stop = 1; break; }
+            continue;
+        }
         if (pfds[1].revents & POLLIN) break;
         if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
         if (!(pfds[0].revents & POLLIN)) continue;
         for (;;) {
             uint8_t buf[MAX_REPORT];
-            ssize_t n = read(c->hid_fd, buf, sizeof(buf));
+            ssize_t n;
+            if (c->ops->read_input) {
+                /* ⓘ 0 is "no complete frame yet", not an error. */
+                n = c->ops->read_input(c, c->hid_fd, buf, sizeof(buf));
+                if (n == 0) break;
+            } else {
+                n = read(c->hid_fd, buf, sizeof(buf));
+            }
             if (n > 0) {
                 /* ⛔ Nothing here arms a microphone, so a report carrying audio
                  * means something else did -- and every reader on this TV,
@@ -2027,6 +2093,7 @@ static void *input_thread_main(void *arg)
                     break;
                 }
                 c->st_reports_in++;
+                if (c->ops->keepalive_ms) c->last_input_us = now_us();
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
                 if (!held && c->ops && c->ops->on_input_report) {
@@ -2492,7 +2559,11 @@ static void *session_main(void *arg)
      * stretch left that logs nothing at all. */
     struct timespec oh0, oh1;
     clock_gettime(CLOCK_MONOTONIC, &oh0);
-    c->hid_fd = open_hid(c, &caps, report_desc, &report_desc_len);
+    /* ⓘ An input-node type opens its own node and has no report descriptor:
+     * the host's device for it is a fixed profile. */
+    c->hid_fd = c->ops->open_input
+                    ? c->ops->open_input(c, &c->dev, &caps)
+                    : open_hid(c, &caps, report_desc, &report_desc_len);
     clock_gettime(CLOCK_MONOTONIC, &oh1);
     ctl_log(c, "open_hid took %ldms",
             (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
@@ -2678,12 +2749,24 @@ static void *session_main(void *arg)
 
 /* --- lifecycle ----------------------------------------------------------- */
 
-int ctm_controller_preflight(const ctm_controller_dev_t *dev)
+void *controller_type_ctx(const ctm_controller_t *c)
+{
+    return c ? c->type_ctx : NULL;
+}
+
+void controller_set_type_ctx(ctm_controller_t *c, void *ctx)
+{
+    if (c) c->type_ctx = ctx;
+}
+
+int controller_preflight(const ctm_controller_dev_t *dev)
 {
     if (!dev) return EINVAL;
+    const ctm_controller_ops_t *ops = ctm_controller_ops_for(dev);
+    /* An input-node type knows how to open what it reads. */
+    if (ops->preflight) return ops->preflight(dev);
     /* ⭐ The node the session will actually open, which for a composite
      * device may not be dev->path. */
-    const ctm_controller_ops_t *ops = ctm_controller_ops_for(dev);
     char node[64];
     const char *path = dev->path;
     if (ops->select_node && ops->select_node(dev, node, sizeof(node)) == 0 && node[0]) {
@@ -3019,6 +3102,7 @@ void ctm_controller_destroy(ctm_controller_t *c)
     pthread_mutex_destroy(&c->settings_mutex);
     pthread_mutex_destroy(&c->status_mutex);
     free(c->enum_payload);
+    free(c->type_ctx);
     free(c);
 }
 
@@ -3029,6 +3113,8 @@ static const ctm_controller_ops_t *const k_registry[] = {
     &ctm_controller_ds5_ops,
     &ctm_controller_ds5e_ops,
     &ctm_controller_ds4_ops,
+    /* ⓘ Before the Bluetooth Xbox type, which only takes hidraw nodes anyway. */
+    &controller_xpad_ops,
     &ctm_controller_xbox_ops,
     &ctm_controller_generic_ops,
 };

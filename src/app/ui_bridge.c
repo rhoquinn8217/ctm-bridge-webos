@@ -608,12 +608,12 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
      * host kept a session that timed out 30 s later.
      *
      * ➡️ Asked here instead, so nothing is started that cannot run. */
-    const int refused = ctm_controller_preflight(&cdev);
+    const int refused = controller_preflight(&cdev);
     if (refused != 0) {
-        log_append("refused %s: %s cannot be read as a HID device (%s)",
+        log_append("refused %s: %s cannot be opened for bridging (%s)",
                    item->name, dev->node, strerror(refused));
-        ctm_gesture_log(NULL, "bridge refused: %s (kind %s) at %s cannot be read as a "
-                        "HID device, errno=%d -- nothing was sent to the host",
+        ctm_gesture_log(NULL, "bridge refused: %s (kind %s) at %s cannot be opened for "
+                        "bridging, errno=%d -- nothing was sent to the host",
                         item->name, kind, dev->node, refused);
         return false;
     }

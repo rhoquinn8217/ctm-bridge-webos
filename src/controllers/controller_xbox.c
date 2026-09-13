@@ -21,6 +21,11 @@ static bool xbox_pid(const char *pid)
     return false;
 }
 
+bool xbox_known_pid(const char *pid)
+{
+    return pid && xbox_pid(pid);
+}
+
 static bool xbox_matches(const ctm_controller_dev_t *dev)
 {
     return dev &&
