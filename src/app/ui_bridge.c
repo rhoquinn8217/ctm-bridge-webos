@@ -586,17 +586,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     }
 
     const device_info_t *dev = &g_scan.devices[scan_index];
-    char response[512];
-    int port = next_bridge_port();
-    char cmd[256];
-    char busid[32];
     const char *kind = bridge_kind_for_item(item);
-    make_bridge_busid(item, busid, sizeof(busid));
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
-    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
-        log_append("agent bridge start failed: %s", response);
-        return false;
-    }
 
     /* Build the neutral descriptor and hand the device to a controller — one
      * mechanism for DS5/DS4/xbox/puck/generic (factory picks the ops). */
@@ -608,6 +598,36 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     snprintf(cdev.name, sizeof(cdev.name), "%s", item->name);
     snprintf(cdev.path, sizeof(cdev.path), "%s", dev->node);
     snprintf(cdev.mac, sizeof(cdev.mac), "%s", item->mac);
+
+    /* ⭐⭐ REFUSE A DEVICE THAT CANNOT BE READ, BEFORE THE HOST HEARS OF IT.
+     *
+     * ⛔ THE FAULT, measured on the U5s 2026-09-13 with both Xbox pads: their
+     * node is /dev/input/jsN, which cannot be read as HID. The session found
+     * that out on its own thread, after BRIDGE_START and after the row read
+     * bridged, and stopped without a word -- the row stayed bridged and the
+     * host kept a session that timed out 30 s later.
+     *
+     * ➡️ Asked here instead, so nothing is started that cannot run. */
+    const int refused = ctm_controller_preflight(&cdev);
+    if (refused != 0) {
+        log_append("refused %s: %s cannot be read as a HID device (%s)",
+                   item->name, dev->node, strerror(refused));
+        ctm_gesture_log(NULL, "bridge refused: %s (kind %s) at %s cannot be read as a "
+                        "HID device, errno=%d -- nothing was sent to the host",
+                        item->name, kind, dev->node, refused);
+        return false;
+    }
+
+    char response[512];
+    int port = next_bridge_port();
+    char cmd[256];
+    char busid[32];
+    make_bridge_busid(item, busid, sizeof(busid));
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
+    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
+        log_append("agent bridge start failed: %s", response);
+        return false;
+    }
 
     ctm_controller_t *controller = ctm_controller_create(&cdev);
     if (!controller) {

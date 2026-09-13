@@ -31,6 +31,7 @@ static bool xbox_matches(const ctm_controller_dev_t *dev)
 
 const ctm_controller_ops_t ctm_controller_xbox_ops = {
     .kind = "xbox",
+    .grab_evdev = true,     /* the TV must stop reading a pad the host now has */
     .matches = xbox_matches,
     .select_node = NULL,
     .on_plug_init = NULL,   /* STAGE 2: reserved for BT init/handshake if needed */

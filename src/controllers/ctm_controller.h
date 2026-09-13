@@ -38,12 +38,33 @@ typedef struct {
     const char *kind;   /* "ds5" / "ds4" / "xbox" / "steam_puck" / "generic" */
 
     /* Behaviour flags preserving each path's proven semantics in the shared
-     * pump. DS (worker) = all true; puck/xbox/generic (relay) = all false. */
+     * pump. DS (worker) = all true; puck = all false; xbox and generic grab
+     * their input nodes and nothing else. */
     bool needs_host_config;   /* block for HOST_CONFIG after HELLO (DS pacing) */
-    bool grab_evdev;          /* EVIOCGRAB the device's evdev nodes (BT/DS) */
+    /* EVIOCGRAB the device's input nodes, so the TV stops using its input while
+     * the host has it. ⛔ Xbox and generic were false until 2026-09-13, and a
+     * bridged keyboard typed every key twice: once through the bridge, once
+     * through the stream, because the TV still read it. */
+    bool grab_evdev;
     bool request_bt_mode;     /* send the Sony feature-0x05 full-BT-mode probe */
     bool composite;           /* forward EVERY HID interface, each tagged by its IN
                                * endpoint (puck); host plugs the whole composite. */
+
+    /* ⭐⭐ Does this device speak the DualSense protocol? Its feature report
+     * 0x09, its Bluetooth reports 0x31, 0x32 and 0x36, its microphone and its
+     * USB sound card. True for the DualSense and the Edge, and nothing else.
+     *
+     * ⛔ Every session step built for a DualSense asks this before it runs: the
+     * identity probe, the speaker wake, the card match, the microphone, the
+     * confirmation tone and the microphone-safety check. They used to ask the
+     * bus, or whether an audio device was open, and both say yes for things
+     * that are not DualSenses. Measured on the U5s 2026-09-13: a keyboard
+     * dongle waited 5 s at every bridge for a report only a DualSense answers,
+     * and was sent 242 DualSense sound reports at bridge and again at release.
+     *
+     * ⚠️ Not the same question as grab_evdev or needs_host_config, which a DS4
+     * also answers yes to. A DS4 speaks its own protocol, not this one. */
+    bool speaks_ds5;
 
     /* Does this type claim the device? Factory tries specific types first,
      * generic last. */
@@ -114,6 +135,16 @@ typedef struct {
 /* --- lifecycle (controller_common.c) ----------------------------------------
  * Each controller runs in isolation: its own pump (reader + session threads),
  * HID fd, transport, settings, and per-MAC log file. */
+
+/* Can this device be bridged at all? Opens the node the session would open,
+ * checks it answers as a HID device with the expected vendor and product, and
+ * closes it again. Returns 0, or the errno that refused it.
+ *
+ * When: before BRIDGE_START. ⛔ A node that cannot be read used to be found out
+ * on the session thread, after the host had built a session for it and the row
+ * already read bridged -- and nothing then told either of them. */
+int ctm_controller_preflight(const ctm_controller_dev_t *dev);
+
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev);
 int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
 /* Why a controller is being unplugged. The routes mean different things and
@@ -322,9 +353,10 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...);
  * recognises a local gesture. Sets a flag and notifies the app; it does NOT
  * tear down, because the caller is the input thread and unplugging joins that
  * same thread. */
-/* Write a line to /tmp/ctm-gesture.log, the file the app's plug-in watcher
- * also writes, so a gesture reads end to end in one place. `c` may be NULL
- * when the caller holds a key rather than a controller. */
+/* Write a line to ctm-gesture.log in the app's logs directory (see
+ * ctm_log_path), the file the app's plug-in watcher also writes, so a gesture
+ * reads end to end in one place. `c` may be NULL when the caller holds a key
+ * rather than a controller. */
 void ctm_gesture_log(const ctm_controller_t *c, const char *fmt, ...);
 
 void ctm_controller_request_unplug(ctm_controller_t *c);

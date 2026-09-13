@@ -55,6 +55,12 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #ifndef EVIOCGRAB
 #define EVIOCGRAB _IOW('E', 0x90, int)
 #endif
+#ifndef HIDIOCGRAWPHYS
+#define HIDIOCGRAWPHYS(len) _IOC(_IOC_READ, 'H', 0x05, len)
+#endif
+
+/* Can a node be read as HID, and which input nodes are a device's own. */
+#include "hid_node_checks.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -256,6 +262,12 @@ struct ctm_controller {
 
     evdev_grab_t evdev_grabs[MAX_EVDEV_GRABS];
     int evdev_grab_count;
+    /* What tells this device's input nodes from anyone else's -- see
+     * hid_node_checks.inl. ⛔ kernel_uniq is copied at create, BEFORE the
+     * pairing probe can fill dev.mac: an input node carries the kernel's
+     * serial, never the one we read from the pad. */
+    char kernel_uniq[64];
+    char hid_phys[64];
 
     FILE *log;
 
@@ -1548,6 +1560,12 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         close(fd);
         return -1;
     }
+    /* ⓘ Truncation leaves no terminator, hence the zeroed buffer and one byte
+     * held back. Empty is fine: the grab then matches by serial or vendor. */
+    memset(c->hid_phys, 0, sizeof(c->hid_phys));
+    if (ioctl(fd, HIDIOCGRAWPHYS(sizeof(c->hid_phys) - 1), c->hid_phys) < 0) {
+        c->hid_phys[0] = '\0';
+    }
 
     memset(caps, 0, sizeof(*caps));
     caps->vendor_id = (uint16_t)vid;
@@ -1564,7 +1582,10 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
      * the only place that value reaches the host. ⚠️ It used to run at the end
      * of this function, purely as an investigation -- moving it is the whole
      * change on this side. */
-    if (strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
+    /* ⛔ DualSense only. Asked of every USB device until 2026-09-13, and a
+     * device that does not answer 0x09 makes the kernel wait out its 5 s
+     * control-transfer timeout: measured on a keyboard dongle, errno=110. */
+    if (c->ops->speaks_ds5 && strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
 
     snprintf(caps->serial, sizeof(caps->serial), "%s", c->dev.mac);
     snprintf(caps->manufacturer, sizeof(caps->manufacturer), "hidraw");
@@ -1585,22 +1606,33 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
 }
 
 /* EVIOCGRAB the device's evdev nodes so webOS doesn't double-consume input.
- * When: at session start, BT/DS only (gated by ops->grab_evdev). */
+ * When: at session start, for ops with grab_evdev.
+ *
+ * ⭐ Only THIS device's nodes: see hid_node_checks.inl for how they are told
+ * apart, and why vendor and product alone were not enough. */
 static void grab_matching_evdev(ctm_controller_t *c)
 {
     DIR *dir = opendir("/sys/class/input");
     if (!dir) return;
     struct dirent *ent;
+    evdev_match_t how_matched = EVDEV_NOT_OURS;
     while ((ent = readdir(dir)) != NULL) {
         if (strncmp(ent->d_name, "input", 5) != 0) continue;
-        char vendor_path[160], product_path[160], vendor[32] = {0}, product[32] = {0};
-        snprintf(vendor_path, sizeof(vendor_path), "/sys/class/input/%s/id/vendor", ent->d_name);
-        snprintf(product_path, sizeof(product_path), "/sys/class/input/%s/id/product", ent->d_name);
-        if (read_text_file(vendor_path, vendor, sizeof(vendor)) != 0 ||
-            read_text_file(product_path, product, sizeof(product)) != 0 ||
-            !hex_equals(vendor, c->vid_num) || !hex_equals(product, c->pid_num)) {
-            continue;
-        }
+        char attr[160], vendor[32] = {0}, product[32] = {0}, phys[96] = {0}, uniq[96] = {0};
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/vendor", ent->d_name);
+        if (read_text_file(attr, vendor, sizeof(vendor)) != 0) continue;
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/product", ent->d_name);
+        if (read_text_file(attr, product, sizeof(product)) != 0) continue;
+        /* ⓘ Either may be absent or empty; that only means it cannot decide. */
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/phys", ent->d_name);
+        (void)read_text_file(attr, phys, sizeof(phys));
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/uniq", ent->d_name);
+        (void)read_text_file(attr, uniq, sizeof(uniq));
+        const evdev_match_t how = evdev_input_belongs(c->vid_num, c->pid_num,
+                                                      c->hid_phys, c->kernel_uniq,
+                                                      vendor, product, phys, uniq);
+        if (how == EVDEV_NOT_OURS) continue;
+        how_matched = how;
         char input_dir[160];
         snprintf(input_dir, sizeof(input_dir), "/sys/class/input/%s", ent->d_name);
         DIR *input = opendir(input_dir);
@@ -1616,14 +1648,20 @@ static void grab_matching_evdev(ctm_controller_t *c)
                 int idx = c->evdev_grab_count++;
                 c->evdev_grabs[idx].fd = fd;
                 snprintf(c->evdev_grabs[idx].path, sizeof(c->evdev_grabs[idx].path), "%s", dev_path);
-                ctl_log(c, "grabbed %s", dev_path);
+                ctl_log(c, "grabbed %s (%s)", dev_path, ent->d_name);
             } else {
+                ctl_log(c, "grab refused for %s errno=%d", dev_path, errno);
                 close(fd);
             }
         }
         closedir(input);
     }
     closedir(dir);
+    /* ⭐ One line saying what decided it, so a keyboard still typing twice can
+     * be told from a grab that matched nothing. */
+    ctl_log(c, "evdev: %d node(s) grabbed, matched by %s (phys=\"%s\" uniq=\"%s\")",
+            c->evdev_grab_count, evdev_match_name(how_matched),
+            c->hid_phys, c->kernel_uniq);
 }
 
 /* Un-grab + close the evdev nodes. When: each time a session ends. */
@@ -1961,7 +1999,9 @@ static void *input_thread_main(void *arg)
                  * means something else did -- and every reader on this TV,
                  * including SDL, will parse it as sticks and buttons. See the
                  * long note in ctm_mic_safety.inl. */
-                if (micsafe_check_report(c->dev.path, buf, (size_t)n)) {
+                /* ⚠️ DualSense reports only. Any other device may use report
+                 * id 0x31 for something else entirely, and this exits the app. */
+                if (c->ops->speaks_ds5 && micsafe_check_report(c->dev.path, buf, (size_t)n)) {
                     ctl_log(c, "mic-safety: shutting down, see stderr");
                     exit(1);
                 }
@@ -2338,11 +2378,19 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * Costs the second controller a few seconds before its audio settles --
      * its buttons already work by then. rhoquinn8217: "sometimes computers need to
      * think more", which is exactly what is happening. */
-    pthread_mutex_lock(&g_cardmatch_lock);
-    cardmatch_identify(c);
-    mic_capture_start(c);
-    feedback_play_connected(c);
-    pthread_mutex_unlock(&g_cardmatch_lock);
+    /* ⛔ A DUALSENSE'S SOUND CARD, MICROPHONE AND TONE, SO ONLY A DUALSENSE.
+     * For anything else the card match went looking for a free DualSense card
+     * and could claim one by elimination, and the tone was written to the
+     * device as DualSense reports. */
+    if (c->ops->speaks_ds5) {
+        pthread_mutex_lock(&g_cardmatch_lock);
+        cardmatch_identify(c);
+        mic_capture_start(c);
+        feedback_play_connected(c);
+        pthread_mutex_unlock(&g_cardmatch_lock);
+    } else {
+        ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
+    }
 
     c->comp_run = 1;
     if (c->ops->composite) {
@@ -2588,7 +2636,9 @@ static void *session_main(void *arg)
          *
          * ⓘ Wired takes the other branch: it has a real audio device, opened
          * in on_plug_init just above. */
-        if (c->alsa_fd < 0) btsig_wake_speaker(c);
+        /* ⚠️ "No audio device" is not "Bluetooth DualSense": a keyboard has no
+         * audio device either, and was sent this 398-byte report. */
+        if (c->ops->speaks_ds5 && c->alsa_fd < 0) btsig_wake_speaker(c);
 
         /* ⭐⭐ HOLD THE LIGHTBAR FOR THE MOMENT THE APP IS DRAWING ON IT.
          *
@@ -2628,6 +2678,21 @@ static void *session_main(void *arg)
 
 /* --- lifecycle ----------------------------------------------------------- */
 
+int ctm_controller_preflight(const ctm_controller_dev_t *dev)
+{
+    if (!dev) return EINVAL;
+    /* ⭐ The node the session will actually open, which for a composite
+     * device may not be dev->path. */
+    const ctm_controller_ops_t *ops = ctm_controller_ops_for(dev);
+    char node[64];
+    const char *path = dev->path;
+    if (ops->select_node && ops->select_node(dev, node, sizeof(node)) == 0 && node[0]) {
+        path = node;
+    }
+    return hid_node_preflight(path, (unsigned int)strtoul(dev->vid, NULL, 16),
+                              (unsigned int)strtoul(dev->pid, NULL, 16));
+}
+
 /* Build an idle controller for a detected device (factory picks its ops).
  * When: the UI/monitor decides to offer a device; before plug_in. */
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
@@ -2636,6 +2701,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     ctm_controller_t *c = (ctm_controller_t *)calloc(1, sizeof(*c));
     if (!c) return NULL;
     c->dev = *dev;
+    snprintf(c->kernel_uniq, sizeof(c->kernel_uniq), "%s", dev->mac);
     c->ops = ctm_controller_ops_for(dev);
     c->vid_num = (unsigned int)strtoul(dev->vid, NULL, 16);
     c->pid_num = (unsigned int)strtoul(dev->pid, NULL, 16);
@@ -2830,15 +2896,23 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
      * ⓘ Nothing on this branch turns a microphone on. This is the same class
      * of guard as the startup sweep above: it exists for a state we cannot
      * cause, and it runs on the one path where we still own the device. */
-    micsafe_disarm_node(c->dev.path);
+    /* ⓘ The node write is a DualSense report, so it goes to a DualSense only.
+     * The shutdown sweep below stays unconditional: it is not about this
+     * device, and it is the one pass that reaches a pad nothing tracked. */
+    if (c->ops->speaks_ds5) micsafe_disarm_node(c->dev.path);
     if (why == CTM_UNPLUG_SHUTDOWN) {
         ctm_mic_safety_disarm_all_reason("the bridge is shutting down");
     }
 
     /* Before anything is torn down, while the audio device is still open.
      * There is no "after" -- the unplug closes the very thing that would
-     * play it. */
-    feedback_play_unplugging(c, why);
+     * play it. ⛔ DualSense only: for anything else this was 2.4 s of
+     * DualSense sound reports written to it, and the release waited for them. */
+    if (c->ops->speaks_ds5) {
+        feedback_play_unplugging(c, why);
+    } else {
+        ctl_log(c, "unplugging -- no DualSense signal for this device");
+    }
     c->stop = 1;
     if (c->xport.fd >= 0) shutdown(c->xport.fd, SHUT_RDWR);
     if (c->wake_pipe[1] >= 0) (void)write(c->wake_pipe[1], "x", 1);

@@ -13,6 +13,7 @@ static bool generic_matches(const ctm_controller_dev_t *dev)
 
 const ctm_controller_ops_t ctm_controller_generic_ops = {
     .kind = "generic",
+    .grab_evdev = true,     /* a bridged keyboard must stop typing on the TV too */
     .matches = generic_matches,
     .select_node = NULL,
     .on_plug_init = NULL,
