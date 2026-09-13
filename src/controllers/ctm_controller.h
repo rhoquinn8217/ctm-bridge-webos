@@ -38,14 +38,24 @@ typedef struct {
     const char *kind;   /* "ds5" / "ds4" / "xbox" / "steam_puck" / "generic" */
 
     /* Behaviour flags preserving each path's proven semantics in the shared
-     * pump. DS (worker) = all true; puck = all false; xbox and generic grab
-     * their input nodes and nothing else. */
+     * pump. DS (worker) = all true; puck, xbox and xpad = all false; generic
+     * grabs keyboards and mice and nothing else. */
     bool needs_host_config;   /* block for HOST_CONFIG after HELLO (DS pacing) */
     /* EVIOCGRAB the device's input nodes, so the TV stops using its input while
-     * the host has it. ⛔ Xbox and generic were false until 2026-09-13, and a
-     * bridged keyboard typed every key twice: once through the bridge, once
-     * through the stream, because the TV still read it. */
+     * the host has it. ⛔ Generic was false until 2026-09-13, and a bridged
+     * keyboard typed every key twice: once through the bridge, once through the
+     * stream, because the TV still read it.
+     *
+     * ⛔⛔ BUT NEVER A PAD SDL READS THROUGH EVDEV. A grab hides it from SDL,
+     * and rhoquinn8217 set that the overlay combo works while bridged. ⓘ A
+     * DualSense is grabbed safely only because SDL opens it through hidraw,
+     * which a grab does not touch. A handed-over pad needs no grab to stay off
+     * the host: Moonlight's pad for it is retired. */
     bool grab_evdev;
+    /* With grab_evdev: leave the device alone when its report descriptor says
+     * joystick, gamepad or multi-axis controller. For generic, which serves
+     * keyboards, mice and pads alike. */
+    bool grab_skips_gamepads;
     bool request_bt_mode;     /* send the Sony feature-0x05 full-BT-mode probe */
     bool composite;           /* forward EVERY HID interface, each tagged by its IN
                                * endpoint (puck); host plugs the whole composite. */

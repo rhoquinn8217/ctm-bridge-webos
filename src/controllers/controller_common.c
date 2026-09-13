@@ -270,6 +270,9 @@ struct ctm_controller {
     char hid_phys[64];
     /* An input-node type grabs the fd it reads, not a second one. */
     int self_grabbed;
+    /* The report descriptor's top level is a joystick, gamepad or multi-axis
+     * controller. Set by open_hid; see grab_skips_gamepads. */
+    int is_gamepad;
     /* When an input report last went to the host, for ops->keepalive_ms. */
     uint64_t last_input_us;
     /* Per-controller state owned by the type; freed at destroy. */
@@ -1603,6 +1606,9 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
 
     *report_desc_len = read_report_descriptor(fd, report_desc, MAX_REPORT_DESCRIPTOR);
     if (*report_desc_len) {
+        uint16_t usage_page = 0, usage = 0;
+        ctm_hid_top_usage(report_desc, *report_desc_len, &usage_page, &usage, NULL);
+        c->is_gamepad = usage_page == 0x01 && (usage == 0x04 || usage == 0x05 || usage == 0x08);
         derive_report_lengths(report_desc, *report_desc_len, caps);
         if (caps->input_report_len < 1024) caps->input_report_len = 1024;
         if (caps->output_report_len < 1024) caps->output_report_len = 1024;
@@ -2682,7 +2688,12 @@ static void *session_main(void *arg)
         }
         ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
 
-        if (c->ops->grab_evdev) grab_matching_evdev(c);
+        if (c->ops->grab_evdev && c->ops->grab_skips_gamepads && c->is_gamepad) {
+            ctl_log(c, "evdev: not grabbed -- a gamepad, which the TV must still see "
+                       "for the overlay combo");
+        } else if (c->ops->grab_evdev) {
+            grab_matching_evdev(c);
+        }
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
 
         /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE

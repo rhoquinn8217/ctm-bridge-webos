@@ -159,19 +159,23 @@ static void test_rumble(void)
     xpad_rumble_t m;
     const uint8_t full[9] = { 0x03, 0x0F, 0x00, 0x00, 100, 50, 0xFF, 0x00, 0xFF };
     ok(xpad_parse_rumble(full, sizeof(full), &m) == 0, "report 0x03 is accepted");
-    ok(m.strong == 65535, "left motor 100% -> strong full");
-    ok(m.weak == 32767, "right motor 50% -> weak half");
+    ok(m.strong / 512 == 100, "left motor 100 -> xpad sends the pad 100");
+    ok(m.weak / 512 == 50, "right motor 50 -> xpad sends the pad 50");
+
+    const uint8_t measured[9] = { 0x03, 0x0F, 0, 0, 61, 61, 0xFF, 0, 0xFF };
+    ok(xpad_parse_rumble(measured, sizeof(measured), &m) == 0 && m.strong / 512 == 61 && m.weak / 512 == 61,
+       "Windows' 61 (measured 2026-09-13) reaches the pad as 61, not 78");
 
     const uint8_t off[9] = { 0x03, 0x0F, 0, 0, 0, 0, 0, 0, 0 };
     ok(xpad_parse_rumble(off, sizeof(off), &m) == 0 && m.strong == 0 && m.weak == 0, "zero stops both");
 
     const uint8_t right_only[9] = { 0x03, 0x01, 0, 0, 80, 80, 0xFF, 0, 0xFF };
-    ok(xpad_parse_rumble(right_only, sizeof(right_only), &m) == 0 && m.strong == 0 && m.weak > 0,
+    ok(xpad_parse_rumble(right_only, sizeof(right_only), &m) == 0 && m.strong == 0 && m.weak / 512 == 80,
        "a motor the enable mask leaves out stays still");
 
     const uint8_t hot[9] = { 0x03, 0x0F, 0, 0, 127, 255, 0xFF, 0, 0xFF };
-    ok(xpad_parse_rumble(hot, sizeof(hot), &m) == 0 && m.strong == 65535 && m.weak == 65535,
-       "levels above 100 are taken as full, not wrapped");
+    ok(xpad_parse_rumble(hot, sizeof(hot), &m) == 0 && m.strong / 512 == 127 && m.weak / 512 == 127,
+       "a level past what xpad can send is capped at 127, not wrapped");
 
     const uint8_t wrong[9] = { 0x02, 0x0F, 0, 0, 100, 100, 0, 0, 0 };
     ok(xpad_parse_rumble(wrong, sizeof(wrong), &m) != 0, "any other report id is refused");

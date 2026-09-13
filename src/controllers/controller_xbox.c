@@ -36,7 +36,10 @@ static bool xbox_matches(const ctm_controller_dev_t *dev)
 
 const ctm_controller_ops_t ctm_controller_xbox_ops = {
     .kind = "xbox",
-    .grab_evdev = true,     /* the TV must stop reading a pad the host now has */
+    /* ⛔ Not grabbed: SDL may read a Bluetooth Xbox pad through evdev, and the
+     * overlay combo must keep working while it is bridged -- see
+     * controller_xpad.c. The handover keeps it off the host twice. */
+    .grab_evdev = false,
     .matches = xbox_matches,
     .select_node = NULL,
     .on_plug_init = NULL,   /* STAGE 2: reserved for BT init/handshake if needed */

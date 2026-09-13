@@ -210,18 +210,29 @@ typedef struct {
     uint16_t weak;     /* the right, high-frequency motor */
 } xpad_rumble_t;
 
-/* Read the host's rumble report. Returns 0, or -1 if it is not one. Motor
- * levels arrive as a percentage; anything above 100 is taken as full. */
+/* The kernel's xpad driver divides a force-feedback magnitude by this before
+ * putting it in an Xbox One pad's rumble packet (drivers/input/joystick/xpad.c,
+ * xpad_play_effect: `strong / 512`). */
+#define XPAD_KERNEL_RUMBLE_DIVISOR 512u
+
+/* Read the host's rumble report. Returns 0, or -1 if it is not one.
+ *
+ * ⭐ SCALED SO THE PAD RECEIVES THE HOST'S OWN LEVEL. The host sends a motor
+ * level as Windows would put it in the pad's rumble packet, a percentage.
+ * xpad divides whatever we give it by 512, so level x 512 arrives at the pad
+ * as exactly that level. ⛔ Build 319 stretched 0..100 over 0..65535, and
+ * Windows' 61% reached the pad as 78 -- heard as "very loud" on 2026-09-13.
+ * ⓘ Capped at 127, the most xpad can send. */
 static int xpad_parse_rumble(const uint8_t *r, size_t len, xpad_rumble_t *out)
 {
     if (!r || !out || len < XPAD_RUMBLE_REPORT_LEN || r[0] != XPAD_RUMBLE_REPORT_ID) return -1;
     const uint8_t enable = r[1];
     unsigned left = (enable & XPAD_MOTOR_LEFT) ? r[4] : 0u;
     unsigned right = (enable & XPAD_MOTOR_RIGHT) ? r[5] : 0u;
-    if (left > 100u) left = 100u;
-    if (right > 100u) right = 100u;
-    out->strong = (uint16_t)((left * 65535u) / 100u);
-    out->weak = (uint16_t)((right * 65535u) / 100u);
+    if (left > 127u) left = 127u;
+    if (right > 127u) right = 127u;
+    out->strong = (uint16_t)(left * XPAD_KERNEL_RUMBLE_DIVISOR);
+    out->weak = (uint16_t)(right * XPAD_KERNEL_RUMBLE_DIVISOR);
     return 0;
 }
 

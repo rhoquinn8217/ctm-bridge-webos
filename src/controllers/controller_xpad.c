@@ -217,7 +217,7 @@ static int xpad_open_input(ctm_controller_t *c, const ctm_controller_dev_t *dev,
         snprintf(caps->product, sizeof(caps->product), "%s", dev->name[0] ? dev->name : "Xbox Controller");
     }
 
-    ctl_log(c, "xpad: reading %s (%s) as the Xbox Bluetooth report; rumble %s",
+    ctl_log(c, "xpad: reading %s (%s) as the Xbox Bluetooth report, not grabbed; rumble %s",
             event_path, caps->product, writable ? "available" : "unavailable (read-only node)");
     return fd;
 }
@@ -321,11 +321,11 @@ static int xpad_write_output(ctm_controller_t *c, int fd, const uint8_t *report,
 /* ⭐ THE CONFIRMATION: one short pulse the moment the host has the pad.
  *
  * ⛔ An Xbox pad has no light and no speaker, so the DualSense signal cannot
- * reach it, and the app's own SDL rumble cannot either once the node is
- * grabbed: a grab drops force feedback written through any other handle. ➡️ So
- * it is played here, through the node this session holds, right after the
- * grab. ⓘ Uploaded once and replayed on a reconnect; closing the node erases
- * it. No sleep: the kernel stops it after replay.length. */
+ * reach it, and the app skips its own SDL rumble for a wired node whose
+ * session signals itself. ➡️ So it is played here, through the node this
+ * session holds, as the session starts. ✅ Felt on the U5s 2026-09-13.
+ * ⓘ Uploaded once and replayed on a reconnect; closing the node erases it. No
+ * sleep: the kernel stops it after replay.length. */
 static int xpad_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 {
     (void)t;
@@ -355,7 +355,13 @@ static int xpad_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 
 const ctm_controller_ops_t controller_xpad_ops = {
     .kind = "xpad",
-    .grab_evdev = true,
+    /* ⛔ NOT GRABBED. SDL reads this pad through the same event node, and
+     * rhoquinn8217, 2026-09-13: "Bridging a controller shouldn't stop the
+     * controller from using the LB RB view and menu from bringing up the
+     * streaming overlay. It should work regardless." A grab hid the pad from
+     * SDL, so the combo and overlay navigation both died. ⓘ Nothing reaches the
+     * host twice: the handover retires Moonlight's pad for it. */
+    .grab_evdev = false,
     .matches = xpad_matches,
     .on_plug_init = xpad_on_plug_init,
     .blank_input = xpad_blank_report,
