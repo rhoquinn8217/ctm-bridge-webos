@@ -29,7 +29,13 @@ typedef struct {
     char bus[8];      /* "USB" / "BT" */
     char name[128];
     char path[64];    /* /dev/hidrawN */
-    char mac[64];
+    char mac[64];     /* ⚠️ the kernel's uniq, which is not always a MAC */
+    /* ⭐ The identity the host links a config on (device_identity.inl): uniq, or
+     * the USB serial where no driver filled uniq. A DualSense replaces it with
+     * its own MAC once its session has asked. */
+    char serial[64];
+    /* The kernel driver bound to the device, e.g. "xpad"; empty if unknown. */
+    char driver[32];
 } ctm_controller_dev_t;
 
 typedef struct ctm_controller ctm_controller_t;   /* opaque; defined in stage 2 */

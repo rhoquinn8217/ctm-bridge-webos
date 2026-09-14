@@ -61,6 +61,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 
 /* Can a node be read as HID, and which input nodes are a device's own. */
 #include "hid_node_checks.inl"
+#include "device_identity.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -1495,24 +1496,35 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
     }
     ctl_log(c, "probe: feature 0x09 (pairing info) = %s", hex);
 
-    /* ⭐ FILL THE IDENTITY ONLY IF IT IS MISSING. Where the kernel already
-     * supplied one, that value stays -- it is the same MAC from a source that
-     * has been trusted for months, and replacing it would make this change
-     * capable of breaking a set that already worked.
-     *
-     * ⚠️ A REPLY OF ALL ZEROES IS NOT AN ANSWER. An unpaired controller, or one
+    /* ⚠️ A REPLY OF ALL ZEROES IS NOT AN ANSWER. An unpaired controller, or one
      * whose reply we misread, would otherwise be given the identity
      * 00:00:00:00:00:00 -- and EVERY such controller would share it, which is
      * exactly the silent-collision the listener's config store refuses to
      * allow. Better to leave it empty and let the host use its constant. */
-    if (c->dev.mac[0] != '\0') return;
-
     if (reply_is_zero(feature + 1, 6)) {
         ctl_log(c, "identity: 0x09 answered with zeroes -- leaving the MAC empty");
         return;
     }
 
-    ds_mac_from_pairing_info(feature, c->dev.mac, sizeof(c->dev.mac));
+    char pad[24];
+    ds_mac_from_pairing_info(feature, pad, sizeof(pad));
+
+    /* ⭐⭐ THE PAD'S OWN MAC IS WHAT THE HOST LINKS A CONFIG ON, even where the
+     * kernel supplied something else (rhoquinn8217, 2026-09-13). ⛔ Through a
+     * DS5dongle on the C1 the kernel's uniq was the DONGLE's serial, so a config
+     * linked on it followed the dongle to whichever pad was plugged in next.
+     * ⓘ On the U5s the kernel reads 0x09 itself, and the two agree. */
+    if (c->dev.serial[0] != '\0' && !identity_same(c->dev.serial, pad)) {
+        ctl_log(c, "identity: MAC %s from feature 0x09 replaces %s as this pad's identity",
+                pad, c->dev.serial);
+    }
+    snprintf(c->dev.serial, sizeof(c->dev.serial), "%s", pad);
+
+    /* ⭐ dev.mac itself is only FILLED, never replaced. Where the kernel supplied
+     * a value it stays -- the log file is named from it, and replacing it would
+     * make this change capable of breaking a set that already worked. */
+    if (c->dev.mac[0] != '\0') return;
+    snprintf(c->dev.mac, sizeof(c->dev.mac), "%s", pad);
     ctl_log(c, "identity: MAC %s taken from feature 0x09 (the kernel gave none)",
             c->dev.mac);
 }
@@ -1597,7 +1609,18 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
      * control-transfer timeout: measured on a keyboard dongle, errno=110. */
     if (c->ops->speaks_ds5 && strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
 
-    snprintf(caps->serial, sizeof(caps->serial), "%s", c->dev.mac);
+    /* ⭐⭐ THE IDENTITY THE HOST LINKS A CONFIG ON (device_identity.inl, decided
+     * 2026-09-13). A DualSense is its own MAC: on a cable the probe above has
+     * just put it in dev.serial, and over Bluetooth uniq is the MAC. ⛔ It is
+     * never given a dongle's serial in its place -- nothing rather than the
+     * wrong pad. Anything else is its serial, and never a blank or all-zeros one. */
+    {
+        char identity[64];
+        identity_pick_serial(c->dev.serial, c->dev.mac, identity, sizeof(identity));
+        if (c->ops->speaks_ds5 && !identity_mac_shaped(identity)) identity[0] = '\0';
+        snprintf(caps->serial, sizeof(caps->serial), "%s", identity);
+        ctl_log(c, "identity: the host is told %s", identity[0] ? identity : "nothing (no usable one)");
+    }
     snprintf(caps->manufacturer, sizeof(caps->manufacturer), "hidraw");
     if (ioctl(fd, HIDIOCGRAWNAME(sizeof(caps->product) - 1), caps->product) < 0 ||
         caps->product[0] == '\0') {

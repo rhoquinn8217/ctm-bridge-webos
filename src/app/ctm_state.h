@@ -67,6 +67,8 @@ typedef struct {
     char usb_busid[64];
     char inputs[TEXT_LEN];
     char events[TEXT_LEN];
+    char driver[32];         /* kernel driver the input device hangs off, e.g. "xpad" */
+    char serial[64];         /* identity for rule 2: uniq, or the USB serial (device_identity.inl) */
     int report_descriptor_bytes;
     uint16_t usage_page;     /* top-level HID usage page (interface class) */
     uint16_t usage;          /* top-level HID usage */
@@ -89,6 +91,8 @@ typedef struct {
     char pid[16];
     char mac[64];
     char usb_busid[64];
+    char driver[32];
+    char serial[64];
     int device_indices[MAX_DEVICES];
     int device_count;
     bool plugged;
@@ -223,7 +227,8 @@ bool is_xbox_device(const device_info_t *dev);
 bool is_xpad_compatible_pid(const char *vid, const char *pid);
 bool is_gulikit_named_device(const char *name);
 bool is_xpad_input_only_candidate(const char *bus, const char *vid, const char *pid,
-                                  const char *name, const char *usb_busid);
+                                  const char *name, const char *usb_busid,
+                                  const char *driver);
 void steam_root_from_phys(const char *phys, char *out, size_t out_len);
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len);
 void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len);
@@ -275,6 +280,9 @@ const char *bridge_kind_for_item(const logical_device_t *item);
 bool plug_in_item(logical_device_t *item);
 bool item_is_tv_remote(const logical_device_t *item);
 bool item_is_mouse_or_keyboard(const logical_device_t *item);
+/* A game controller: a kind the bridge knows, or a HID joystick, gamepad or
+ * multi-axis controller. Only controllers are auto-bridged or given a config. */
+bool item_is_controller(const logical_device_t *item);
 
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */

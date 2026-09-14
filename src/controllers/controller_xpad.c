@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "device_identity.inl"
 #include "xpad_report.inl"
 
 #include <dirent.h>
@@ -42,9 +43,22 @@ static bool xpad_matches(const ctm_controller_dev_t *dev)
 {
     /* ⓘ Only a node under /dev/input: a Bluetooth Xbox pad arrives as hidraw and
      * stays with the Bluetooth type. */
-    return dev &&
+    if (!dev || strncmp(dev->path, "/dev/input/", 11) != 0) return false;
+
+    /* ⭐⭐ ANY PAD THE XBOX DRIVER RUNS, WHOEVER MADE IT. rhoquinn8217,
+     * 2026-09-13: "If regular USBIP would have accepted it we shouldn't be
+     * refusing it either." The driver gives every one of them the same buttons
+     * and axes, which is all xpad_report.inl reads.
+     *
+     * ⛔ Until then this took only Microsoft's vendor id with a known product or
+     * "xbox" in the name. That refused a GameSir in its Xbox mode (vendor 3537,
+     * "Generic X-Box pad") -- and Microsoft's own wired 360 pad, whose product
+     * was missing from the list and whose driver spells it "X-Box". */
+    if (strcmp(dev->driver, "xpad") == 0) return true;
+
+    /* ⓘ The driver could not be read: the old rule, so nothing that worked stops. */
+    return dev->driver[0] == '\0' &&
            strcmp(dev->vid, "045e") == 0 &&
-           strncmp(dev->path, "/dev/input/", 11) == 0 &&
            (xbox_known_pid(dev->pid) || (dev->name[0] && strcasestr(dev->name, "xbox")));
 }
 
@@ -209,7 +223,10 @@ static int xpad_open_input(ctm_controller_t *c, const ctm_controller_dev_t *dev,
     caps->feature_report_len = 0;
     caps->flags = 1;
     snprintf(caps->path, sizeof(caps->path), "%s", event_path);
-    snprintf(caps->serial, sizeof(caps->serial), "%s", dev->mac);
+    /* ⭐ Its serial (device_identity.inl). The Xbox driver fills no uniq, so this
+     * is the USB serial number the device list read beside it -- an Xbox pad has
+     * no MAC to give over USB. Blank or all zeros sends nothing. */
+    identity_pick_serial(dev->serial, dev->mac, caps->serial, sizeof(caps->serial));
     snprintf(caps->manufacturer, sizeof(caps->manufacturer), "input");
     /* ⭐ The kernel's own model name, e.g. "Microsoft Xbox Series S|X
      * Controller", rather than the family name the TV's list shows. */
@@ -217,8 +234,11 @@ static int xpad_open_input(ctm_controller_t *c, const ctm_controller_dev_t *dev,
         snprintf(caps->product, sizeof(caps->product), "%s", dev->name[0] ? dev->name : "Xbox Controller");
     }
 
-    ctl_log(c, "xpad: reading %s (%s) as the Xbox Bluetooth report, not grabbed; rumble %s",
-            event_path, caps->product, writable ? "available" : "unavailable (read-only node)");
+    ctl_log(c, "xpad: reading %s (%s, driver %s) as the Xbox Bluetooth report, not grabbed; "
+            "rumble %s; the host is told %s",
+            event_path, caps->product, dev->driver[0] ? dev->driver : "unknown",
+            writable ? "available" : "unavailable (read-only node)",
+            caps->serial[0] ? caps->serial : "nothing (no usable serial)");
     return fd;
 }
 

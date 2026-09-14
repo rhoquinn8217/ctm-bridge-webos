@@ -518,6 +518,9 @@ const char *bridge_kind_for_item(const logical_device_t *item)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5e_usb" : "ds5e";
     if (strcmp(item->vid, "054c") == 0 &&
         (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0)) return "ds4";
+    /* ⭐ Anything the Xbox driver runs reaches the host as an Xbox pad, whoever
+     * made it -- the TV reads them all the same way (controller_xpad.c). */
+    if (strcmp(item->driver, "xpad") == 0) return "xbox";
     if (strcmp(item->vid, "045e") == 0 &&
         (is_xbox_pid(item->pid) || contains_ci(item->name, "xbox"))) return "xbox";
     if (strcmp(item->vid, "28de") == 0 && strcmp(item->pid, "1304") == 0) return "puck";
@@ -598,6 +601,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     snprintf(cdev.name, sizeof(cdev.name), "%s", item->name);
     snprintf(cdev.path, sizeof(cdev.path), "%s", dev->node);
     snprintf(cdev.mac, sizeof(cdev.mac), "%s", item->mac);
+    snprintf(cdev.serial, sizeof(cdev.serial), "%s", item->serial);
+    snprintf(cdev.driver, sizeof(cdev.driver), "%s", item->driver);
 
     /* ⭐⭐ REFUSE A DEVICE THAT CANNOT BE READ, BEFORE THE HOST HEARS OF IT.
      *
