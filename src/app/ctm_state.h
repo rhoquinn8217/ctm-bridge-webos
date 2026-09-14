@@ -73,6 +73,14 @@ typedef struct {
     uint16_t usage_page;     /* top-level HID usage page (interface class) */
     uint16_t usage;          /* top-level HID usage */
     char iface[20];          /* human label, e.g. "vendor 64B" / "keyboard 8B" */
+    /* ⭐ WHICH PHYSICAL DEVICE THIS PART BELONGS TO (2026-09-14). Every part
+     * of one USB device shares `group`, its physical path without the
+     * "/inputN" part: "usb-1c7a0000.xhci-2.1.3". Anything not on USB is its
+     * own group, "node:<node>". */
+    char group[TEXT_LEN];
+    char device_name[TEXT_LEN];  /* the USB device's maker and product, or "" */
+    char usb_serial[64];         /* the USB device's own serial, zeros and all, or "" */
+    int iface_num;               /* the USB interface number, -1 when unknown */
     bool readable;
     bool writable;
 } device_info_t;
