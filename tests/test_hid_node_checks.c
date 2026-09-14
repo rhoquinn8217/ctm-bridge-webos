@@ -80,6 +80,23 @@ static void test_dualsense_by_serial(void)
        "a hidraw path with no path on the input node still matches by serial");
 }
 
+static void test_parts_sharing_a_serial(void)
+{
+    printf("\none USB device, several parts: every part carries the device's serial\n");
+    const unsigned vid = 0x1532, pid = 0x0094;
+    const char *mouse = "usb-1c7a0000.xhci-2.1.3/input0";
+    const char *keys = "usb-1c7a0000.xhci-2.1.3/input1";
+    const char *serial = "000000000000";
+
+    ok(evdev_input_belongs(vid, pid, mouse, serial, "1532", "0094", mouse, serial) == EVDEV_BY_SERIAL,
+       "a part takes its own nodes");
+    ok(evdev_input_belongs(vid, pid, mouse, serial, "1532", "0094", keys, serial) == EVDEV_NOT_OURS,
+       "a part leaves its sibling's nodes on the TV, although the serial matches");
+    ok(evdev_input_belongs(0x3537, 0x1014, "usb-1c7a0000.xhci-2.1.4/input1", "3286967D",
+                           "3537", "1014", "usb-1c7a0000.xhci-2.1.4/input0", "") == EVDEV_NOT_OURS,
+       "a GameSir's keyboard part leaves its Xbox pad part alone");
+}
+
 static void test_wired_dualsense_without_serial(void)
 {
     printf("\na wired DualSense on the monitor: no serial from the kernel, no path on its nodes\n");
@@ -137,6 +154,7 @@ int main(void)
 {
     test_keyboard_dongle_halves();
     test_dualsense_by_serial();
+    test_parts_sharing_a_serial();
     test_wired_dualsense_without_serial();
     test_xbox_pad();
     test_vendor_product_must_match();

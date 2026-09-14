@@ -95,12 +95,18 @@ static evdev_match_t evdev_input_belongs(unsigned int vid, unsigned int pid,
                                          const char *in_phys, const char *in_uniq)
 {
     if (!hid_hex_is(in_vendor, vid) || !hid_hex_is(in_product, pid)) return EVDEV_NOT_OURS;
-    if (uniq && uniq[0] && in_uniq && in_uniq[0]) {
-        return strcasecmp(uniq, in_uniq) == 0 ? EVDEV_BY_SERIAL : EVDEV_NOT_OURS;
-    }
-    if (phys && phys[0] && in_phys && in_phys[0]) {
-        return strcmp(phys, in_phys) == 0 ? EVDEV_BY_PATH : EVDEV_NOT_OURS;
-    }
+    const int both_uniq = uniq && uniq[0] && in_uniq && in_uniq[0];
+    const int both_phys = phys && phys[0] && in_phys && in_phys[0];
+    /* ⭐ EVERY FIELD BOTH SIDES HAVE MUST AGREE (2026-09-14). One USB device
+     * gives the same serial to all of its parts, so a matching serial alone
+     * took a sibling part's nodes as well: bridging one part of a Razer mouse
+     * dongle would have left its other parts dead on the TV. The physical path
+     * names the part. ⓘ hid-playstation leaves its input nodes without a path,
+     * so a DualSense is still matched on its serial. */
+    if (both_uniq && strcasecmp(uniq, in_uniq) != 0) return EVDEV_NOT_OURS;
+    if (both_phys && strcmp(phys, in_phys) != 0) return EVDEV_NOT_OURS;
+    if (both_uniq) return EVDEV_BY_SERIAL;
+    if (both_phys) return EVDEV_BY_PATH;
     return EVDEV_BY_VENDOR_PRODUCT;
 }
 
