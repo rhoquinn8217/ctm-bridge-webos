@@ -283,6 +283,8 @@ bool item_is_mouse_or_keyboard(const logical_device_t *item);
 /* A game controller: a kind the bridge knows, or a HID joystick, gamepad or
  * multi-axis controller. Only controllers are auto-bridged or given a config. */
 bool item_is_controller(const logical_device_t *item);
+/* "controller", "keyboard", "mouse", or "" -- what the device says it is. */
+const char *item_type_label(const logical_device_t *item);
 
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */

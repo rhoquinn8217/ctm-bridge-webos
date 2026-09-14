@@ -101,6 +101,22 @@ static inline void identity_pick_serial(const char *uniq, const char *usb_serial
     snprintf(out, out_len, "%s", pick);
 }
 
+/* What a HID interface says it is, from its top-level usage, as a word a person
+ * can read: "controller", "keyboard", "mouse", or "" for anything else -- a
+ * maker's own control interface, say.
+ *
+ * ⓘ Media keys (the consumer page) and system keys (sleep, power) count as a
+ * keyboard: they are a keyboard's extra keys, and that is where someone looking
+ * at the row would expect them. */
+static inline const char *identity_type_for_usage(unsigned page, unsigned usage)
+{
+    if (page == 0x01 && (usage == 0x04 || usage == 0x05 || usage == 0x08)) return "controller";
+    if (page == 0x01 && (usage == 0x06 || usage == 0x07 || usage == 0x80)) return "keyboard";
+    if (page == 0x0C) return "keyboard";
+    if (page == 0x01 && (usage == 0x01 || usage == 0x02)) return "mouse";
+    return "";
+}
+
 /* The last element of a sysfs link: "../../../bus/usb/drivers/xpad" is "xpad". */
 static inline void identity_link_leaf(const char *link, char *out, size_t out_len)
 {

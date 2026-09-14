@@ -804,3 +804,25 @@ bool item_is_controller(const logical_device_t *item)
     return false;
 }
 
+/* ⭐ A word for what the device is, for a person reading a row: "controller",
+ * "keyboard", "mouse", or "" when its description names none of those.
+ * rhoquinn8217, 2026-09-13: a row named "Microsoft Xbox 360 for Windows
+ * Controller" that is really a keyboard needs "some hint as to what it is". */
+const char *item_type_label(const logical_device_t *item)
+{
+    if (!item) return "";
+    if (item_is_controller(item)) return "controller";
+    const char *found = "";
+    for (int i = 0; i < item->device_count; ++i) {
+        int idx = item->device_indices[i];
+        if (idx < 0 || idx >= g_scan.count) continue;
+        const device_info_t *dev = &g_scan.devices[idx];
+        const char *type = identity_type_for_usage(dev->usage_page, dev->usage);
+        /* ⓘ A keyboard wins over a mouse sharing the row: the keys are the
+         * part that would type on the PC. */
+        if (strcmp(type, "keyboard") == 0) return "keyboard";
+        if (type[0] != '\0') found = type;
+    }
+    return found;
+}
+

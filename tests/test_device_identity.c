@@ -86,6 +86,21 @@ static void test_pick_serial(void)
     ok(out[0] == '\0', "zeros in both, so none");
 }
 
+static void test_type_for_usage(void)
+{
+    printf("\nwhat an interface says it is\n");
+    ok(strcmp(identity_type_for_usage(0x01, 0x05), "controller") == 0, "a gamepad is a controller");
+    ok(strcmp(identity_type_for_usage(0x01, 0x04), "controller") == 0, "a joystick is a controller");
+    ok(strcmp(identity_type_for_usage(0x01, 0x08), "controller") == 0, "a multi-axis device is a controller");
+    ok(strcmp(identity_type_for_usage(0x01, 0x06), "keyboard") == 0,
+       "a keyboard, like the GameSir's second interface");
+    ok(strcmp(identity_type_for_usage(0x0C, 0x01), "keyboard") == 0, "media keys are a keyboard's");
+    ok(strcmp(identity_type_for_usage(0x01, 0x80), "keyboard") == 0, "system keys are a keyboard's");
+    ok(strcmp(identity_type_for_usage(0x01, 0x02), "mouse") == 0, "a mouse");
+    ok(identity_type_for_usage(0xFF00, 0x01)[0] == '\0', "a maker's own interface is not named");
+    ok(identity_type_for_usage(0, 0)[0] == '\0', "an unread descriptor is not named");
+}
+
 static void test_link_leaf(void)
 {
     char out[32];
@@ -110,6 +125,7 @@ int main(void)
     test_same();
     test_mac_shape();
     test_pick_serial();
+    test_type_for_usage();
     test_link_leaf();
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
