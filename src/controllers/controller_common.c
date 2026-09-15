@@ -255,6 +255,7 @@ struct ctm_controller {
     pthread_cond_t signal_idle;
     int signal_running;      /* a signal thread holds the controller */
     int signal_closed;       /* plug-out has begun: none may start, a running one stops */
+    int signal_motors_done;  /* the running signal has let the motors go (its pulse is over) */
     uint32_t signal_kept;    /* the host's latest value, for the signal to give back */
     pthread_t input_thread;
     int input_thread_started;
@@ -1887,9 +1888,31 @@ bool controller_signal_begin(ctm_controller_t *c)
     if (!c) return false;
     pthread_mutex_lock(&c->signal_mutex);
     const bool ok = !c->signal_running && !c->signal_closed;
-    if (ok) c->signal_running = 1;
+    if (ok) {
+        c->signal_running = 1;
+        c->signal_motors_done = 0;
+    }
     pthread_mutex_unlock(&c->signal_mutex);
     return ok;
+}
+
+void controller_signal_motors_done(ctm_controller_t *c)
+{
+    if (!c) return;
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_motors_done = 1;
+    pthread_mutex_unlock(&c->signal_mutex);
+}
+
+bool controller_signal_motors_held(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    /* ⓘ Once plug-out has begun the pad is going back to the TV, so the host's
+     * motors stay withheld to the end, as its light does. */
+    const bool held = c->signal_closed || (c->signal_running && !c->signal_motors_done);
+    pthread_mutex_unlock(&c->signal_mutex);
+    return held;
 }
 
 bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back)

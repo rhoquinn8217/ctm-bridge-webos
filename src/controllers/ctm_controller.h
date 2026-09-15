@@ -454,14 +454,23 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
  *                                  whether a signal holds the controller -- one
  *                                  is playing, or plug-out has begun.
  *   controller_signal_kept         the host's latest kept value, 0 if none.
+ *   controller_signal_motors_done  the signal thread has sent its pulse's stop
+ *                                  and no longer drives the motors.
+ *   controller_signal_motors_held  whether the host's motor claims are still to
+ *                                  be withheld: a signal is playing and has not
+ *                                  let the motors go, or plug-out has begun.
  *
  * ⓘ What the value means is the type's: a DS4 keeps the lightbar colour the
- * host last set, so its signal can hand the light back as it found it. */
+ * host last set, so its signal can hand the light back as it found it.
+ * ⓘ The motors go back sooner than the light: a pulse is a fraction of a breath,
+ * and a game's rumble should not wait for the colour to finish. */
 bool controller_signal_begin(ctm_controller_t *c);
 bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back);
 bool controller_signal_stopping(ctm_controller_t *c);
 bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value);
 uint32_t controller_signal_kept(ctm_controller_t *c);
+void controller_signal_motors_done(ctm_controller_t *c);
+bool controller_signal_motors_held(ctm_controller_t *c);
 
 /* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
  * to the app's console sink if one is set. When: a type wants to record

@@ -289,7 +289,15 @@ static int ds4_signal_write(ctm_controller_t *c, uint8_t claims, uint8_t motor,
  * ⚠️ A failed write ends the pattern. A pad that refuses one report refuses the
  * rest, and there is nothing to be gained sleeping through them.
  * ⛔ THE PULSE ALWAYS ENDS WITH A STOP, however the pattern ended -- a DS4's
- * motors keep running until a report tells them otherwise. */
+ * motors keep running until a report tells them otherwise.
+ *
+ * ⭐⭐ AND THE MOTORS ARE LET GO WITH THAT STOP, not when the breath ends (found in
+ * review, 2026-09-15). The pulse is 250 ms of a 700 ms breath, and every breath
+ * step used to claim the motors at zero -- with a last stop at the end, and the
+ * host's motor claims withheld throughout -- so a game that started a rumble in
+ * those 450 ms lost it until it next sent one. ➡️ Once the stop is out, later
+ * steps claim the light only, and controller_signal_motors_done() tells the
+ * patcher to pass the host's motors again. */
 static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, uint8_t drives,
                             bool cancellable, ds4_signal_run_t *run)
 {
@@ -300,6 +308,7 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     int last_level = -1, last_motor = -1;
+    bool motors_released = !rumble;
     for (long step = 1;; ++step) {
         const long at = ds4_elapsed_ms(&t0);
         if (at >= s->ms || (!light && at >= DS4_PULSE_MS)) break;
@@ -309,8 +318,10 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
         }
         const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
         const int level = light ? ds4_breath_level(at, s->ms, s->breaths) : 0;
-        if (level != last_level || motor != last_motor) {
-            if (ds4_signal_write(c, drives, (uint8_t)motor,
+        if (level != last_level || (!motors_released && motor != last_motor)) {
+            const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
+                                             (motors_released ? 0 : DS4_OUT_MOTORS));
+            if (ds4_signal_write(c, claims, (uint8_t)motor,
                                  (uint8_t)((s->r * level) / 255),
                                  (uint8_t)((s->g * level) / 255),
                                  (uint8_t)((s->b * level) / 255)) != 0) {
@@ -320,12 +331,20 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
             ++run->sent;
             last_level = level;
             last_motor = motor;
+            if (!motors_released && motor == 0) {
+                /* ⓘ That report was the pulse's stop. */
+                motors_released = true;
+                controller_signal_motors_done(c);
+            }
         }
         ds4_sleep_until(&t0, step * DS4_SIGNAL_STEP_MS);
     }
-    if (rumble) {
+    if (!motors_released) {
+        /* ⓘ Ended inside the pulse -- cut short, a failed write, or a rumble-only
+         * signal, which stops stepping when its pulse is over. */
         if (ds4_signal_write(c, DS4_OUT_MOTORS, 0, 0, 0, 0) == 0) ++run->sent;
         else ++run->failed;
+        controller_signal_motors_done(c);
     }
     run->took_ms = ds4_elapsed_ms(&t0);
 }
@@ -470,7 +489,10 @@ static int ds4_usb_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_
         }
         return 0;
     }
-    const uint8_t taken = ds4_withhold_output(data, len, ds4_signal_drives());
+    /* ⓘ The motors only until the pulse's stop is out -- see ds4_signal_play. */
+    uint8_t hold = ds4_signal_drives();
+    if (!controller_signal_motors_held(c)) hold = (uint8_t)(hold & ~DS4_OUT_MOTORS);
+    const uint8_t taken = ds4_withhold_output(data, len, hold);
     if (taken) {
         if (!withheld) {
             ctl_log(c, "signal: withholding the host's %s while the TV's signal holds the pad",
