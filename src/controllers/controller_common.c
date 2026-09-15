@@ -426,7 +426,13 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
 
         snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
         fd = open(path, O_WRONLY | O_NONBLOCK);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            /* ⭐ Say why, as the microphone opener does. A card that is found
+             * and then silently skipped leaves only "playback open failed",
+             * which cannot tell a busy card from a bus with no room left. */
+            alsa_log("[alsa-open]", "card=%d open failed errno=%d", card, errno);
+            continue;
+        }
         struct snd_pcm_hw_params hw;
         memset(&hw, 0, sizeof(hw));
         /* Init all intervals to full range ("any"), then constrain */
@@ -478,15 +484,26 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
         struct snd_pcm_hw_params hw_unbounded = hw;
         hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
         int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        int hw_errno = (hw_rc < 0) ? errno : 0;
         if (hw_rc < 0) {
             hw = hw_unbounded;
             hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
             if (hw_rc >= 0) {
-                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused, reopened unbounded", card);
+                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
+                         card, hw_errno);
+            } else {
+                hw_errno = errno;
             }
         }
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
+        int prep_errno = (hw_rc >= 0 && prep_rc < 0) ? errno : 0;
         if (hw_rc < 0 || prep_rc < 0) {
+            /* ⭐ The errno is the finding. ENOSPC (28) means the USB bus had no
+             * room left for another audio stream; depending on the kernel that
+             * surfaces here or at the first write, which [alsa-write] logs.
+             * EBUSY (16) means something else holds the card. */
+            alsa_log("[alsa-open]", "card=%d not opened: hw_params rc=%d errno=%d, prepare rc=%d errno=%d",
+                     card, hw_rc, hw_errno, prep_rc, prep_errno);
             close(fd);
             fd = -1;
             continue;
