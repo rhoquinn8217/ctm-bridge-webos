@@ -511,6 +511,12 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c);
 typedef void (*ctm_controller_unplug_cb)(ctm_controller_t *c);
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
 
+/* ⭐ Told when a bridged keyboard presses the streaming overlay's shortcut,
+ * Ctrl+Alt+Shift+O, which its own grab keeps from the app. When: the keyboard's
+ * input thread, so the app hands the work to its main thread. */
+typedef void (*overlay_request_cb)(void);
+void controller_set_overlay_cb(overlay_request_cb cb);
+
 /* Scratch value owned by the controller's TYPE, one per controller. When: a
  * type needs to remember something between reports -- gesture timing, say.
  * Deliberately per-controller: a file-level variable here would be shared by

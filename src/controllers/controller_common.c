@@ -62,6 +62,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 /* Can a node be read as HID, and which input nodes are a device's own. */
 #include "hid_node_checks.inl"
 #include "device_identity.inl"
+#include "kbd_chord.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -284,6 +285,13 @@ struct ctm_controller {
     /* The report descriptor's top level is a joystick, gamepad or multi-axis
      * controller. Set by open_hid; see grab_skips_gamepads. */
     int is_gamepad;
+    /* ⭐ A bridged keyboard's layout, for the overlay's shortcut
+     * (kbd_chord.inl); kbd.present only for a hidraw keyboard it understands.
+     * kbd_chord_down: the shortcut is held right now. kbd_handed_back: the TV's
+     * overlay holds input, so the keyboard is ungrabbed and reaches the TV. */
+    kbd_layout_t kbd;
+    int kbd_chord_down;
+    int kbd_handed_back;
     /* When an input report last went to the host, for ops->keepalive_ms. */
     uint64_t last_input_us;
     /* Per-controller state owned by the type; freed at destroy. */
@@ -689,6 +697,15 @@ static ctm_controller_unplug_cb g_unplug_cb;
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb)
 {
     g_unplug_cb = cb;
+}
+
+/* Told when a bridged keyboard presses the overlay's shortcut; see
+ * controller_set_overlay_cb in ctm_controller.h. */
+static overlay_request_cb g_overlay_cb;
+
+void controller_set_overlay_cb(overlay_request_cb cb)
+{
+    g_overlay_cb = cb;
 }
 
 /* Write a line to the gesture log -- the same file the app's plug-in watcher
@@ -1725,6 +1742,17 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         uint16_t usage_page = 0, usage = 0;
         ctm_hid_top_usage(report_desc, *report_desc_len, &usage_page, &usage, NULL);
         c->is_gamepad = usage_page == 0x01 && (usage == 0x04 || usage == 0x05 || usage == 0x08);
+        /* ⭐ A keyboard gets the overlay's shortcut watched in its reports
+         * (kbd_chord.inl). ⓘ Only a layout it can read: one it cannot has no
+         * shortcut while bridged, and nothing else changes. */
+        if (!c->is_gamepad &&
+            kbd_layout_from_descriptor(report_desc, *report_desc_len, &c->kbd)) {
+            ctl_log(c, "keyboard: overlay shortcut watched (report id %u, modifiers at %u, "
+                       "%u keys at %u, %u bytes)",
+                    (unsigned)c->kbd.report_id, (unsigned)c->kbd.mod_offset,
+                    (unsigned)c->kbd.keys_count, (unsigned)c->kbd.keys_offset,
+                    (unsigned)c->kbd.report_len);
+        }
         derive_report_lengths(report_desc, *report_desc_len, caps);
         if (caps->input_report_len < 1024) caps->input_report_len = 1024;
         if (caps->output_report_len < 1024) caps->output_report_len = 1024;
@@ -1804,6 +1832,38 @@ static void grab_matching_evdev(ctm_controller_t *c)
     ctl_log(c, "evdev: %d node(s) grabbed, matched by %s (phys=\"%s\" uniq=\"%s\")",
             c->evdev_grab_count, evdev_match_name(how_matched),
             c->hid_phys, c->kernel_uniq);
+}
+
+/* ⭐⭐ A BRIDGED KEYBOARD GOES TO THE TV WHILE ITS OVERLAY IS OPEN, AND BACK.
+ * rhoquinn8217, 2026-09-13: the shortcut "hands the keyboard back to the TV
+ * while the overlay is open". The overlay holds input (ctm_input_set_held), so:
+ * the host is sent one report with nothing pressed, the evdev grabs are let go
+ * so the TV reads the keys, and nothing more goes to the host until the hold
+ * ends and the grabs are taken again. ⓘ Keyboards only; the fds stay open.
+ * When: the input thread, on each report and each idle poll. */
+static void kbd_sync_hold(ctm_controller_t *c)
+{
+    if (!c->kbd.present) return;
+    const int held = ctm_input_is_held();
+    if (held == c->kbd_handed_back) return;
+    if (held && c->kbd.report_len > 0 && c->kbd.report_len <= MAX_REPORT) {
+        uint8_t released[MAX_REPORT];
+        memset(released, 0, c->kbd.report_len);
+        if (c->kbd.report_id) released[0] = c->kbd.report_id;
+        (void)c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep,
+                     released, c->kbd.report_len);
+    }
+    int changed = 0;
+    for (int i = 0; i < c->evdev_grab_count; ++i) {
+        if (c->evdev_grabs[i].fd >= 0 &&
+            ioctl(c->evdev_grabs[i].fd, EVIOCGRAB, held ? 0 : 1) == 0) {
+            ++changed;
+        }
+    }
+    c->kbd_handed_back = held;
+    ctl_log(c, "keyboard: %s (%d grab(s) %s)",
+            held ? "handed to the TV while its overlay is open" : "taken back from the TV",
+            changed, held ? "let go" : "taken again");
 }
 
 /* Un-grab + close the evdev nodes. When: each time a session ends. */
@@ -2270,6 +2330,8 @@ static void *input_thread_main(void *arg)
         int pr = poll(pfds, 2, 1);
         if (pr < 0) { if (errno == EINTR) continue; break; }
         if (pr == 0) {
+            /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
+            kbd_sync_hold(c);
             if (send_keepalive(c) != 0) { c->stop = 1; break; }
             continue;
         }
@@ -2296,6 +2358,30 @@ static void *input_thread_main(void *arg)
                 if (c->ops->speaks_ds5 && micsafe_check_report(c->dev.path, buf, (size_t)n)) {
                     ctl_log(c, "mic-safety: shutting down, see stderr");
                     exit(1);
+                }
+                /* ⭐⭐ A BRIDGED KEYBOARD: THE OVERLAY'S SHORTCUT, AND THE TV'S TURN.
+                 * rhoquinn8217, 2026-09-13: Ctrl+Alt+Shift+O opens the streaming
+                 * overlay bridged or not. The grab keeps these keys from the
+                 * app, so the shortcut is found here; the report that completes
+                 * it goes to the host with nothing pressed, and so does every
+                 * report while it is held. While the overlay is open the TV has
+                 * the keyboard and the host gets nothing (kbd_sync_hold). */
+                if (c->kbd.present) {
+                    kbd_sync_hold(c);
+                    if (c->kbd_handed_back) {
+                        continue;
+                    }
+                    if (kbd_overlay_chord_down(&c->kbd, buf, (size_t)n)) {
+                        if (!c->kbd_chord_down) {
+                            c->kbd_chord_down = 1;
+                            ctl_log(c, "keyboard: overlay shortcut pressed%s",
+                                    g_overlay_cb ? "" : " (no app to tell)");
+                            if (g_overlay_cb) g_overlay_cb();
+                        }
+                        kbd_released_report(&c->kbd, buf, (size_t)n);
+                    } else {
+                        c->kbd_chord_down = 0;
+                    }
                 }
                 /* ⭐⭐ LOOK FIRST WHEN INPUT IS HELD, because the copy the host
                  * gets is about to be blanked and the chord lives in the real
@@ -2918,6 +3004,10 @@ static void *session_main(void *arg)
         } else if (c->ops->grab_evdev) {
             grab_matching_evdev(c);
         }
+        /* ⓘ A fresh grab means the host has the keyboard again, whatever the
+         * last session left. */
+        c->kbd_handed_back = 0;
+        c->kbd_chord_down = 0;
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
 
         /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE
