@@ -247,6 +247,15 @@ struct ctm_controller {
     /* ⭐ Until when the relay should NOT let the host claim the lightbar.
      * Monotonic milliseconds; 0 means never. See ds5_patch_output. */
     unsigned long long light_hold_until_ms;
+    /* ⭐⭐ A TYPE'S OWN SIGNAL THREAD, and plug-out's wait for it -- see
+     * controller_signal_begin. Guarded by signal_mutex, which nothing else
+     * takes. ⚠️ The DualSense's connected signal does not use this: its thread
+     * is handed the bare controller and nothing waits for it. */
+    pthread_mutex_t signal_mutex;
+    pthread_cond_t signal_idle;
+    int signal_running;      /* a signal thread holds the controller */
+    int signal_closed;       /* plug-out has begun: none may start, a running one stops */
+    uint32_t signal_kept;    /* the host's latest value, for the signal to give back */
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
@@ -771,6 +780,7 @@ void ctm_mic_capture_set_enabled(int on)
 static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
 int signals_rumble_on(void) { return CTM_SIGNALS_ENABLED && g_sig_rumble; }
+int signals_light_on(void)  { return CTM_SIGNALS_ENABLED && g_sig_light; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
@@ -1857,6 +1867,88 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
     return n == (ssize_t)len ? 0 : -1;
 }
 
+/* --- a type's signal thread, and plug-out's wait for it --------------------
+ *
+ * ⛔⛔ WHY ANY OF THIS EXISTS. The DualSense's connected signal is handed the
+ * bare controller on a detached thread and nothing ever waits for it: it writes
+ * the node and the speaker for up to a couple of seconds, while plug-out closes
+ * both and every caller frees the controller the moment plug-out returns. A
+ * release inside that window writes to a closed or reused descriptor and reads
+ * freed memory. ➡️ These give a type's signal thread the one guarantee it
+ * needs -- plug-out does not close anything until it has finished -- without
+ * changing a line of the DualSense's.
+ *
+ * ⓘ Every touch is under signal_mutex, including the value kept for the
+ * signal to give back: the session thread writes it, the signal thread reads
+ * it, and the check that nothing newer arrived has to be one step with ending
+ * the signal, or a colour the host sets in between is lost. */
+bool controller_signal_begin(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool ok = !c->signal_running && !c->signal_closed;
+    if (ok) c->signal_running = 1;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return ok;
+}
+
+bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back)
+{
+    if (!c) return true;
+    pthread_mutex_lock(&c->signal_mutex);
+    /* ⓘ Once plug-out has begun the host's wishes no longer matter: the
+     * controller is on its way back to the TV. */
+    const bool done = !gave_back || c->signal_closed || c->signal_kept == *gave_back;
+    if (done) {
+        c->signal_running = 0;
+        pthread_cond_broadcast(&c->signal_idle);
+    }
+    pthread_mutex_unlock(&c->signal_mutex);
+    return done;
+}
+
+bool controller_signal_stopping(ctm_controller_t *c)
+{
+    if (!c) return true;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool closed = c->signal_closed != 0;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return closed;
+}
+
+bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    if (keep) c->signal_kept = value;
+    const bool held = c->signal_running || c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return held;
+}
+
+uint32_t controller_signal_kept(ctm_controller_t *c)
+{
+    if (!c) return 0;
+    pthread_mutex_lock(&c->signal_mutex);
+    const uint32_t kept = c->signal_kept;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return kept;
+}
+
+/* Plug-out's half: no signal may start from here on, and one already running
+ * is told to stop and waited for. ⚠️ Unbounded on purpose -- the other choice
+ * is closing the node under a write. A signal thread checks between steps of a
+ * few tens of milliseconds, so the wait is one step long -- or one write, if
+ * the pad is stalling its writes. ⓘ Instant for every type that never begins
+ * a signal, the DualSense included. */
+static void signal_close(ctm_controller_t *c)
+{
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_closed = 1;
+    while (c->signal_running) pthread_cond_wait(&c->signal_idle, &c->signal_mutex);
+    pthread_mutex_unlock(&c->signal_mutex);
+}
+
 /* Remember any audio setting a report claims, so a later reopen can restore it.
  *
  * The audio device can vanish mid-session and be reopened, and a reopen has to
@@ -2553,6 +2645,10 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         pthread_mutex_unlock(&g_cardmatch_lock);
     } else {
         ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
+        /* ⭐ A type with a signal of its own starts it here, where the
+         * DualSense's starts -- a cabled DS4's light and rumble. It returns at
+         * once; the signal plays on its own thread. */
+        if (c->ops->signal_connected) c->ops->signal_connected(c);
     }
 
     c->comp_run = 1;
@@ -2908,6 +3004,8 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     pthread_mutex_init(&c->hid_mutex, NULL);
     pthread_mutex_init(&c->settings_mutex, NULL);
     pthread_mutex_init(&c->status_mutex, NULL);
+    pthread_mutex_init(&c->signal_mutex, NULL);
+    pthread_cond_init(&c->signal_idle, NULL);
     return c;
 }
 
@@ -2955,6 +3053,12 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     snprintf(c->host, sizeof(c->host), "%s", host);
     c->port = port;
     c->stop = 0;
+    /* ⓘ A controller plugged in again after a plug-out may signal again. Left
+     * closed, a type's patcher would withhold the host's claims for good. No
+     * signal thread can be running here: plug-out waited for it. */
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_closed = 0;
+    pthread_mutex_unlock(&c->signal_mutex);
     open_log(c);
 
     pthread_once(&g_enet_once, enet_global_init_once);
@@ -3092,8 +3196,16 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
      * There is no "after" -- the unplug closes the very thing that would
      * play it. ⛔ DualSense only: for anything else this was 2.4 s of
      * DualSense sound reports written to it, and the release waited for them. */
+    /* ⭐ First, no type's signal thread may still be writing: nothing below
+     * may close what it writes to while it does, and two signals on one light
+     * is a flicker. See controller_signal_begin. */
+    signal_close(c);
     if (c->ops->speaks_ds5) {
         feedback_play_unplugging(c, why);
+    } else if (c->ops->signal_unplugging) {
+        /* ⓘ A type's own release signal -- a cabled DS4's. Played here for the
+         * same reason as the DualSense's: afterwards there is no node. */
+        c->ops->signal_unplugging(c, why);
     } else {
         ctl_log(c, "unplugging -- no DualSense signal for this device");
     }
@@ -3202,6 +3314,8 @@ void ctm_controller_destroy(ctm_controller_t *c)
     pthread_mutex_destroy(&c->hid_mutex);
     pthread_mutex_destroy(&c->settings_mutex);
     pthread_mutex_destroy(&c->status_mutex);
+    pthread_mutex_destroy(&c->signal_mutex);
+    pthread_cond_destroy(&c->signal_idle);
     free(c->enum_payload);
     free(c->type_ctx);
     free(c);
@@ -3214,6 +3328,9 @@ static const ctm_controller_ops_t *const k_registry[] = {
     &ctm_controller_ds5_ops,
     &ctm_controller_ds5e_ops,
     &ctm_controller_ds4_ops,
+    /* ⭐ A cabled DS4. ⛔ It must stay ahead of generic, which claims anything
+     * and ran this pad until now: no chord, no blanking, no signal. */
+    &controller_ds4_usb_ops,
     /* ⓘ Before the Bluetooth Xbox type, which only takes hidraw nodes anyway. */
     &controller_xpad_ops,
     &ctm_controller_xbox_ops,

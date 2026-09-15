@@ -40,8 +40,17 @@ typedef struct {
 
 typedef struct ctm_controller ctm_controller_t;   /* opaque; defined in stage 2 */
 
+/* Why a controller is being unplugged. The routes mean different things and
+ * end in the same place, so the caller says which it was: the log records it,
+ * and the controller's own signal can eventually differ. */
+typedef enum {
+    CTM_UNPLUG_REQUESTED = 0,   /* the user asked -- gesture or overlay button */
+    CTM_UNPLUG_SHUTDOWN,        /* everything torn down at once */
+    CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
+} ctm_unplug_reason_t;
+
 typedef struct {
-    const char *kind;   /* "ds5" / "ds4" / "xbox" / "steam_puck" / "generic" */
+    const char *kind;   /* "ds5" / "ds4" / "ds4_usb" / "xbox" / "xpad" / "steam_puck" / "generic" */
 
     /* Behaviour flags preserving each path's proven semantics in the shared
      * pump. DS (worker) = all true; puck, xbox and xpad = all false; generic
@@ -121,6 +130,23 @@ typedef struct {
 
     /* Live UI settings update (DS sliders). NULL => ignored. */
     void (*set_settings)(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
+
+    /* ⭐⭐ A TYPE'S OWN CONFIRMATION SIGNALS, for a controller that does not
+     * speak the DualSense protocol and so gets none of its signals (a cabled
+     * DS4's light and rumble). Called only when speaks_ds5 is false. NULL =>
+     * no signal, which is what every such type had before.
+     *
+     *   signal_connected   the session has started. When: the session thread,
+     *                      at the spot a DualSense's connected signal starts.
+     *                      ⛔ MUST NOT BLOCK -- that thread carries the reports.
+     *                      Play on a thread of your own, and claim the
+     *                      controller for it with controller_signal_begin first.
+     *   signal_unplugging  the controller is being released. When: plug-out,
+     *                      before the session stops and the node closes, and
+     *                      after any signal thread this controller had running
+     *                      has finished. Synchronous: return once it has played. */
+    void (*signal_connected)(ctm_controller_t *c);
+    void (*signal_unplugging)(ctm_controller_t *c, ctm_unplug_reason_t why);
 
     /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
      *
@@ -203,14 +229,8 @@ bool xbox_known_pid(const char *pid);
 
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev);
 int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
-/* Why a controller is being unplugged. The routes mean different things and
- * end in the same place, so the caller says which it was: the log records it,
- * and the controller's own signal can eventually differ. */
-typedef enum {
-    CTM_UNPLUG_REQUESTED = 0,   /* the user asked -- gesture or overlay button */
-    CTM_UNPLUG_SHUTDOWN,        /* everything torn down at once */
-    CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
-} ctm_unplug_reason_t;
+/* ⓘ ctm_unplug_reason_t is declared at the top, beside the opaque type: the
+ * ops table's signal_unplugging takes one. */
 
 void ctm_controller_plug_out(ctm_controller_t *c);
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why);
@@ -353,6 +373,11 @@ bool ctm_controller_light_held(ctm_controller_t *c);
 /* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
  * bridge half of the gesture; this is the half it cannot see. Defaults on. */
 void ctm_gesture_set_enabled(int on);
+/* That same switch, and the DualSense chord's hold in milliseconds, for another
+ * type's unbridge chord (a DS4's). ⭐ Read from ctm_gesture_chord.inl, so there
+ * is one switch and one hold, not a copy of each that can drift. */
+int gesture_chord_enabled(void);
+int gesture_chord_hold_ms(void);
 
 /* ⭐⭐ Hold a bridged controller's INPUT while the TV's own overlay is open.
  *
@@ -388,6 +413,9 @@ void ctm_signals_set_enabled(int light, int rumble, int tone);
 /* Is the felt pulse allowed right now? For a type that confirms with a rumble
  * of its own rather than the DualSense signal. */
 int signals_rumble_on(void);
+/* Is the light allowed right now? The same, for a type that paints a lightbar
+ * of its own. ⓘ Like the pulse's, it answers no when CTM_SIGNALS_ENABLED is off. */
+int signals_light_on(void);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for
  * voice chat through the controller itself. ⓘ Defaults on. */
@@ -401,6 +429,39 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c);
  * type needs to say something to the controller itself rather than pass a host
  * report along. */
 int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t len);
+
+/* ⭐⭐ A TYPE'S CONFIRMATION SIGNAL ON A THREAD OF ITS OWN, and what keeps that
+ * thread from outliving the node it writes to.
+ *
+ * ⛔ THE HAZARD: plug-out closes the node and the caller frees the controller
+ * straight after, so a signal thread still writing when a release lands would
+ * write to a closed -- or already reused -- descriptor and read freed memory.
+ * ➡️ So a signal thread holds the controller from begin to end, and plug-out
+ * waits for it before closing anything.
+ *
+ *   controller_signal_begin        claim the controller for a signal, on the
+ *                                  session thread, before starting the thread.
+ *                                  False when one is still running or plug-out
+ *                                  has begun -- and then start nothing.
+ *   controller_signal_end          the thread's LAST touch of the controller.
+ *                                  With `gave_back`, it ends only if the host
+ *                                  has asked for nothing newer than that value
+ *                                  since; false means give the newer one back
+ *                                  and ask again. NULL ends it regardless.
+ *   controller_signal_stopping     plug-out is waiting: stop at the next step.
+ *   controller_signal_host_report  a host report is passing: keep `value` as
+ *                                  the host's latest when `keep`, and say
+ *                                  whether a signal holds the controller -- one
+ *                                  is playing, or plug-out has begun.
+ *   controller_signal_kept         the host's latest kept value, 0 if none.
+ *
+ * ⓘ What the value means is the type's: a DS4 keeps the lightbar colour the
+ * host last set, so its signal can hand the light back as it found it. */
+bool controller_signal_begin(ctm_controller_t *c);
+bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back);
+bool controller_signal_stopping(ctm_controller_t *c);
+bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value);
+uint32_t controller_signal_kept(ctm_controller_t *c);
 
 /* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
  * to the app's console sink if one is set. When: a type wants to record
@@ -445,6 +506,8 @@ extern const ctm_controller_ops_t ctm_controller_steam_puck_ops;
 extern const ctm_controller_ops_t ctm_controller_generic_ops;
 /* A wired Xbox pad, read through its input node (controller_xpad.c). */
 extern const ctm_controller_ops_t controller_xpad_ops;
+/* A cabled DualShock 4 (controller_ds4.c). */
+extern const ctm_controller_ops_t controller_ds4_usb_ops;
 
 /* Pick ops for a device: specific types first (puck/ds5/ds4/xbox), generic
  * fallback. Never returns NULL. */
