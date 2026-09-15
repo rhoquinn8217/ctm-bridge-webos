@@ -466,8 +466,11 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
          * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
          * **49152 frames = 1.024 SECONDS**, which is exactly the delay
          * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
-         * stayed on time. ⓘ The C1 does not do this, which is why the fault
-         * looked device-specific rather than like an unbounded parameter.
+         * stayed on time.
+         * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
+         * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
+         * the same second-long buffer. The fault was never device-specific; it
+         * was an unbounded parameter on both, and the cap is needed on both.
          *
          * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
          * five times the floor, so there is still room for jitter. ⛔ A tighter
@@ -522,6 +525,14 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
  * at open. Frames are what it counts in, so an arriving chunk is divided by
  * this to get them. */
 #define DS5_AUDIO_CHANNELS 4
+/* The rate the device was configured for at open, so a count of frames can be
+ * read back as a duration. */
+#define DS5_AUDIO_RATE     48000
+/* How long past the audio's own duration to keep offering it before giving up
+ * on a device that will not take it. Bounds a stall; it does not police timing. */
+#define ISO_WRITE_GRACE_US 250000
+
+static uint64_t now_us(void);
 
 /* Write one chunk of arriving PCM to the controller's playback device.
  *
@@ -555,39 +566,78 @@ static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t le
 {
     if (!c || c->alsa_fd < 0 || !pcm || len == 0) return;
 
-    struct snd_xferi xfer;
-    memset(&xfer, 0, sizeof(xfer));
-    xfer.buf = (void *)pcm;
-    xfer.frames = len / (DS5_AUDIO_CHANNELS * sizeof(int16_t));
-    if (xfer.frames == 0) return;
+    const size_t frame_bytes = DS5_AUDIO_CHANNELS * sizeof(int16_t);
+    const unsigned long total = (unsigned long)(len / frame_bytes);
+    if (total == 0) return;
 
-    int rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
-    int first_errno = (rc < 0) ? errno : 0;
+    /* ⭐⭐ KEEP OFFERING IT UNTIL THE DEVICE HAS TAKEN ALL OF IT.
+     *
+     * ⛔ THE FAULT THIS FIXES: one ioctl was assumed to carry the whole buffer.
+     * On a NON-BLOCKING handle it carries only what fits in the ring, reports
+     * how much that was in xfer.result, and the rest was dropped without a
+     * word -- the log even printed the frames ASKED FOR rather than the frames
+     * taken, so a truncated write read as a clean one.
+     *
+     * ⛔ Invisible for as long as the buffer was whatever the kernel chose,
+     * because everything fit in one go. Capping it at 4800 frames (100 ms) to
+     * cure the speaker lag left the confirmation tone -- 17760 frames, 370 ms
+     * -- nearly four times too big for a single write, and it was heard as one
+     * clipped note where there should be two. ⭐ MEASURED on the C1 2026-09-14,
+     * the same pad minutes apart: build 313 chose buffer_frames=49152 and
+     * played two notes; build 333 capped at 4800 and played one.
+     *
+     * ⓘ The streaming path pays nothing for this. The host's chunks are about
+     * 480 frames against a 4800-frame ring, so they are taken whole and the
+     * loop runs exactly once, as the single write did. */
+    const uint64_t deadline_us = now_us()
+                               + (uint64_t)total * 1000000ull / DS5_AUDIO_RATE
+                               + ISO_WRITE_GRACE_US;
+    unsigned long done = 0;
+    int rc = 0;
+    int first_errno = 0;
     int retries = 0;
-    while (rc < 0 && retries < 3) {
-        if (errno == EPIPE) {
+
+    while (done < total) {
+        struct snd_xferi xfer;
+        memset(&xfer, 0, sizeof(xfer));
+        xfer.buf = (void *)(pcm + (size_t)done * frame_bytes);
+        xfer.frames = (unsigned long)(total - done);
+        rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+        if (rc >= 0 && xfer.result > 0) {
+            done += (unsigned long)xfer.result;
+            continue;
+        }
+        /* ⓘ Taking nothing without reporting an error is the ring being full,
+         * which wants exactly the wait EAGAIN asks for. */
+        const int err = (rc < 0) ? errno : EAGAIN;
+        if (first_errno == 0) first_errno = err;
+        if (err == EPIPE) {
             ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-        } else if (errno == EAGAIN) {
+        } else if (err == EAGAIN) {
             struct timespec ts = {0, 1000000};   /* 1 ms for buffer space */
             nanosleep(&ts, NULL);
         } else {
             break;                               /* not recoverable */
         }
-        xfer.result = 0;
-        rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
-        retries++;
+        ++retries;
+        if (now_us() >= deadline_us) break;
     }
 
-    if (rc < 0) c->alsa_consec_fail++; else c->alsa_consec_fail = 0;
+    const int complete = (done == total);
+    if (!complete) c->alsa_consec_fail++; else c->alsa_consec_fail = 0;
     if (first_errno != 0) c->alsa_retry_streak++; else c->alsa_retry_streak = 0;
 
     /* This line is where the fault counts come from -- there is no separate
      * one -- so it is written on anything that went wrong, and periodically
      * when nothing did, to prove the path is still alive. */
     c->alsa_writes++;
-    if (first_errno != 0 || rc < 0 || (c->alsa_writes % 500) == 0) {
-        alsa_log("[alsa-write]", "n=%llu frames=%lu final_rc=%d first_errno=%d retries=%d",
-                 (unsigned long long)c->alsa_writes, (unsigned long)xfer.frames,
+    if (first_errno != 0 || !complete || (c->alsa_writes % 500) == 0) {
+        /* ⭐ BOTH COUNTS, because one of them was the fault. "frames" is what
+         * the audio needed and "wrote" is what the device took; when they
+         * differ the sound was cut short, which this line could not show while
+         * it printed only what was asked for. */
+        alsa_log("[alsa-write]", "n=%llu frames=%lu wrote=%lu final_rc=%d first_errno=%d retries=%d",
+                 (unsigned long long)c->alsa_writes, total, done,
                  rc, first_errno, retries);
     }
 
