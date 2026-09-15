@@ -107,14 +107,20 @@ tv_bridge_worker_settings_t *settings_for_item(const logical_device_t *item)
     return record ? &record->settings : NULL;
 }
 
+static int session_index_locked(const char *key);
+
 void apply_settings_to_session(const logical_device_t *item)
 {
     tv_bridge_worker_settings_t *settings = settings_for_item(item);
     if (!item || !settings) return;
-    int session = session_index_for_key(item->key);
-    if (session >= 0 && g_sessions[session].controller) {
+    /* ⓘ Under the table's lock, and never on a stopping entry: its controller
+     * may be freed by the path tearing it down. */
+    pthread_mutex_lock(&g_sessions_mutex);
+    int session = session_index_locked(item->key);
+    if (session >= 0 && !g_sessions[session].stopping && g_sessions[session].controller) {
         ctm_controller_set_settings(g_sessions[session].controller, settings);
     }
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 int run_child_wait(char *const argv[])
@@ -341,7 +347,7 @@ int send_agent_command(const char *command, char *response, size_t response_len)
     return n > 0 && response && starts_with(response, "OK") ? 0 : -1;
 }
 
-int session_index_for_key(const char *key)
+static int session_index_locked(const char *key)
 {
     for (int i = 0; i < g_session_count; ++i) {
         if (strcmp(g_sessions[i].key, key) == 0) {
@@ -349,6 +355,18 @@ int session_index_for_key(const char *key)
         }
     }
     return -1;
+}
+
+/* ⓘ The index is only good while nothing else edits the table, so callers use
+ * it as "is this bridged" -- a stopping entry counts, since its teardown has not
+ * finished. Anything that reads the entry itself takes g_sessions_mutex and uses
+ * session_index_locked(). */
+int session_index_for_key(const char *key)
+{
+    pthread_mutex_lock(&g_sessions_mutex);
+    const int index = session_index_locked(key);
+    pthread_mutex_unlock(&g_sessions_mutex);
+    return index;
 }
 
 /* TV-pointer session state lives OUTSIDE g_sessions (it is not a controller),
@@ -363,6 +381,7 @@ static int g_tv_pointer_port;
 int next_bridge_port(void)
 {
     int port = CTM_BRIDGE_BASE_PORT;
+    pthread_mutex_lock(&g_sessions_mutex);
     for (;;) {
         bool used = false;
         if (g_tv_pointer_active && port == g_tv_pointer_port) {
@@ -375,6 +394,7 @@ int next_bridge_port(void)
             }
         }
         if (!used) {
+            pthread_mutex_unlock(&g_sessions_mutex);
             return port;
         }
         ++port;
@@ -395,51 +415,101 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
     snprintf(out, out_len, "ctm-%s-%u", kind, ++seq);
 }
 
+/* ⭐⭐ A NEW SESSION, OR A NEW CONTROLLER FOR ONE ALREADY IN THE TABLE.
+ *
+ * ⛔ Refused while the key's previous session is still stopping: taking over
+ * its entry would hand the path tearing it down a controller it never claimed.
+ * The caller tears the new controller down again. ⓘ A replaced controller is
+ * torn down here, after its entry already holds the new one, so no other path
+ * can reach it. */
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port)
 {
-    int index = session_index_for_key(key);
+    pthread_mutex_lock(&g_sessions_mutex);
+    int index = session_index_locked(key);
     if (index >= 0) {
-        if (g_sessions[index].controller && g_sessions[index].controller != controller) {
-            ctm_controller_plug_out_reason(g_sessions[index].controller,
-                                           CTM_UNPLUG_REPLACED);
-            ctm_controller_destroy(g_sessions[index].controller);
+        if (g_sessions[index].stopping) {
+            pthread_mutex_unlock(&g_sessions_mutex);
+            return false;
         }
+        ctm_controller_t *replaced = g_sessions[index].controller != controller
+                                     ? g_sessions[index].controller : NULL;
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
         g_sessions[index].port = port;
         g_sessions[index].controller = controller;
+        pthread_mutex_unlock(&g_sessions_mutex);
+        if (replaced) {
+            ctm_controller_plug_out_reason(replaced, CTM_UNPLUG_REPLACED);
+            ctm_controller_destroy(replaced);
+        }
         return true;
     }
     if (g_session_count >= MAX_SESSIONS) {
+        pthread_mutex_unlock(&g_sessions_mutex);
         return false;
     }
     snprintf(g_sessions[g_session_count].key, sizeof(g_sessions[0].key), "%s", key);
     snprintf(g_sessions[g_session_count].busid, sizeof(g_sessions[0].busid), "%s", busid ? busid : "");
     g_sessions[g_session_count].port = port;
     g_sessions[g_session_count].controller = controller;
+    g_sessions[g_session_count].stopping = false;
     g_session_count++;
+    pthread_mutex_unlock(&g_sessions_mutex);
     return true;
 }
 
+/* Take a stopping entry out of the table and wake anyone waiting for it.
+ * When: holding g_sessions_mutex, after its teardown has finished. */
+static void session_remove_stopped_locked(const char *key)
+{
+    const int index = session_index_locked(key);
+    if (index >= 0 && g_sessions[index].stopping) {
+        memmove(&g_sessions[index], &g_sessions[index + 1],
+                (size_t)(g_session_count - index - 1) * sizeof(g_sessions[0]));
+        g_session_count--;
+    }
+    pthread_cond_broadcast(&g_sessions_cond);
+}
+
+/* ⭐⭐ ONE PATH TEARS A CONTROLLER DOWN, WHICHEVER ASKS FIRST.
+ *
+ * ⛔ THE FAULT: the chord's release worker called this with no lock, the panel's
+ * Release under the app's device lock, and the end of the stream went through
+ * release_local_sessions_on_exit() with no lock at all. The entry stayed in the
+ * table until the plug-out finished -- up to 2.4 s with a release signal -- so a
+ * second path in that window found the same controller, plugged it out again
+ * and destroyed it a second time.
+ * ➡️ Now the entry is CLAIMED under g_sessions_mutex before anything slow
+ * happens. A path that finds it already claimed returns: the claimant finishes
+ * the job, and removes the entry when it has. */
 void stop_session(const char *key)
 {
-    int index = session_index_for_key(key);
-    if (index < 0) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    const int index = session_index_locked(key);
+    if (index < 0 || g_sessions[index].stopping) {
+        pthread_mutex_unlock(&g_sessions_mutex);
         return;
     }
-    if (g_sessions[index].controller) {
-        ctm_controller_plug_out(g_sessions[index].controller);
-        ctm_controller_destroy(g_sessions[index].controller);
-        g_sessions[index].controller = NULL;
+    g_sessions[index].stopping = true;
+    ctm_controller_t *controller = g_sessions[index].controller;
+    char busid[sizeof(g_sessions[0].busid)];
+    snprintf(busid, sizeof(busid), "%s", g_sessions[index].busid);
+    const int port = g_sessions[index].port;
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    if (controller) {
+        ctm_controller_plug_out(controller);
+        ctm_controller_destroy(controller);
     }
-    if (g_sessions[index].port > 0) {
+    if (port > 0) {
         char cmd[160];
         char response[256];
-        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_sessions[index].busid);
+        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
     }
-    memmove(&g_sessions[index], &g_sessions[index + 1],
-            (size_t)(g_session_count - index - 1) * sizeof(g_sessions[0]));
-    g_session_count--;
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    session_remove_stopped_locked(key);
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 /* --- TV pointer -> host mouse (synthetic device; no hidraw) ---------------
@@ -495,18 +565,63 @@ bool ctm_tv_pointer_active(void)
     return g_tv_pointer_active;
 }
 
+/* ⭐ EVERY SESSION, AT THE END OF A STREAM OR OF THE APP.
+ *
+ * ⛔ It walked the table with no lock and plugged out whatever it found, so a
+ * controller the chord's release worker or the panel was already tearing down
+ * was plugged out and destroyed twice (see stop_session). ➡️ It claims every
+ * entry nobody else has, tears those down, and then WAITS for the ones another
+ * path is still finishing, so the stream's end still returns with every release
+ * played. ⓘ No BRIDGE_STOP, as before: the listener sees the connections close.
+ * ⚠️ The wait gives up after 5 s rather than hanging an exit on a teardown that
+ * never finishes. */
 void release_local_sessions_on_exit(void)
 {
     ctm_tv_pointer_unplug();
-    for (int i = 0; i < g_session_count; ++i) {
-        if (g_sessions[i].controller) {
-            ctm_controller_plug_out_reason(g_sessions[i].controller,
-                                           CTM_UNPLUG_SHUTDOWN);
-            ctm_controller_destroy(g_sessions[i].controller);
-            g_sessions[i].controller = NULL;
+
+    char keys[MAX_SESSIONS][sizeof(g_sessions[0].key)];
+    ctm_controller_t *controllers[MAX_SESSIONS];
+    int n = 0;
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < g_session_count && n < MAX_SESSIONS; ++i) {
+        if (g_sessions[i].stopping) {
+            continue;
+        }
+        g_sessions[i].stopping = true;
+        snprintf(keys[n], sizeof(keys[n]), "%s", g_sessions[i].key);
+        controllers[n] = g_sessions[i].controller;
+        ++n;
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    for (int i = 0; i < n; ++i) {
+        if (controllers[i]) {
+            ctm_controller_plug_out_reason(controllers[i], CTM_UNPLUG_SHUTDOWN);
+            ctm_controller_destroy(controllers[i]);
         }
     }
-    g_session_count = 0;
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < n; ++i) {
+        session_remove_stopped_locked(keys[i]);
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 5;
+    for (;;) {
+        int still = 0;
+        for (int i = 0; i < g_session_count; ++i) {
+            if (g_sessions[i].stopping) ++still;
+        }
+        if (still == 0) {
+            break;
+        }
+        if (pthread_cond_timedwait(&g_sessions_cond, &g_sessions_mutex, &deadline) == ETIMEDOUT) {
+            log_append("release on exit: %d session(s) still being torn down after 5 s", still);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 const char *bridge_kind_for_item(const logical_device_t *item)
@@ -674,7 +789,19 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
     }
-    add_session(session_key, busid, controller, port);
+    /* ⛔ Its answer was ignored, which left a controller that could not be
+     * recorded running with nothing able to release it. Now it is torn down
+     * again: the table is full, or the key's previous session is still
+     * stopping (see add_session). */
+    if (!add_session(session_key, busid, controller, port)) {
+        log_append("controller for %s not recorded (table full, or its last session is "
+                   "still stopping); undoing the plug", session_key);
+        ctm_controller_plug_out(controller);
+        ctm_controller_destroy(controller);
+        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
+        (void)send_agent_command(cmd, response, sizeof(response));
+        return false;
+    }
     log_append("controller started kind=%s node=%s busid=%s host=%s port=%d",
                kind, dev->node, busid, g_agent_host, port);
     return true;

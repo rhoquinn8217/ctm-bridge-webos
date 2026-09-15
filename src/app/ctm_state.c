@@ -28,6 +28,8 @@ char g_expanded_keys[MAX_DEVICES][96];
 int g_expanded_key_count;
 bridge_session_t g_sessions[MAX_SESSIONS];
 int g_session_count;
+pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_sessions_cond = PTHREAD_COND_INITIALIZER;
 ui_device_settings_t g_settings[MAX_DEVICES];
 int g_settings_count;
 char g_agent_host[64];

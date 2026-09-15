@@ -116,6 +116,11 @@ typedef struct {
     char busid[32];
     int port;
     ctm_controller_t *controller;   /* owns the in-process bridging session */
+    /* ⭐ Claimed by a path that is tearing it down, under g_sessions_mutex.
+     * The entry stays in the table, so the device still reads as bridged,
+     * until that path has finished and removes it. Every other path leaves a
+     * stopping entry and its controller alone. */
+    bool stopping;
 } bridge_session_t;
 
 typedef struct {
@@ -161,6 +166,14 @@ extern char g_expanded_keys[MAX_DEVICES][96];
 extern int g_expanded_key_count;
 extern bridge_session_t g_sessions[MAX_SESSIONS];
 extern int g_session_count;
+/* ⭐⭐ GUARDS g_sessions AND g_session_count, and a controller's lifetime while
+ * it is read through the table. ⛔ Held only for short looks and edits, never
+ * across a plug-out: a release signal lasts up to 2.4 s, and the panel reads
+ * the table on the UI thread. Broadcast on g_sessions_cond whenever a stopping
+ * entry leaves the table. ⓘ Taken after the app's own device lock, never
+ * before it. */
+extern pthread_mutex_t g_sessions_mutex;
+extern pthread_cond_t g_sessions_cond;
 extern ui_device_settings_t g_settings[MAX_DEVICES];
 extern int g_settings_count;
 extern char g_agent_host[64];
