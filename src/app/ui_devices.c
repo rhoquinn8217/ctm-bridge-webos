@@ -7,6 +7,7 @@
 #include "ctm_state.h"
 #include "ctm_hid.h"   /* read_report_descriptor + interface classification */
 #include "device_identity.inl"
+#include "name_list.inl"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -47,7 +48,10 @@ device_info_t *find_or_add_input_device(scan_result_t *result,
         if (usb_busid && usb_busid[0] && strcmp(dev->usb_busid, usb_busid) == 0) {
             return dev;
         }
-        if (input_name && input_name[0] && strstr(dev->inputs, input_name)) {
+        /* ⛔ The whole name, never a substring (name_list.inl): "input3" was
+         * found inside "input30", and a GameSir's pad vanished into an Xbox One
+         * S pad's entry (U5s, 2026-09-14). */
+        if (input_name && input_name[0] && name_list_has(dev->inputs, input_name)) {
             return dev;
         }
     }

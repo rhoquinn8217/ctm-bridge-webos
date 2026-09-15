@@ -4,6 +4,7 @@
  * without LVGL/SDL. The UI half stays in ui_common.c. No LVGL/SDL here. */
 
 #include "ctm_state.h"
+#include "name_list.inl"
 
 #include <dirent.h>
 #include <errno.h>
@@ -222,12 +223,7 @@ bool valid_bt_address(const char *s)
 
 void append_unique(char *dst, size_t dst_len, const char *value)
 {
-    if (!value || !value[0]) {
-        return;
-    }
-    if (strstr(dst, value)) {
-        return;
-    }
-    size_t used = strlen(dst);
-    snprintf(dst + used, dst_len - used, "%s%s", used ? ", " : "", value);
+    /* ⛔ By whole names (name_list.inl): a substring search skipped "event3"
+     * when "event30" was already in the list. */
+    name_list_add(dst, dst_len, value);
 }
