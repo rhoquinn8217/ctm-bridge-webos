@@ -322,6 +322,40 @@ static void test_breath(void)
        ds4_breath_level(10, 700, 0) == 0, "nonsense asks for dark");
 }
 
+/* ⓘ The pad's MAC as two readers named it: SDL on the C1 (`30-0e-d5-a9-69-51`)
+ * and the U5s's kernel (`30:0e:d5:a9:69:51`). Its reply therefore carries the
+ * six bytes last-first after the id. ⚠️ Bytes 7 on are not measured, so they are
+ * filled with something that must not matter. */
+static void test_pairing_info(void)
+{
+    printf("\nthe MAC out of the pairing-info report\n");
+    uint8_t r[DS4_FEATURE_PAIRING_INFO_LEN];
+    char mac[24];
+    memset(r, 0xee, sizeof(r));
+    r[0] = 0x12;
+    r[1] = 0x51; r[2] = 0x69; r[3] = 0xa9; r[4] = 0xd5; r[5] = 0x0e; r[6] = 0x30;
+    ok(ds4_mac_from_pairing_info(r, sizeof(r), mac, sizeof(mac)) &&
+       strcmp(mac, "30:0e:d5:a9:69:51") == 0, "the pad's own MAC, last byte first, as SDL and the kernel name it");
+
+    ok(!ds4_mac_from_pairing_info(r, 6, mac, sizeof(mac)) && mac[0] == '\0',
+       "a reply too short for six bytes gives nothing");
+    ok(!ds4_mac_from_pairing_info(r, sizeof(r), mac, 17) && mac[0] == '\0',
+       "a buffer too small for the text gives nothing");
+
+    r[0] = 0x09;
+    ok(!ds4_mac_from_pairing_info(r, sizeof(r), mac, sizeof(mac)), "another report's reply is refused");
+
+    memset(r, 0, sizeof(r));
+    r[0] = 0x12;
+    r[9] = 0x42;
+    ok(!ds4_mac_from_pairing_info(r, sizeof(r), mac, sizeof(mac)) && mac[0] == '\0',
+       "six zero bytes are no MAC, whatever follows");
+
+    r[6] = 0x01;
+    ok(ds4_mac_from_pairing_info(r, sizeof(r), mac, sizeof(mac)) &&
+       strcmp(mac, "01:00:00:00:00:00") == 0, "one non-zero byte is enough");
+}
+
 int main(void)
 {
     test_live_report();
@@ -333,6 +367,7 @@ int main(void)
     test_output_report();
     test_host_output();
     test_breath();
+    test_pairing_info();
 
     printf("\n%d check(s), %d failed\n", checks, failed);
     return failed ? 1 : 0;

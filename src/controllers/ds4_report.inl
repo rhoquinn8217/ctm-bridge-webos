@@ -1,6 +1,7 @@
 /* A DualShock 4's reports as bytes: the unbridge chord read out of an input
- * report, that report blanked while the TV's overlay is open, and the output
- * report the TV's own confirmation signal writes.
+ * report, that report blanked while the TV's overlay is open, the output
+ * report the TV's own confirmation signal writes, and the pad's MAC out of its
+ * pairing-info feature report.
  *
  * ⭐⭐ WHERE THE OFFSETS COME FROM. Read three ways and compared before any of
  * this was written: the Linux hid-playstation driver's structs
@@ -46,6 +47,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define DS4_USB_INPUT_ID       0x01
@@ -88,6 +90,12 @@
 #define DS4_OUT_MOTORS         0x01
 #define DS4_OUT_LIGHT          0x02
 #define DS4_OUT_BLINK          0x04
+
+/* Feature report 0x12, the pad's pairing info: its own MAC in [1..6],
+ * little-endian. ⓘ The Linux driver's DS4_FEATURE_REPORT_PAIRING_INFO, 16
+ * bytes counting the id, and SDL's "serial number" report. */
+#define DS4_FEATURE_PAIRING_INFO      0x12
+#define DS4_FEATURE_PAIRING_INFO_LEN  16
 
 /* Is this a whole pad report, and where do its fields sit? `off` is 0 for the
  * USB report and DS4_BT_OFFSET for Bluetooth; `packets` is how many touch
@@ -231,6 +239,39 @@ static uint8_t ds4_withhold_output(uint8_t *data, size_t len, uint8_t bits)
     const uint8_t taken = (uint8_t)(data[DS4_OUT_FLAGS] & bits);
     data[DS4_OUT_FLAGS] = (uint8_t)(data[DS4_OUT_FLAGS] & ~bits);
     return taken;
+}
+
+/* The pad's own MAC, out of its pairing-info reply, as "aa:bb:cc:dd:ee:ff".
+ * False, with `out` left empty, for a reply too short, one echoing another id,
+ * or one whose six MAC bytes are all zero.
+ *
+ * ⭐⭐ WHY A CABLED DS4 NEEDS IT. The kernel fills `uniq` with the MAC only
+ * where its driver asks for this report, and the C1's does not: a cabled DS4
+ * there has `uniq=-`, so the host was told nothing and a config could not link
+ * to the pad. The U5s's kernel reads it, and gave `30:0e:d5:a9:69:51`.
+ *
+ * ⓘ WHERE THE LAYOUT COMES FROM, three ways that agree: the Linux driver copies
+ * [1..6] into the MAC and prints it last byte first; SDL formats [6] down to
+ * [1]; and on the C1 SDL read `30-0e-d5-a9-69-51` for the same pad the U5s's
+ * kernel named `30:0e:d5:a9:69:51`. The same shape as a DualSense's report
+ * 0x09.
+ *
+ * ⛔ A ZERO MAC IS NOT AN ANSWER: every pad that gave one would share it, the
+ * collision the host's config store refuses. */
+static bool ds4_mac_from_pairing_info(const uint8_t *reply, size_t len, char *out, size_t out_len)
+{
+    if (out && out_len) out[0] = '\0';
+    if (!reply || !out || out_len < 18 || len < 7 || reply[0] != DS4_FEATURE_PAIRING_INFO) {
+        return false;
+    }
+    bool any = false;
+    for (size_t i = 1; i <= 6; ++i) {
+        if (reply[i]) any = true;
+    }
+    if (!any) return false;
+    snprintf(out, out_len, "%02x:%02x:%02x:%02x:%02x:%02x",
+             reply[6], reply[5], reply[4], reply[3], reply[2], reply[1]);
+    return true;
 }
 
 /* The lightbar's brightness `at_ms` into a signal of `breaths` rises and falls

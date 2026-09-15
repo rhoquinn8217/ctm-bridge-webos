@@ -15,9 +15,13 @@
 #include "ctm_controller.h"
 #include "ds4_report.inl"
 
+#include <errno.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
+
+#include <linux/hidraw.h>
 
 /* matches: claim the DualShock 4 (either PID) over BT. When: classification. */
 static bool ds4_matches(const ctm_controller_dev_t *dev)
@@ -504,6 +508,38 @@ static int ds4_usb_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_
     return 0;
 }
 
+/* read_pad_mac: the pad's own MAC, from its pairing-info feature report 0x12.
+ * When: opening the node on a cable, before the identity is chosen.
+ *
+ * ⭐ WHY. The C1's kernel leaves a cabled DS4's `uniq` empty, so the host was
+ * told nothing and a config could not follow the pad. SDL on the same TV reads
+ * this report and gets the MAC, so the pad answers it -- and a pad that
+ * answers costs no 5 s wait.
+ *
+ * ⓘ The whole reply is logged, as the DualSense's 0x09 probe logs its own, so a
+ * pad that answers in another shape is seen rather than misread. */
+static bool ds4_usb_read_pad_mac(ctm_controller_t *c, int fd, char *out, size_t out_len)
+{
+    uint8_t feature[DS4_FEATURE_PAIRING_INFO_LEN];
+    memset(feature, 0, sizeof(feature));
+    feature[0] = DS4_FEATURE_PAIRING_INFO;
+    if (ioctl(fd, HIDIOCGFEATURE(sizeof(feature)), feature) < 0) {
+        ctl_log(c, "probe: feature 0x12 (pairing info) failed errno=%d", errno);
+        return false;
+    }
+    char hex[3 * sizeof(feature) + 1];
+    int o = 0;
+    for (size_t i = 0; i < sizeof(feature); ++i) {
+        o += snprintf(hex + o, sizeof(hex) - (size_t)o, "%02x ", feature[i]);
+    }
+    ctl_log(c, "probe: feature 0x12 (pairing info) = %s", hex);
+    if (!ds4_mac_from_pairing_info(feature, sizeof(feature), out, out_len)) {
+        ctl_log(c, "identity: 0x12 gave no usable MAC -- leaving the identity empty");
+        return false;
+    }
+    return true;
+}
+
 /* ⭐⭐ A CABLED DUALSHOCK 4. Until now it matched nothing specific and fell
  * through to generic: relayed verbatim, with no chord, no blanking under the
  * overlay and no signal.
@@ -529,6 +565,7 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .request_bt_mode = false,
     .speaks_ds5 = false,
     .matches = ds4_usb_matches,
+    .read_pad_mac = ds4_usb_read_pad_mac,
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_usb_patch_output,

@@ -104,6 +104,16 @@ typedef struct {
      * handshake, puck lizard-mode exit). NULL => none. */
     int (*on_plug_init)(ctm_controller_t *c, ctm_transport_t *t);
 
+    /* ⭐ A TYPE'S OWN READ OF ITS PAD'S MAC ON A CABLE, for a type that does not
+     * speak the DualSense protocol (a DS4's feature report 0x12; a DualSense's
+     * 0x09 is asked through speaks_ds5). Fill `out` with "aa:bb:cc:dd:ee:ff" and
+     * return true, or return false when the pad gave nothing usable. The result
+     * becomes this pad's identity, as the DualSense's does. NULL => none.
+     * When: opening the node, USB only, before the identity the host links a
+     * config on is chosen. ⛔ Set it only for a pad that answers: a device that
+     * ignores a feature request holds the open for the kernel's 5 s timeout. */
+    bool (*read_pad_mac)(ctm_controller_t *c, int fd, char *out, size_t out_len);
+
     /* Peek at each input report as it is relayed, before it goes to the host.
      * Read-only: the report is forwarded unchanged either way. NULL => no peek.
      * When: the controller's own input thread, once per report. Must not block

@@ -1558,6 +1558,32 @@ static void ds_mac_from_pairing_info(const uint8_t *reply, char *out, size_t out
              reply[6], reply[5], reply[4], reply[3], reply[2], reply[1]);
 }
 
+/* Take a MAC the pad reported about itself as its identity. `source` names the
+ * report, for the log. ⓘ One copy of these rules for every pad that can say its
+ * own MAC -- a DualSense's 0x09 below, and a type's read_pad_mac (a DS4's 0x12);
+ * the log lines are the ones the DualSense's probe always wrote. */
+static void adopt_pad_mac(ctm_controller_t *c, const char *pad, const char *source)
+{
+    /* ⭐⭐ THE PAD'S OWN MAC IS WHAT THE HOST LINKS A CONFIG ON, even where the
+     * kernel supplied something else (rhoquinn8217, 2026-09-13). ⛔ Through a
+     * DS5dongle on the C1 the kernel's uniq was the DONGLE's serial, so a config
+     * linked on it followed the dongle to whichever pad was plugged in next.
+     * ⓘ On the U5s the kernel reads 0x09 itself, and the two agree. */
+    if (c->dev.serial[0] != '\0' && !identity_same(c->dev.serial, pad)) {
+        ctl_log(c, "identity: MAC %s from %s replaces %s as this pad's identity",
+                pad, source, c->dev.serial);
+    }
+    snprintf(c->dev.serial, sizeof(c->dev.serial), "%s", pad);
+
+    /* ⭐ dev.mac itself is only FILLED, never replaced. Where the kernel supplied
+     * a value it stays -- the log file is named from it, and replacing it would
+     * make this change capable of breaking a set that already worked. */
+    if (c->dev.mac[0] != '\0') return;
+    snprintf(c->dev.mac, sizeof(c->dev.mac), "%s", pad);
+    ctl_log(c, "identity: MAC %s taken from %s (the kernel gave none)",
+            c->dev.mac, source);
+}
+
 static void probe_pairing_info(ctm_controller_t *c, int fd)
 {
     uint8_t feature[20];
@@ -1586,25 +1612,7 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
 
     char pad[24];
     ds_mac_from_pairing_info(feature, pad, sizeof(pad));
-
-    /* ⭐⭐ THE PAD'S OWN MAC IS WHAT THE HOST LINKS A CONFIG ON, even where the
-     * kernel supplied something else (rhoquinn8217, 2026-09-13). ⛔ Through a
-     * DS5dongle on the C1 the kernel's uniq was the DONGLE's serial, so a config
-     * linked on it followed the dongle to whichever pad was plugged in next.
-     * ⓘ On the U5s the kernel reads 0x09 itself, and the two agree. */
-    if (c->dev.serial[0] != '\0' && !identity_same(c->dev.serial, pad)) {
-        ctl_log(c, "identity: MAC %s from feature 0x09 replaces %s as this pad's identity",
-                pad, c->dev.serial);
-    }
-    snprintf(c->dev.serial, sizeof(c->dev.serial), "%s", pad);
-
-    /* ⭐ dev.mac itself is only FILLED, never replaced. Where the kernel supplied
-     * a value it stays -- the log file is named from it, and replacing it would
-     * make this change capable of breaking a set that already worked. */
-    if (c->dev.mac[0] != '\0') return;
-    snprintf(c->dev.mac, sizeof(c->dev.mac), "%s", pad);
-    ctl_log(c, "identity: MAC %s taken from feature 0x09 (the kernel gave none)",
-            c->dev.mac);
+    adopt_pad_mac(c, pad, "feature 0x09");
 }
 
 /* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
@@ -1686,6 +1694,13 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
      * device that does not answer 0x09 makes the kernel wait out its 5 s
      * control-transfer timeout: measured on a keyboard dongle, errno=110. */
     if (c->ops->speaks_ds5 && strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
+    /* ⭐ And a type that reads its pad's MAC its own way (a cabled DS4, whose
+     * kernel on the C1 leaves uniq empty). ⓘ Only a type that sets the hook is
+     * asked, for the same 5 s reason. */
+    else if (c->ops->read_pad_mac && strcmp(ctm_controller_bus(c), "USB") == 0) {
+        char pad[24];
+        if (c->ops->read_pad_mac(c, fd, pad, sizeof(pad))) adopt_pad_mac(c, pad, "the pad's pairing report");
+    }
 
     /* ⭐⭐ THE IDENTITY THE HOST LINKS A CONFIG ON (device_identity.inl, decided
      * 2026-09-13). A DualSense is its own MAC: on a cable the probe above has
