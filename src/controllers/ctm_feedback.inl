@@ -356,8 +356,13 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * brightness that moment deserves rather than shifting the whole shape.
      *
      * ⚠️ Restores nothing at the end. The claim is released by writing the last
-     * frame at zero, and whoever owns the light next writes over it -- on a
-     * handback that is the app's player colour, a moment later. */
+     * frame, and whoever owns the light next writes over it -- on a handback
+     * and a refusal that is the app's player colour, a moment later.
+     * ⭐⭐ A BRIDGE ENDS GREEN, NOT DARK (rhoquinn8217, 2026-09-15): "have the
+     * last green flash persist rather than fade off. That way it has color
+     * incase nothing else changes after it bridges and isn't left off." A pad
+     * whose host sets no colour read as not connected. The host's own colour
+     * replaces the green whenever it sends one. */
     if (c && c->alsa_fd >= 0 && wait_ms > 0 && ctm_sig_light_on()) {
         const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
         const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
@@ -376,7 +381,11 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
             struct timespec st = {0, step_ms * 1000000L};
             nanosleep(&st, NULL);
         }
-        feedback_paint_wired(c, 0x00, 0x00, 0x00);
+        if (pattern == BTSIG_HANDING_OVER) {
+            feedback_paint_wired(c, 0x00, 0xff, 0x00);
+        } else {
+            feedback_paint_wired(c, 0x00, 0x00, 0x00);
+        }
     } else {
         nanosleep(&ts, NULL);
     }

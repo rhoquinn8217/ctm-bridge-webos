@@ -361,8 +361,11 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
  *
  * ⭐⭐ THEN THE LIGHT GOES BACK AS THE HOST LEFT IT. Its colour claims were
  * withheld while the breath played, and a host that sets its colour once and
- * never again would otherwise leave the pad dark for the whole session. Dark is
- * right only when the host has set nothing.
+ * never again would otherwise leave the pad dark for the whole session.
+ * ⭐ AND GREEN, NOT DARK, WHEN THE HOST HAS SET NOTHING (rhoquinn8217,
+ * 2026-09-15): "have the last green flash persist rather than fade off. That
+ * way it has color incase nothing else changes after it bridges and isn't left
+ * off." A dark pad read as not connected. The host's first colour replaces it.
  *
  * ⚠️ AND IT ASKS AGAIN UNTIL NOTHING NEWER HAS ARRIVED. A colour the host sets
  * while this one is being written is withheld too, so the signal only lets go
@@ -384,14 +387,14 @@ static void *ds4_connected_thread(void *arg)
         if ((drives & DS4_OUT_LIGHT) && !controller_signal_stopping(c)) {
             const bool seen = (kept & DS4_KEPT_COLOUR) != 0;
             const int rc = ds4_signal_write(c, DS4_OUT_LIGHT, 0,
-                                            seen ? (uint8_t)(kept >> 16) : 0,
-                                            seen ? (uint8_t)(kept >> 8) : 0,
-                                            seen ? (uint8_t)kept : 0);
+                                            seen ? (uint8_t)(kept >> 16) : k_ds4_connected.r,
+                                            seen ? (uint8_t)(kept >> 8) : k_ds4_connected.g,
+                                            seen ? (uint8_t)kept : k_ds4_connected.b);
             if (seen) {
                 ctl_log(c, "signal: connected -- light handed back as the host's #%06x%s",
                         (unsigned)(kept & 0xffffffu), rc == 0 ? "" : " (write failed)");
             } else {
-                ctl_log(c, "signal: connected -- light left dark, the host has set no colour%s",
+                ctl_log(c, "signal: connected -- light left green, the host has set no colour%s",
                         rc == 0 ? "" : " (write failed)");
             }
         }
