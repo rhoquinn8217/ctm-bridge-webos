@@ -32,7 +32,8 @@ typedef struct {
     char mac[64];     /* ⚠️ the kernel's uniq, which is not always a MAC */
     /* ⭐ The identity the host links a config on (device_identity.inl): uniq, or
      * the USB serial where no driver filled uniq. A DualSense replaces it with
-     * its own MAC once its session has asked. */
+     * its own MAC once its session has asked, and so does a cabled DS4 (its
+     * type's read_pad_mac). */
     char serial[64];
     /* The kernel driver bound to the device, e.g. "xpad"; empty if unknown. */
     char driver[32];
