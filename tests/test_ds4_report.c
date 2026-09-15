@@ -322,20 +322,21 @@ static void test_breath(void)
        ds4_breath_level(10, 700, 0) == 0, "nonsense asks for dark");
 }
 
-/* ⓘ The pad's MAC as two readers named it: SDL on the C1 (`30-0e-d5-a9-69-51`)
- * and the U5s's kernel (`30:0e:d5:a9:69:51`). Its reply therefore carries the
- * six bytes last-first after the id. ⚠️ Bytes 7 on are not measured, so they are
- * filled with something that must not matter. */
+/* ⭐ READ OFF THE PAD: its feature report 0x12, whole, on the C1 (2026-09-15).
+ * SDL on the C1 names this pad `30-0e-d5-a9-69-51`, and the U5s's kernel
+ * `30:0e:d5:a9:69:51`. */
+static const uint8_t k_live_pairing[DS4_FEATURE_PAIRING_INFO_LEN] = {
+    0x12, 0x51, 0x69, 0xa9, 0xd5, 0x0e, 0x30, 0x08, 0x25, 0x00, 0x7e, 0x8f, 0xd1, 0x7e, 0x61, 0xe8,
+};
+
 static void test_pairing_info(void)
 {
     printf("\nthe MAC out of the pairing-info report\n");
     uint8_t r[DS4_FEATURE_PAIRING_INFO_LEN];
     char mac[24];
-    memset(r, 0xee, sizeof(r));
-    r[0] = 0x12;
-    r[1] = 0x51; r[2] = 0x69; r[3] = 0xa9; r[4] = 0xd5; r[5] = 0x0e; r[6] = 0x30;
+    memcpy(r, k_live_pairing, sizeof(r));
     ok(ds4_mac_from_pairing_info(r, sizeof(r), mac, sizeof(mac)) &&
-       strcmp(mac, "30:0e:d5:a9:69:51") == 0, "the pad's own MAC, last byte first, as SDL and the kernel name it");
+       strcmp(mac, "30:0e:d5:a9:69:51") == 0, "the live reply gives the pad's own MAC, as SDL and the kernel name it");
 
     ok(!ds4_mac_from_pairing_info(r, 6, mac, sizeof(mac)) && mac[0] == '\0',
        "a reply too short for six bytes gives nothing");

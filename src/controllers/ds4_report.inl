@@ -253,8 +253,14 @@ static uint8_t ds4_withhold_output(uint8_t *data, size_t len, uint8_t bits)
  * ⓘ WHERE THE LAYOUT COMES FROM, three ways that agree: the Linux driver copies
  * [1..6] into the MAC and prints it last byte first; SDL formats [6] down to
  * [1]; and on the C1 SDL read `30-0e-d5-a9-69-51` for the same pad the U5s's
- * kernel named `30:0e:d5:a9:69:51`. The same shape as a DualSense's report
- * 0x09.
+ * kernel named `30:0e:d5:a9:69:51`.
+ * ✅ AND MEASURED on the C1, 2026-09-15, with a one-off probe on that pad:
+ *
+ *     12 51 69 a9 d5 0e 30  08 25 00  7e 8f d1 7e 61 e8
+ *
+ * The id, the MAC last byte first, then `08 25 00` -- the same constant a
+ * DualSense's report 0x09 carries -- and six bytes that are most likely the
+ * paired host's address, as they are on a DualSense. Only [1..6] is parsed.
  *
  * ⛔ A ZERO MAC IS NOT AN ANSWER: every pad that gave one would share it, the
  * collision the host's config store refuses. */
