@@ -390,7 +390,16 @@ const ctm_controller_ops_t controller_xpad_ops = {
     .read_input = xpad_read_input,
     .current_report = xpad_current_report,
     .write_output = xpad_write_output,
-    /* ⓘ Well inside the listener's 15 s, and a 17-byte report a second costs
-     * nothing on a link carrying video. */
-    .keepalive_ms = 1000,
+    /* ⭐⭐ THE PRESENT STATE EVERY 4 MS, AS A DUALSENSE STREAMS ITS OWN
+     * (rhoquinn8217, 2026-09-15, a GameSir on the C3: in stick-to-mouse the
+     * left stick scrolled in one or two jumps, then stopped while still held).
+     *
+     * ⛔ This was 1000. An input node says nothing while nothing changes, so a
+     * stick held still at full push sent one report a second, and the
+     * listener's cursor, scroll and turbo advance only when a report arrives,
+     * by at most 50 ms each. A hidraw pad never had the problem: it reports
+     * 250 times a second whether anything moves or not.
+     * ⓘ 17 bytes 250 times a second, where a DualSense already sends 64. Still
+     * well inside the listener's 15 s silence limit. */
+    .keepalive_ms = 4,
 };

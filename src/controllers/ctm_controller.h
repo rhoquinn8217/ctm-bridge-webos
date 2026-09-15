@@ -177,8 +177,11 @@ typedef struct {
      *   current_report  the report for the present state, with no I/O. Sent
      *                   at once when a session starts and again whenever
      *                   `keepalive_ms` pass with nothing sent, because an
-     *                   input node is silent while nothing moves and the
-     *                   listener drops a pad that says nothing for 15 s.
+     *                   input node is silent while nothing moves. ⛔ Not only
+     *                   for the listener's 15 s silence limit: its cursor,
+     *                   scroll and turbo advance when a report arrives, so a
+     *                   pad needs the steady stream a hidraw pad sends (every
+     *                   4 ms for an Xbox pad).
      *   write_output    act on a report from the host (rumble); 0 or -1. */
     int (*preflight)(const ctm_controller_dev_t *dev);
     int (*open_input)(ctm_controller_t *c, const ctm_controller_dev_t *dev,
