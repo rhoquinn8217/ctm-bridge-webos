@@ -266,47 +266,14 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
 
-/* T-120: the Bluetooth confirmation tone, gated separately so the layered
- * rebuild in aurora can add it last. Bluetooth-only by construction -- it is
- * read inside the alsa_fd < 0 branch of feedback_play(). Wired is untouched.
- * The matching gates for gesture, light and rumble live in aurora's
- * ctm_bridge_gesture.c. */
-/* ⚠️ NAMED BT_LAYER_TONE UNTIL STEP 5, WHICH WAS MISLEADING. It gates the
- * core's WHOLE Bluetooth signal -- light, sound and feel together. On Bluetooth
- * the controller's speaker and its haptics are the same audio device and the
- * lightbar rides the same report, so the three arrive as one stream and cannot
- * be gated apart. The old name cost a step to notice: BT_LAYER_RUMBLE could do
- * nothing while this was off, and nobody expected a "tone" switch to silence a
- * rumble. */
-#define BT_LAYER_CORE_SIGNAL 1
-
-/* ⭐⭐ T-120: WHAT THE BRIDGE WRITES TO A CONTROLLER WHILE IT IS BRIDGED.
- *
- * The BT_LAYER_ gates above cover the CONFIRMATION signals -- the things that
- * happen once, at the moment of bridging. These cover the ongoing ones: what
- * the output patcher puts into every report the host sends.
- *
- * ⛔ Separate on purpose. A confirmation that costs five seconds is a bad
- * bridge; an ongoing write that costs anything is a bad SESSION, and the two
- * fail in ways that look nothing alike.
- *
- * ⚠️ THESE ARE NOT BLUETOOTH-ONLY. The patcher runs on the Bluetooth report
- * format, so a cable never reaches it -- but that is a property of the report,
- * not of a check, and it is worth knowing the difference. A wired controller
- * gets its audio through ALSA and its haptics inside the same reports.
- *
- * ⓘ All 1: nothing is switched off. They exist so a layer can be removed for
- * one build and put back, the way the confirmation gates were.
- *
- *   BT_FEAT_AUDIO    block 0x90 -- volumes, routing, echo cancellation
- *                    and 0x93-0x96 -- the speaker's own audio frames
- *   BT_FEAT_LATENCY  block 0x91 -- the audio buffer, host-owned
- *   BT_FEAT_HAPTICS  block 0x92 -- haptics gain
- *
- * ⛔ THE LIGHTBAR HAS NO GATE HERE, and that is not an oversight: the core
- * writes no lightbar at all. It belongs to the player colour from the app side
- * and to the Bluetooth confirmation signal, which BT_LAYER_LIGHT already
- * covers. */
+/* ⓘ T-120 REBUILT THE BLUETOOTH PATH ONE LAYER AT A TIME, behind switches: the
+ * core's Bluetooth confirmation signal (BT_LAYER_CORE_SIGNAL) and what the
+ * output patcher writes into a bridged pad's reports -- block 0x90 volumes,
+ * routing and the speaker's audio frames 0x93-0x96 (BT_FEAT_AUDIO), 0x91 the
+ * audio buffer (BT_FEAT_LATENCY), 0x92 haptics gain (BT_FEAT_HAPTICS). Every
+ * layer came back on, the switches stayed pinned to 1, and they were removed
+ * with the branches they guarded on 2026-09-15. The user's own settings are
+ * what decide those writes now. */
 /* ⭐ How long after a session opens the relay withholds the host's lightbar
  * claim, so the app's confirmation pattern has the light to itself.
  *
@@ -314,10 +281,6 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * game would notice. ⛔ Not a policy about who owns the lightbar -- the host
  * does. This is the handover. */
 #define LIGHT_HOLD_MS    1400
-
-#define BT_FEAT_AUDIO    1
-#define BT_FEAT_LATENCY  1
-#define BT_FEAT_HAPTICS  1
 
 /* Signal a REFUSED plug, with no session behind it.
  *
