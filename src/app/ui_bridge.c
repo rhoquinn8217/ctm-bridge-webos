@@ -70,7 +70,7 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
-    } else if (strcmp(kind, "ds4") == 0) {
+    } else if (strncmp(kind, "ds4", 3) == 0) {   /* ds4 and ds4_usb alike */
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
         /* ~75% of the 0x4F raw ceiling — the pad persists whatever volume was
@@ -516,8 +516,19 @@ const char *bridge_kind_for_item(const logical_device_t *item)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5_usb" : "ds5";
     if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0df2") == 0)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5e_usb" : "ds5e";
+    /* ⭐⭐ THE BUS DECIDES, as it does for the DualSense arms above.
+     *
+     * ⛔ THE FAULT THIS FIXES: this arm answered "ds4" whatever the bus, so a
+     * CABLED DS4 was handed to the host as a Bluetooth one. The host then loads
+     * the map that reads Bluetooth report 0x11 while the pad sends 0x01, so the
+     * pad bridged, showed PLUGGED, and did nothing in the game.
+     *
+     * ⓘ A wired DS4 needs no report rewriting: its own 0x01 report is already
+     * exactly what the virtual wired DS4 emits, so the host side is a
+     * pass-through map, the way the wired DualSense's is. */
     if (strcmp(item->vid, "054c") == 0 &&
-        (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0)) return "ds4";
+        (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0))
+        return strcmp(bus_label(item->bus), "USB") == 0 ? "ds4_usb" : "ds4";
     /* ⭐ Anything the Xbox driver runs reaches the host as an Xbox pad, whoever
      * made it -- the TV reads them all the same way (controller_xpad.c). */
     if (strcmp(item->driver, "xpad") == 0) return "xbox";

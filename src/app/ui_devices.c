@@ -907,7 +907,11 @@ bool item_is_controller(const logical_device_t *item)
 {
     if (!item) return false;
     const char *kind = bridge_kind_for_item(item);
-    if (kind && (strncmp(kind, "ds5", 3) == 0 || strcmp(kind, "ds4") == 0 ||
+    /* ⚠️ PREFIXES, NOT EXACT NAMES. Each family has a wired kind as well as a
+     * Bluetooth one -- ds4 and ds4_usb, ds5 through ds5e_usb -- and an exact
+     * match on the Bluetooth name drops the cabled pad out of being a
+     * controller at all, taking its type label and its auto-bridge mark with it. */
+    if (kind && (strncmp(kind, "ds5", 3) == 0 || strncmp(kind, "ds4", 3) == 0 ||
                  strcmp(kind, "xbox") == 0)) {
         return true;
     }

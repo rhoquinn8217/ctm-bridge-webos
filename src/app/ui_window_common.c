@@ -262,7 +262,7 @@ void update_details(void)
     const char *kind = bridge_kind_for_item(item);
     if (strcmp(kind, "ds5") == 0 && settings) {
         build_ds5_detail(g_detail_panel, item, settings, width);
-    } else if (strcmp(kind, "ds4") == 0 && settings) {
+    } else if (strncmp(kind, "ds4", 3) == 0 && settings) {   /* ds4 and ds4_usb */
         build_ds4_detail(g_detail_panel, item, settings, width);
     } else if (strcmp(kind, "xbox") == 0) {
         build_xbox_detail(g_detail_panel, item, settings, width);
