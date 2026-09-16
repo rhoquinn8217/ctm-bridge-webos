@@ -263,7 +263,17 @@ bool agent_is_known(void)
 
 int send_agent_command(const char *command, char *response, size_t response_len)
 {
-    if (!agent_is_known()) {
+    /* ⛔⛔ THE ADDRESS, NOT THE ONLINE FLAG. This is what the probe uses to ask
+     * whether the agent is there, so requiring `online` here latches the answer:
+     * the listener goes away, the flag goes false, and every command refuses --
+     * including the probe that would have noticed it came back. The TV then
+     * says "listener offline" until a stream start re-sets the address.
+     *
+     * ⓘ Introduced and found the same evening, 2026-09-15, while tidying the
+     * broadcast discovery away. agent_is_known() is right for the UI and the
+     * plug paths, which want "known AND answering"; this one wants "do we know
+     * where to ask". */
+    if (!g_agent_host[0]) {
         return -1;
     }
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
