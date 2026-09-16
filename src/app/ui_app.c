@@ -74,12 +74,12 @@ static void update_row_styles(void)
     }
 }
 
-static void discovery_timer_cb(lv_timer_t *timer)
+static void agent_online_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     bool old = g_agent_online;
-    if (discover_agent_once() && !old) {
-        log_append("Windows agent found at %s:%d", g_agent_host, g_agent_port);
+    if (agent_is_known() && !old) {
+        log_append("the agent at %s:%d is answering", g_agent_host, g_agent_port);
     }
 }
 
@@ -1030,9 +1030,6 @@ static void status_timer_cb(lv_timer_t *timer)
 
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
-
     /* Own the remote's Back key (suppress the system "exit app" prompt and
      * the hold-to-exit): LG's system SDL honors these access-policy hints —
      * verified present in the C2's /usr/lib/libSDL2-2.0.so.0. Back then
@@ -1089,10 +1086,29 @@ int main(int argc, char **argv)
     } else {
         log_append("stopSniff worker start failed");
     }
-    discover_agent_once();
+    /* ⭐⭐ THE AGENT'S ADDRESS IS GIVEN TO THIS TOOL, not searched for
+     * (2026-09-15). The broadcast probe it used to lean on is gone: the app
+     * could never reach that path, since a stream sets the address as it
+     * starts, and keeping a probe alive for one dev tool is exactly the kind
+     * of code that reads as live and is not.
+     *
+     *   ui_app <host> [port]        or   CTM_AGENT_HOST=... CTM_AGENT_PORT=...
+     *
+     * ⓘ With no address the interface still runs: it lists devices and says so,
+     * and every bridge refuses until one is set. */
+    {
+        const char *agent_host = argc > 1 ? argv[1] : getenv("CTM_AGENT_HOST");
+        const char *agent_port = argc > 2 ? argv[2] : getenv("CTM_AGENT_PORT");
+        if (agent_host && agent_host[0]) {
+            ctm_bridge_set_agent_host(agent_host, agent_port ? atoi(agent_port) : 0);
+            log_append("agent address given: %s:%d", g_agent_host, g_agent_port);
+        } else {
+            log_append("no agent address: pass one as the first argument, or in CTM_AGENT_HOST");
+        }
+    }
     refresh_devices();
     g_refresh_timer = lv_timer_create(refresh_timer_cb, 2000, NULL);
-    lv_timer_create(discovery_timer_cb, 2000, NULL);
+    lv_timer_create(agent_online_timer_cb, 2000, NULL);
     lv_timer_create(log_flush_timer_cb, 250, NULL);
     ctm_controller_set_log_sink(ui_controller_log);
     g_monitor = ctm_monitor_start(ui_monitor_cb, NULL);

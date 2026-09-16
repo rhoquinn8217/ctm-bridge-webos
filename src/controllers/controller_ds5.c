@@ -392,24 +392,24 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
 
-        /* ⭐ Withhold the host's lightbar claim for the moment after a bridge,
-         * while the app draws its confirmation. See light_hold_until_ms. */
-        if (block_id == 0x90 && payload_len >= 2 && ctm_controller_light_held(c)) {
-            if (data[pos + 3] & 0x04) {              /* lightbar control */
-                data[pos + 3] &= (uint8_t)~0x04;
-                patched = 1;
-                /* ⭐ COUNTED, because "the light still flickers" cannot say
-                 * whether this ran. ⛔ Silence in the log means the hold never
-                 * fired -- the deadline was not set, or the window had already
-                 * closed. A count means it fired and the colour arrived some
-                 * other way. ⓘ Logged once per session, not per report. */
-                static int s_held_logged;
-                if (!s_held_logged) {
-                    s_held_logged = 1;
-                    ctl_log(c, "lightbar: withholding the host's claim during the handover");
-                }
-            }
-        }
+        /* ⛔ THE 1.4 SECOND LIGHTBAR HOLD IS GONE (measured 2026-09-15).
+         *
+         * It withheld the host's lightbar claim for 1.4 s after a session
+         * opened, so the app's confirmation could have the light to itself --
+         * and it never once fired. The line it printed when it did appears in
+         * no log on either set.
+         *
+         * ⭐ THE REASON IS A TIMING ONE, and it could not have been read off
+         * the code: the hold ran from the session opening, while the TV's own
+         * connected signal over Bluetooth takes about 2.4 s
+         * (`btsig: call #1 ... took 2421ms`). The host's claim arrives after
+         * that signal ends, so it was always outside the window.
+         *
+         * ⓘ Watched on a pad on the U5s (rhoquinn8217): teal from Steam before
+         * the bridge, through the emulated DS4; then the pre-plug pulse's
+         * purple, the core's green, and teal again when Steam claims the real
+         * pad. The app's own gate still drops the host's colour while one of
+         * ITS patterns plays, and that one does fire. */
 
         if (block_id == 0x90 && payload_len >= 8) {
             /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.

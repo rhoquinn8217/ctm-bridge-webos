@@ -236,66 +236,34 @@ void ctm_bridge_set_agent_host(const char *host, int port)
     g_agent_online = g_agent_host[0] != '\0';
 }
 
-bool discover_agent_once(void)
+/* Do we know where the agent is, and was it answering when the worker last
+ * asked?
+ *
+ * ⛔ THE BROADCAST IS GONE (2026-09-15). This used to probe the local network
+ * for an agent whenever no address was set -- and in the app it could never
+ * run: a stream sets the address as it starts, and the function returned
+ * before opening the socket whenever an address was known. So the probe read
+ * as live code for weeks while being unreachable, which is the whole reason
+ * this clean-up exists. The headless ui_app is told its address now, so
+ * nothing anywhere is left to discover.
+ *
+ * ⓘ Knowing the address is NOT evidence that anything is listening there. The
+ * worker asks every few seconds on its own thread and leaves the answer here,
+ * so this returns at once. ⛔ Never ask inline: this is called from the
+ * interface -- on stream start, on opening the overlay, on every header
+ * refresh -- and a network call here stalls it for as long as the host takes
+ * to not answer.
+ *
+ * ⓘ The address is deliberately kept when the agent goes quiet: it may simply
+ * be restarting, and the next probe should try the same place again. */
+bool agent_is_known(void)
 {
-    /* Already told where the agent is: no need to search for it -- but knowing
-     * the address is not evidence that anything is listening there. The worker
-     * asks every few seconds on its own thread and leaves the answer here, so
-     * this returns at once. Do NOT ask inline: this is called from the
-     * interface -- on stream start, on opening the overlay, on every header
-     * refresh -- and a network call here stalls the UI for as long as the host
-     * takes to not answer.
-     *
-     * The address is deliberately kept when the agent goes quiet: it may simply
-     * be restarting, and the next probe should try the same place again. */
-    if (g_agent_host[0]) {
-        return g_agent_online;
-    }
-    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) {
-        return false;
-    }
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 180000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(CTM_AGENT_PORT);
-    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    const char probe[] = "CTM_DISCOVER_V1";
-    sendto(fd, probe, sizeof(probe) - 1, 0, (struct sockaddr *)&addr, sizeof(addr));
-
-    char buf[256];
-    struct sockaddr_in from;
-    socklen_t from_len = sizeof(from);
-    ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &from_len);
-    close(fd);
-    if (n <= 0) {
-        return false;
-    }
-    buf[n] = '\0';
-    if (!starts_with(buf, "CTM_AGENT_V1")) {
-        return false;
-    }
-    const char *port = strstr(buf, "port=");
-    g_agent_port = port ? atoi(port + 5) : CTM_AGENT_PORT;
-    if (g_agent_port <= 0 || g_agent_port > 65535) {
-        g_agent_port = CTM_AGENT_PORT;
-    }
-    const char *ip = inet_ntoa(from.sin_addr);
-    snprintf(g_agent_host, sizeof(g_agent_host), "%s", ip ? ip : "");
-    g_agent_online = g_agent_host[0] != '\0';
-    return g_agent_online;
+    return g_agent_host[0] ? g_agent_online : false;
 }
 
 int send_agent_command(const char *command, char *response, size_t response_len)
 {
-    if (!g_agent_host[0] && !discover_agent_once()) {
+    if (!agent_is_known()) {
         return -1;
     }
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -524,7 +492,7 @@ void stop_session(const char *key)
 bool ctm_tv_pointer_plug(void)
 {
     if (g_tv_pointer_active) return true;
-    if (!g_agent_online && !discover_agent_once()) {
+    if (!agent_is_known()) {
         log_append("TV pointer: Windows agent not found");
         return false;
     }
@@ -709,7 +677,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     if (!item || scan_index < 0 || scan_index >= g_scan.count) {
         return false;
     }
-    if (!g_agent_online && !discover_agent_once()) {
+    if (!agent_is_known()) {
         log_append("Windows agent not found");
         return false;
     }

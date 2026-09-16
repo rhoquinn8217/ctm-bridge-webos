@@ -245,9 +245,6 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
-    /* ⭐ Until when the relay should NOT let the host claim the lightbar.
-     * Monotonic milliseconds; 0 means never. See ds5_patch_output. */
-    unsigned long long light_hold_until_ms;
     /* ⭐⭐ A TYPE'S OWN SIGNAL THREAD, and plug-out's wait for it -- see
      * controller_signal_begin. Guarded by signal_mutex, which nothing else
      * takes. ⚠️ The DualSense's connected signal does not use this: its thread
@@ -804,18 +801,6 @@ static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 static int ctm_input_is_held(void)
 {
     return g_input_held;
-}
-
-bool ctm_controller_light_held(ctm_controller_t *c)
-{
-    if (!c || !c->light_hold_until_ms) return false;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    unsigned long long now_ms = (unsigned long long)ts.tv_sec * 1000ull
-                              + (unsigned long long)(ts.tv_nsec / 1000000);
-    if (now_ms < c->light_hold_until_ms) return true;
-    c->light_hold_until_ms = 0;   /* over; stop checking */
-    return false;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -3035,32 +3020,6 @@ static void *session_main(void *arg)
         /* ⚠️ "No audio device" is not "Bluetooth DualSense": a keyboard has no
          * audio device either, and was sent this 398-byte report. */
         if (c->ops->speaks_ds5 && c->alsa_fd < 0) btsig_wake_speaker(c);
-
-        /* ⭐⭐ HOLD THE LIGHTBAR FOR THE MOMENT THE APP IS DRAWING ON IT.
-         *
-         * ⛔ THE FAULT: the green confirmation breathes correctly and flickers
-         * the whole time. rhoquinn8217, 2026-08-19: "I could notice it gradually
-         * getting brighter and darker but it was flickering the whole time."
-         * ⭐ The shape being right and the light still stuttering is the
-         * signature of a SECOND WRITER, not a bad curve.
-         *
-         * ⓘ That writer is the host, through this relay: its reports claim the
-         * lightbar about 25 times a second, and a bridge hands the controller
-         * over just as the app starts drawing. An unbridge has no such problem
-         * because nothing is being relayed by then -- which is exactly the
-         * asymmetry that was seen.
-         *
-         * ⚠️ THIS IS NOT "THE TV TAKES THE LIGHTBAR". That was considered and
-         * rejected the same day: some games drive it meaningfully and the
-         * emulated pad is a DS4, so they reach it. ⭐ This hands it straight
-         * back -- it is the second or two of a handover, nothing more. */
-        {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            c->light_hold_until_ms = (unsigned long long)ts.tv_sec * 1000ull
-                                   + (unsigned long long)(ts.tv_nsec / 1000000)
-                                   + LIGHT_HOLD_MS;
-        }
 
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);

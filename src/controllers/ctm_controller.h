@@ -274,13 +274,6 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * layer came back on, the switches stayed pinned to 1, and they were removed
  * with the branches they guarded on 2026-09-15. The user's own settings are
  * what decide those writes now. */
-/* ⭐ How long after a session opens the relay withholds the host's lightbar
- * claim, so the app's confirmation pattern has the light to itself.
- *
- * ⓘ Slightly longer than one breath (1100 ms), and far shorter than anything a
- * game would notice. ⛔ Not a policy about who owns the lightbar -- the host
- * does. This is the handover. */
-#define LIGHT_HOLD_MS    1400
 
 /* Signal a REFUSED plug, with no session behind it.
  *
@@ -339,13 +332,6 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
 /* How this controller is attached: "USB" or "BT". When: a type behaves
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
-
-/* Should the host's lightbar claim be withheld right now?
- *
- * ⭐ True only for the moment after a session opens, while the app draws its
- * confirmation pattern. See LIGHT_HOLD_MS. ⓘ An accessor because the struct is
- * opaque outside controller_common.c. */
-bool ctm_controller_light_held(ctm_controller_t *c);
 
 /* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
  * bridge half of the gesture; this is the half it cannot see. Defaults on. */

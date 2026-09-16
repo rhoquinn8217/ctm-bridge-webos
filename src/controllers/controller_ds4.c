@@ -470,11 +470,13 @@ static void ds4_usb_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t w
  * colour the host sets is remembered either way, for the connected signal to
  * hand back.
  *
- * ⚠️ NOT ctm_controller_light_held()'s WINDOW. That is a fixed 1.4 s, sized for
- * a 1.1 s breath drawn by someone else on a Bluetooth DualSense. This signal is
- * the core's own and ends when it says so; withholding past that would drop a
- * colour the host set with nothing left to hand it back -- and with the signals
- * switched off there is no signal at all to do it.
+ * ⚠️ NOT A FIXED WINDOW. There used to be one beside this -- a 1.4 s hold from
+ * the session opening, on the Bluetooth DualSense path -- and it was removed on
+ * 2026-09-15 for never firing: the connected signal beside it runs longer than
+ * the window did, so the host's claim always arrived after it closed. This
+ * signal is the core's own and ends when it says so; withholding past that
+ * would drop a colour the host set with nothing left to hand it back -- and
+ * with the signals switched off there is no signal at all to do it.
  *
  * ⓘ Counted, and logged when the withholding starts and ends, because "the
  * breath flickered" cannot say whether this ran.
