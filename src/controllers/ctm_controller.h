@@ -131,7 +131,9 @@ typedef struct {
      * game. Sending a blank report is what releases it. ⓘ It also keeps the
      * cadence steady, so nothing upstream concludes the controller has gone.
      *
-     * NULL => this type cannot be blanked and its input is relayed unchanged. */
+     * NULL => the pump blanks a gamepad by a plan built from its report
+     * descriptor (pad_blank.inl), and a Pro Controller's full report by its own
+     * layout; a report nothing places is relayed unchanged. */
     void (*blank_input)(uint8_t *data, size_t len);
 
     /* Patch an outbound report in place before it reaches the device (DS audio

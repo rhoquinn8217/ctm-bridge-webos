@@ -67,6 +67,7 @@ const ctm_controller_ops_t ctm_controller_xbox_ops = {
     .patch_output = NULL,   /* none: verbatim relay, Windows map does GIP */
     .set_settings = NULL,
     .on_input_report = xbox_on_input_report,
+    .blank_input = xbox_bt_blank_report,
     .current_report = xbox_current_report,
     /* ⭐⭐ THE PAD'S LAST STATE AGAIN EVERY 4 MS WHEN IT SENDS NOTHING
      * (rhoquinn8217, 2026-09-16: a still pad left the bridge after 15 s). Over

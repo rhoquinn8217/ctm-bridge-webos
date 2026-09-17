@@ -97,8 +97,32 @@ static void test_what_cannot_be_kept_or_sent(void)
     ok(xbox_bt_current(&last, small, sizeof(small)) == 0, "a buffer too small for the report gets nothing");
 }
 
+/* The overlay's blank: every byte the listener's Xbox map reads for sticks,
+ * triggers, d-pad and buttons, at rest. */
+static void test_the_overlay_blank(void)
+{
+    uint8_t r[17];
+    memcpy(r, k_right, sizeof(r));
+    xbox_bt_blank_report(r, sizeof(r));
+    const uint8_t want[17] = {
+        0x01, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    ok(memcmp(r, want, sizeof(want)) == 0,
+       "the blank centres the four sticks at 0x8000 and zeroes triggers, d-pad and buttons");
+    uint8_t battery[2] = { 0x04, 0x86 };
+    xbox_bt_blank_report(battery, sizeof(battery));
+    ok(battery[0] == 0x04 && battery[1] == 0x86, "the battery report is left alone");
+    uint8_t short_report[16];
+    memcpy(short_report, k_right, sizeof(short_report));
+    xbox_bt_blank_report(short_report, sizeof(short_report));
+    ok(memcmp(short_report, k_right, sizeof(short_report)) == 0,
+       "a state report shorter than 17 bytes is left alone");
+}
+
 int main(void)
 {
+    test_the_overlay_blank();
     test_nothing_before_the_first_report();
     test_the_state_report_comes_back_byte_for_byte();
     test_a_newer_state_replaces_the_older();

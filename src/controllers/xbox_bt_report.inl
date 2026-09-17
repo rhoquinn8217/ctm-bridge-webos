@@ -40,6 +40,25 @@ static inline int xbox_bt_keep(xbox_bt_last_t *last, const uint8_t *report, size
     return 1;
 }
 
+/* ⭐⭐ NOTHING PRESSED, for while the TV's overlay holds input (rhoquinn8217,
+ * 2026-09-16: the pad's input reached the PC behind the open overlay, because
+ * this type had no blank at all). The four sticks centred (16-bit, 0x8000) and
+ * everything after them zero: triggers, d-pad and buttons. ⓘ The same bytes the
+ * cabled type's xpad_blank_report writes, because the listener's Xbox map reads
+ * both pads at the same offsets; it is not shared only because xpad_report.inl
+ * brings functions this type would never use. */
+#define XBOX_BT_STATE_REPORT_LEN 17
+
+static inline void xbox_bt_blank_report(uint8_t *data, size_t len)
+{
+    if (!data || len < XBOX_BT_STATE_REPORT_LEN || data[0] != XBOX_BT_STATE_REPORT_ID) return;
+    for (size_t i = 0; i < 4; ++i) {
+        data[1 + 2 * i] = 0x00;
+        data[2 + 2 * i] = 0x80;
+    }
+    memset(data + 9, 0, XBOX_BT_STATE_REPORT_LEN - 9);
+}
+
 /* The pad's present state as it last reported it, copied out: its length, or
  * 0 when nothing has been kept yet or it does not fit. */
 static inline size_t xbox_bt_current(const xbox_bt_last_t *last, uint8_t *out, size_t cap)

@@ -63,6 +63,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "hid_node_checks.inl"
 #include "device_identity.inl"
 #include "kbd_chord.inl"
+#include "pad_blank.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -289,6 +290,10 @@ struct ctm_controller {
     kbd_layout_t kbd;
     int kbd_chord_down;
     int kbd_handed_back;
+    /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
+     * for a type with no blank of its own (pad_blank.inl). present only when its
+     * descriptor gave something to blank, or it is a Pro Controller. */
+    pad_blank_plan_t pad_blank;
     /* When an input report last went to the host, for ops->keepalive_ms. */
     uint64_t last_input_us;
     /* Per-controller state owned by the type; freed at destroy. */
@@ -1643,6 +1648,22 @@ void ctm_bt_sign_output(uint8_t *data, size_t len)
     data[len - 1] = (uint8_t)((crc >> 24) & 0xffu);
 }
 
+/* A report descriptor into the controller's log, 32 bytes a line, so a pad seen
+ * in the field can join tests/test_pad_blank.c as it really is. When: opening a
+ * gamepad that gets a blank built from its descriptor. */
+static void log_descriptor(ctm_controller_t *c, const uint8_t *d, uint32_t n)
+{
+    char line[3 * 32 + 1];
+    for (uint32_t i = 0; i < n; i += 32) {
+        size_t at = 0;
+        line[0] = '\0';
+        for (uint32_t k = i; k < n && k < i + 32; ++k) {
+            at += (size_t)snprintf(line + at, sizeof(line) - at, "%02x ", d[k]);
+        }
+        ctl_log(c, "descriptor %03x: %s", (unsigned)i, line);
+    }
+}
+
 /* Open the controller's hidraw node (ops->select_node or dev.path), validate
  * vid/pid, fill caps + report descriptor. When: once by session_main before
  * the connect loop. Returns the fd, or -1. */
@@ -1737,6 +1758,21 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
                     (unsigned)c->kbd.report_id, (unsigned)c->kbd.mod_offset,
                     (unsigned)c->kbd.keys_count, (unsigned)c->kbd.keys_offset,
                     (unsigned)c->kbd.report_len);
+        }
+        /* ⭐ A gamepad whose type cannot blank its reports gets a blank built
+         * from its descriptor, for while the TV's overlay holds input
+         * (pad_blank.inl). A type with its own blank keeps it. */
+        memset(&c->pad_blank, 0, sizeof(c->pad_blank));
+        if (c->is_gamepad && !c->ops->blank_input) {
+            const uint16_t vid = (uint16_t)strtoul(c->dev.vid, NULL, 16);
+            const uint16_t pid = (uint16_t)strtoul(c->dev.pid, NULL, 16);
+            pad_blank_from_descriptor(report_desc, *report_desc_len, vid, pid, &c->pad_blank);
+            ctl_log(c, "overlay blank: %u field(s)%s%s from a %u-byte descriptor",
+                    (unsigned)c->pad_blank.count,
+                    c->pad_blank.switch_layout ? ", and the Switch layout for its full reports" : "",
+                    c->pad_blank.truncated ? " (more fields than fit; the rest left alone)" : "",
+                    (unsigned)*report_desc_len);
+            log_descriptor(c, report_desc, *report_desc_len);
         }
         derive_report_lengths(report_desc, *report_desc_len, caps);
         if (caps->input_report_len < 1024) caps->input_report_len = 1024;
@@ -2280,6 +2316,16 @@ static void *composite_reader_main(void *arg)
     return NULL;
 }
 
+/* ⭐ What the host gets while the TV's overlay holds input: the type's own blank
+ * where it has one, else the blank built from the pad's descriptor, else the
+ * report as it came (a keyboard is handed back to the TV instead; see
+ * kbd_sync_hold). */
+static void blank_held_report(ctm_controller_t *c, uint8_t *buf, size_t n)
+{
+    if (c->ops && c->ops->blank_input) c->ops->blank_input(buf, n);
+    else pad_blank_apply(&c->pad_blank, buf, n);
+}
+
 /* ⭐ Send an input-node type's present state when nothing has gone to the host
  * for ops->keepalive_ms -- and at once when the session starts, since
  * last_input_us begins at 0. An input node says nothing while the pad is
@@ -2296,7 +2342,7 @@ static int send_keepalive(ctm_controller_t *c)
     uint8_t buf[MAX_REPORT];
     const int n = c->ops->current_report(c, buf, sizeof(buf));
     if (n <= 0) return 0;
-    if (ctm_input_is_held() && c->ops->blank_input) c->ops->blank_input(buf, (size_t)n);
+    if (ctm_input_is_held()) blank_held_report(c, buf, (size_t)n);
     if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
         return -1;
     }
@@ -2382,8 +2428,8 @@ static void *input_thread_main(void *arg)
                 if (held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
                 }
-                if (held && c->ops && c->ops->blank_input) {
-                    c->ops->blank_input(buf, (size_t)n);
+                if (held) {
+                    blank_held_report(c, buf, (size_t)n);
                 }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
                     c->stop = 1;
