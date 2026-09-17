@@ -164,7 +164,9 @@ typedef struct {
      * A wired Xbox pad under xpad has no hidraw node, so there are no reports
      * to relay. These let a type read its input node and make the reports
      * itself. All NULL for every hidraw type, which keeps the pump exactly as
-     * it was for them.
+     * it was for them -- except `current_report` and `keepalive_ms` for a
+     * hidraw pad that reports only when something changes: a Bluetooth Xbox
+     * pad (controller_xbox.c) keeps its last report and has it sent again.
      *
      *   preflight       can the device be opened; 0 or the errno. Replaces
      *                   the hidraw check before BRIDGE_START.
