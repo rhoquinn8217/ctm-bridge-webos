@@ -67,10 +67,20 @@ typedef struct {
     char usb_busid[64];
     char inputs[TEXT_LEN];
     char events[TEXT_LEN];
+    char driver[32];         /* kernel driver the input device hangs off, e.g. "xpad" */
+    char serial[64];         /* identity for rule 2: uniq, or the USB serial (device_identity.inl) */
     int report_descriptor_bytes;
     uint16_t usage_page;     /* top-level HID usage page (interface class) */
     uint16_t usage;          /* top-level HID usage */
     char iface[20];          /* human label, e.g. "vendor 64B" / "keyboard 8B" */
+    /* ⭐ WHICH PHYSICAL DEVICE THIS PART BELONGS TO (2026-09-14). Every part
+     * of one USB device shares `group`, its physical path without the
+     * "/inputN" part: "usb-1c7a0000.xhci-2.1.3". Anything not on USB is its
+     * own group, "node:<node>". */
+    char group[TEXT_LEN];
+    char device_name[TEXT_LEN];  /* the USB device's maker and product, or "" */
+    char usb_serial[64];         /* the USB device's own serial, zeros and all, or "" */
+    int iface_num;               /* the USB interface number, -1 when unknown */
     bool readable;
     bool writable;
 } device_info_t;
@@ -89,6 +99,8 @@ typedef struct {
     char pid[16];
     char mac[64];
     char usb_busid[64];
+    char driver[32];
+    char serial[64];
     int device_indices[MAX_DEVICES];
     int device_count;
     bool plugged;
@@ -104,6 +116,11 @@ typedef struct {
     char busid[32];
     int port;
     ctm_controller_t *controller;   /* owns the in-process bridging session */
+    /* ⭐ Claimed by a path that is tearing it down, under g_sessions_mutex.
+     * The entry stays in the table, so the device still reads as bridged,
+     * until that path has finished and removes it. Every other path leaves a
+     * stopping entry and its controller alone. */
+    bool stopping;
 } bridge_session_t;
 
 typedef struct {
@@ -149,6 +166,14 @@ extern char g_expanded_keys[MAX_DEVICES][96];
 extern int g_expanded_key_count;
 extern bridge_session_t g_sessions[MAX_SESSIONS];
 extern int g_session_count;
+/* ⭐⭐ GUARDS g_sessions AND g_session_count, and a controller's lifetime while
+ * it is read through the table. ⛔ Held only for short looks and edits, never
+ * across a plug-out: a release signal lasts up to 2.4 s, and the panel reads
+ * the table on the UI thread. Broadcast on g_sessions_cond whenever a stopping
+ * entry leaves the table. ⓘ Taken after the app's own device lock, never
+ * before it. */
+extern pthread_mutex_t g_sessions_mutex;
+extern pthread_cond_t g_sessions_cond;
 extern ui_device_settings_t g_settings[MAX_DEVICES];
 extern int g_settings_count;
 extern char g_agent_host[64];
@@ -223,7 +248,8 @@ bool is_xbox_device(const device_info_t *dev);
 bool is_xpad_compatible_pid(const char *vid, const char *pid);
 bool is_gulikit_named_device(const char *name);
 bool is_xpad_input_only_candidate(const char *bus, const char *vid, const char *pid,
-                                  const char *name, const char *usb_busid);
+                                  const char *name, const char *usb_busid,
+                                  const char *driver);
 void steam_root_from_phys(const char *phys, char *out, size_t out_len);
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len);
 void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len);
@@ -258,7 +284,7 @@ void publish_bt_macs(void);
 void ctm_bridge_set_agent_host(const char *host, int port);
 void ctm_bridge_gesture_init(void);
 bool plug_in_by_node(const char *node);
-bool discover_agent_once(void);
+bool agent_is_known(void);
 int send_agent_command(const char *command, char *response, size_t response_len);
 int session_index_for_key(const char *key);
 int next_bridge_port(void);
@@ -275,6 +301,11 @@ const char *bridge_kind_for_item(const logical_device_t *item);
 bool plug_in_item(logical_device_t *item);
 bool item_is_tv_remote(const logical_device_t *item);
 bool item_is_mouse_or_keyboard(const logical_device_t *item);
+/* A game controller: a kind the bridge knows, or a HID joystick, gamepad or
+ * multi-axis controller. Only controllers are auto-bridged or given a config. */
+bool item_is_controller(const logical_device_t *item);
+/* "controller", "keyboard", "mouse", or "" -- what the device says it is. */
+const char *item_type_label(const logical_device_t *item);
 
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */

@@ -4,6 +4,7 @@
  * without LVGL/SDL. The UI half stays in ui_common.c. No LVGL/SDL here. */
 
 #include "ctm_state.h"
+#include "name_list.inl"
 
 #include <dirent.h>
 #include <errno.h>
@@ -27,6 +28,8 @@ char g_expanded_keys[MAX_DEVICES][96];
 int g_expanded_key_count;
 bridge_session_t g_sessions[MAX_SESSIONS];
 int g_session_count;
+pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_sessions_cond = PTHREAD_COND_INITIALIZER;
 ui_device_settings_t g_settings[MAX_DEVICES];
 int g_settings_count;
 char g_agent_host[64];
@@ -222,12 +225,7 @@ bool valid_bt_address(const char *s)
 
 void append_unique(char *dst, size_t dst_len, const char *value)
 {
-    if (!value || !value[0]) {
-        return;
-    }
-    if (strstr(dst, value)) {
-        return;
-    }
-    size_t used = strlen(dst);
-    snprintf(dst + used, dst_len - used, "%s%s", used ? ", " : "", value);
+    /* ⛔ By whole names (name_list.inl): a substring search skipped "event3"
+     * when "event30" was already in the list. */
+    name_list_add(dst, dst_len, value);
 }

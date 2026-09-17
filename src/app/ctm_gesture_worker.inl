@@ -112,21 +112,28 @@ static void *gesture_worker(void *arg)
         }
 
         /* Which controller asked? Copy the keys out first: stop_session edits
-         * the session table as it goes. */
+         * the session table as it goes.
+         * ⛔ Under g_sessions_mutex, and past any stopping entry: this read each
+         * controller's flag with no lock while another path could be destroying
+         * it. stop_session() claims before it tears down, so a key another path
+         * got to first is simply skipped there too. */
         char keys[MAX_SESSIONS][96];
         int n = 0;
+        pthread_mutex_lock(&g_sessions_mutex);
+        const int session_count = g_session_count;
         for (int i = 0; i < g_session_count && n < MAX_SESSIONS; ++i) {
-            if (g_sessions[i].controller &&
+            if (!g_sessions[i].stopping && g_sessions[i].controller &&
                 ctm_controller_unplug_requested(g_sessions[i].controller)) {
                 snprintf(keys[n], sizeof(keys[0]), "%s", g_sessions[i].key);
                 ++n;
             }
         }
+        pthread_mutex_unlock(&g_sessions_mutex);
         /* The pair either side of stop_session is the point: a teardown that
          * wedges shows as "stopping" with no matching "stopped", and the
          * worker is a SINGLE thread, so nothing behind it gets serviced. */
         ctm_gesture_log(NULL, "worker woke: %d of %d session(s) asking to unplug",
-                        n, g_session_count);
+                        n, session_count);
         for (int i = 0; i < n; ++i) {
             log_append("gesture: unplugging %s", keys[i]);
             ctm_gesture_log(NULL, "stopping %s", keys[i]);

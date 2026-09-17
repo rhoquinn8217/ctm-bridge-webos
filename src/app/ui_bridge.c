@@ -70,7 +70,7 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
         settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
-    } else if (strcmp(kind, "ds4") == 0) {
+    } else if (strncmp(kind, "ds4", 3) == 0) {   /* ds4 and ds4_usb alike */
         settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
         /* ~75% of the 0x4F raw ceiling — the pad persists whatever volume was
@@ -107,14 +107,20 @@ tv_bridge_worker_settings_t *settings_for_item(const logical_device_t *item)
     return record ? &record->settings : NULL;
 }
 
+static int session_index_locked(const char *key);
+
 void apply_settings_to_session(const logical_device_t *item)
 {
     tv_bridge_worker_settings_t *settings = settings_for_item(item);
     if (!item || !settings) return;
-    int session = session_index_for_key(item->key);
-    if (session >= 0 && g_sessions[session].controller) {
+    /* ⓘ Under the table's lock, and never on a stopping entry: its controller
+     * may be freed by the path tearing it down. */
+    pthread_mutex_lock(&g_sessions_mutex);
+    int session = session_index_locked(item->key);
+    if (session >= 0 && !g_sessions[session].stopping && g_sessions[session].controller) {
         ctm_controller_set_settings(g_sessions[session].controller, settings);
     }
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 int run_child_wait(char *const argv[])
@@ -230,66 +236,44 @@ void ctm_bridge_set_agent_host(const char *host, int port)
     g_agent_online = g_agent_host[0] != '\0';
 }
 
-bool discover_agent_once(void)
+/* Do we know where the agent is, and was it answering when the worker last
+ * asked?
+ *
+ * ⛔ THE BROADCAST IS GONE (2026-09-15). This used to probe the local network
+ * for an agent whenever no address was set -- and in the app it could never
+ * run: a stream sets the address as it starts, and the function returned
+ * before opening the socket whenever an address was known. So the probe read
+ * as live code for weeks while being unreachable, which is the whole reason
+ * this clean-up exists. The headless ui_app is told its address now, so
+ * nothing anywhere is left to discover.
+ *
+ * ⓘ Knowing the address is NOT evidence that anything is listening there. The
+ * worker asks every few seconds on its own thread and leaves the answer here,
+ * so this returns at once. ⛔ Never ask inline: this is called from the
+ * interface -- on stream start, on opening the overlay, on every header
+ * refresh -- and a network call here stalls it for as long as the host takes
+ * to not answer.
+ *
+ * ⓘ The address is deliberately kept when the agent goes quiet: it may simply
+ * be restarting, and the next probe should try the same place again. */
+bool agent_is_known(void)
 {
-    /* Already told where the agent is: no need to search for it -- but knowing
-     * the address is not evidence that anything is listening there. The worker
-     * asks every few seconds on its own thread and leaves the answer here, so
-     * this returns at once. Do NOT ask inline: this is called from the
-     * interface -- on stream start, on opening the overlay, on every header
-     * refresh -- and a network call here stalls the UI for as long as the host
-     * takes to not answer.
-     *
-     * The address is deliberately kept when the agent goes quiet: it may simply
-     * be restarting, and the next probe should try the same place again. */
-    if (g_agent_host[0]) {
-        return g_agent_online;
-    }
-    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) {
-        return false;
-    }
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 180000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(CTM_AGENT_PORT);
-    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    const char probe[] = "CTM_DISCOVER_V1";
-    sendto(fd, probe, sizeof(probe) - 1, 0, (struct sockaddr *)&addr, sizeof(addr));
-
-    char buf[256];
-    struct sockaddr_in from;
-    socklen_t from_len = sizeof(from);
-    ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &from_len);
-    close(fd);
-    if (n <= 0) {
-        return false;
-    }
-    buf[n] = '\0';
-    if (!starts_with(buf, "CTM_AGENT_V1")) {
-        return false;
-    }
-    const char *port = strstr(buf, "port=");
-    g_agent_port = port ? atoi(port + 5) : CTM_AGENT_PORT;
-    if (g_agent_port <= 0 || g_agent_port > 65535) {
-        g_agent_port = CTM_AGENT_PORT;
-    }
-    const char *ip = inet_ntoa(from.sin_addr);
-    snprintf(g_agent_host, sizeof(g_agent_host), "%s", ip ? ip : "");
-    g_agent_online = g_agent_host[0] != '\0';
-    return g_agent_online;
+    return g_agent_host[0] ? g_agent_online : false;
 }
 
 int send_agent_command(const char *command, char *response, size_t response_len)
 {
-    if (!g_agent_host[0] && !discover_agent_once()) {
+    /* ⛔⛔ THE ADDRESS, NOT THE ONLINE FLAG. This is what the probe uses to ask
+     * whether the agent is there, so requiring `online` here latches the answer:
+     * the listener goes away, the flag goes false, and every command refuses --
+     * including the probe that would have noticed it came back. The TV then
+     * says "listener offline" until a stream start re-sets the address.
+     *
+     * ⓘ Introduced and found the same evening, 2026-09-15, while tidying the
+     * broadcast discovery away. agent_is_known() is right for the UI and the
+     * plug paths, which want "known AND answering"; this one wants "do we know
+     * where to ask". */
+    if (!g_agent_host[0]) {
         return -1;
     }
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -341,7 +325,7 @@ int send_agent_command(const char *command, char *response, size_t response_len)
     return n > 0 && response && starts_with(response, "OK") ? 0 : -1;
 }
 
-int session_index_for_key(const char *key)
+static int session_index_locked(const char *key)
 {
     for (int i = 0; i < g_session_count; ++i) {
         if (strcmp(g_sessions[i].key, key) == 0) {
@@ -349,6 +333,18 @@ int session_index_for_key(const char *key)
         }
     }
     return -1;
+}
+
+/* ⓘ The index is only good while nothing else edits the table, so callers use
+ * it as "is this bridged" -- a stopping entry counts, since its teardown has not
+ * finished. Anything that reads the entry itself takes g_sessions_mutex and uses
+ * session_index_locked(). */
+int session_index_for_key(const char *key)
+{
+    pthread_mutex_lock(&g_sessions_mutex);
+    const int index = session_index_locked(key);
+    pthread_mutex_unlock(&g_sessions_mutex);
+    return index;
 }
 
 /* TV-pointer session state lives OUTSIDE g_sessions (it is not a controller),
@@ -363,6 +359,7 @@ static int g_tv_pointer_port;
 int next_bridge_port(void)
 {
     int port = CTM_BRIDGE_BASE_PORT;
+    pthread_mutex_lock(&g_sessions_mutex);
     for (;;) {
         bool used = false;
         if (g_tv_pointer_active && port == g_tv_pointer_port) {
@@ -375,6 +372,7 @@ int next_bridge_port(void)
             }
         }
         if (!used) {
+            pthread_mutex_unlock(&g_sessions_mutex);
             return port;
         }
         ++port;
@@ -395,51 +393,101 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
     snprintf(out, out_len, "ctm-%s-%u", kind, ++seq);
 }
 
+/* ⭐⭐ A NEW SESSION, OR A NEW CONTROLLER FOR ONE ALREADY IN THE TABLE.
+ *
+ * ⛔ Refused while the key's previous session is still stopping: taking over
+ * its entry would hand the path tearing it down a controller it never claimed.
+ * The caller tears the new controller down again. ⓘ A replaced controller is
+ * torn down here, after its entry already holds the new one, so no other path
+ * can reach it. */
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port)
 {
-    int index = session_index_for_key(key);
+    pthread_mutex_lock(&g_sessions_mutex);
+    int index = session_index_locked(key);
     if (index >= 0) {
-        if (g_sessions[index].controller && g_sessions[index].controller != controller) {
-            ctm_controller_plug_out_reason(g_sessions[index].controller,
-                                           CTM_UNPLUG_REPLACED);
-            ctm_controller_destroy(g_sessions[index].controller);
+        if (g_sessions[index].stopping) {
+            pthread_mutex_unlock(&g_sessions_mutex);
+            return false;
         }
+        ctm_controller_t *replaced = g_sessions[index].controller != controller
+                                     ? g_sessions[index].controller : NULL;
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
         g_sessions[index].port = port;
         g_sessions[index].controller = controller;
+        pthread_mutex_unlock(&g_sessions_mutex);
+        if (replaced) {
+            ctm_controller_plug_out_reason(replaced, CTM_UNPLUG_REPLACED);
+            ctm_controller_destroy(replaced);
+        }
         return true;
     }
     if (g_session_count >= MAX_SESSIONS) {
+        pthread_mutex_unlock(&g_sessions_mutex);
         return false;
     }
     snprintf(g_sessions[g_session_count].key, sizeof(g_sessions[0].key), "%s", key);
     snprintf(g_sessions[g_session_count].busid, sizeof(g_sessions[0].busid), "%s", busid ? busid : "");
     g_sessions[g_session_count].port = port;
     g_sessions[g_session_count].controller = controller;
+    g_sessions[g_session_count].stopping = false;
     g_session_count++;
+    pthread_mutex_unlock(&g_sessions_mutex);
     return true;
 }
 
+/* Take a stopping entry out of the table and wake anyone waiting for it.
+ * When: holding g_sessions_mutex, after its teardown has finished. */
+static void session_remove_stopped_locked(const char *key)
+{
+    const int index = session_index_locked(key);
+    if (index >= 0 && g_sessions[index].stopping) {
+        memmove(&g_sessions[index], &g_sessions[index + 1],
+                (size_t)(g_session_count - index - 1) * sizeof(g_sessions[0]));
+        g_session_count--;
+    }
+    pthread_cond_broadcast(&g_sessions_cond);
+}
+
+/* ⭐⭐ ONE PATH TEARS A CONTROLLER DOWN, WHICHEVER ASKS FIRST.
+ *
+ * ⛔ THE FAULT: the chord's release worker called this with no lock, the panel's
+ * Release under the app's device lock, and the end of the stream went through
+ * release_local_sessions_on_exit() with no lock at all. The entry stayed in the
+ * table until the plug-out finished -- up to 2.4 s with a release signal -- so a
+ * second path in that window found the same controller, plugged it out again
+ * and destroyed it a second time.
+ * ➡️ Now the entry is CLAIMED under g_sessions_mutex before anything slow
+ * happens. A path that finds it already claimed returns: the claimant finishes
+ * the job, and removes the entry when it has. */
 void stop_session(const char *key)
 {
-    int index = session_index_for_key(key);
-    if (index < 0) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    const int index = session_index_locked(key);
+    if (index < 0 || g_sessions[index].stopping) {
+        pthread_mutex_unlock(&g_sessions_mutex);
         return;
     }
-    if (g_sessions[index].controller) {
-        ctm_controller_plug_out(g_sessions[index].controller);
-        ctm_controller_destroy(g_sessions[index].controller);
-        g_sessions[index].controller = NULL;
+    g_sessions[index].stopping = true;
+    ctm_controller_t *controller = g_sessions[index].controller;
+    char busid[sizeof(g_sessions[0].busid)];
+    snprintf(busid, sizeof(busid), "%s", g_sessions[index].busid);
+    const int port = g_sessions[index].port;
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    if (controller) {
+        ctm_controller_plug_out(controller);
+        ctm_controller_destroy(controller);
     }
-    if (g_sessions[index].port > 0) {
+    if (port > 0) {
         char cmd[160];
         char response[256];
-        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_sessions[index].busid);
+        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
     }
-    memmove(&g_sessions[index], &g_sessions[index + 1],
-            (size_t)(g_session_count - index - 1) * sizeof(g_sessions[0]));
-    g_session_count--;
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    session_remove_stopped_locked(key);
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 /* --- TV pointer -> host mouse (synthetic device; no hidraw) ---------------
@@ -454,7 +502,7 @@ void stop_session(const char *key)
 bool ctm_tv_pointer_plug(void)
 {
     if (g_tv_pointer_active) return true;
-    if (!g_agent_online && !discover_agent_once()) {
+    if (!agent_is_known()) {
         log_append("TV pointer: Windows agent not found");
         return false;
     }
@@ -495,18 +543,63 @@ bool ctm_tv_pointer_active(void)
     return g_tv_pointer_active;
 }
 
+/* ⭐ EVERY SESSION, AT THE END OF A STREAM OR OF THE APP.
+ *
+ * ⛔ It walked the table with no lock and plugged out whatever it found, so a
+ * controller the chord's release worker or the panel was already tearing down
+ * was plugged out and destroyed twice (see stop_session). ➡️ It claims every
+ * entry nobody else has, tears those down, and then WAITS for the ones another
+ * path is still finishing, so the stream's end still returns with every release
+ * played. ⓘ No BRIDGE_STOP, as before: the listener sees the connections close.
+ * ⚠️ The wait gives up after 5 s rather than hanging an exit on a teardown that
+ * never finishes. */
 void release_local_sessions_on_exit(void)
 {
     ctm_tv_pointer_unplug();
-    for (int i = 0; i < g_session_count; ++i) {
-        if (g_sessions[i].controller) {
-            ctm_controller_plug_out_reason(g_sessions[i].controller,
-                                           CTM_UNPLUG_SHUTDOWN);
-            ctm_controller_destroy(g_sessions[i].controller);
-            g_sessions[i].controller = NULL;
+
+    char keys[MAX_SESSIONS][sizeof(g_sessions[0].key)];
+    ctm_controller_t *controllers[MAX_SESSIONS];
+    int n = 0;
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < g_session_count && n < MAX_SESSIONS; ++i) {
+        if (g_sessions[i].stopping) {
+            continue;
+        }
+        g_sessions[i].stopping = true;
+        snprintf(keys[n], sizeof(keys[n]), "%s", g_sessions[i].key);
+        controllers[n] = g_sessions[i].controller;
+        ++n;
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    for (int i = 0; i < n; ++i) {
+        if (controllers[i]) {
+            ctm_controller_plug_out_reason(controllers[i], CTM_UNPLUG_SHUTDOWN);
+            ctm_controller_destroy(controllers[i]);
         }
     }
-    g_session_count = 0;
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < n; ++i) {
+        session_remove_stopped_locked(keys[i]);
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 5;
+    for (;;) {
+        int still = 0;
+        for (int i = 0; i < g_session_count; ++i) {
+            if (g_sessions[i].stopping) ++still;
+        }
+        if (still == 0) {
+            break;
+        }
+        if (pthread_cond_timedwait(&g_sessions_cond, &g_sessions_mutex, &deadline) == ETIMEDOUT) {
+            log_append("release on exit: %d session(s) still being torn down after 5 s", still);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 const char *bridge_kind_for_item(const logical_device_t *item)
@@ -516,8 +609,22 @@ const char *bridge_kind_for_item(const logical_device_t *item)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5_usb" : "ds5";
     if (strcmp(item->vid, "054c") == 0 && strcmp(item->pid, "0df2") == 0)
         return strcmp(bus_label(item->bus), "USB") == 0 ? "ds5e_usb" : "ds5e";
+    /* ⭐⭐ THE BUS DECIDES, as it does for the DualSense arms above.
+     *
+     * ⛔ THE FAULT THIS FIXES: this arm answered "ds4" whatever the bus, so a
+     * CABLED DS4 was handed to the host as a Bluetooth one. The host then loads
+     * the map that reads Bluetooth report 0x11 while the pad sends 0x01, so the
+     * pad bridged, showed PLUGGED, and did nothing in the game.
+     *
+     * ⓘ A wired DS4 needs no report rewriting: its own 0x01 report is already
+     * exactly what the virtual wired DS4 emits, so the host side is a
+     * pass-through map, the way the wired DualSense's is. */
     if (strcmp(item->vid, "054c") == 0 &&
-        (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0)) return "ds4";
+        (strcmp(item->pid, "09cc") == 0 || strcmp(item->pid, "05c4") == 0))
+        return strcmp(bus_label(item->bus), "USB") == 0 ? "ds4_usb" : "ds4";
+    /* ⭐ Anything the Xbox driver runs reaches the host as an Xbox pad, whoever
+     * made it -- the TV reads them all the same way (controller_xpad.c). */
+    if (strcmp(item->driver, "xpad") == 0) return "xbox";
     if (strcmp(item->vid, "045e") == 0 &&
         (is_xbox_pid(item->pid) || contains_ci(item->name, "xbox"))) return "xbox";
     if (strcmp(item->vid, "28de") == 0 && strcmp(item->pid, "1304") == 0) return "puck";
@@ -580,23 +687,13 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     if (!item || scan_index < 0 || scan_index >= g_scan.count) {
         return false;
     }
-    if (!g_agent_online && !discover_agent_once()) {
+    if (!agent_is_known()) {
         log_append("Windows agent not found");
         return false;
     }
 
     const device_info_t *dev = &g_scan.devices[scan_index];
-    char response[512];
-    int port = next_bridge_port();
-    char cmd[256];
-    char busid[32];
     const char *kind = bridge_kind_for_item(item);
-    make_bridge_busid(item, busid, sizeof(busid));
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
-    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
-        log_append("agent bridge start failed: %s", response);
-        return false;
-    }
 
     /* Build the neutral descriptor and hand the device to a controller — one
      * mechanism for DS5/DS4/xbox/puck/generic (factory picks the ops). */
@@ -608,6 +705,38 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     snprintf(cdev.name, sizeof(cdev.name), "%s", item->name);
     snprintf(cdev.path, sizeof(cdev.path), "%s", dev->node);
     snprintf(cdev.mac, sizeof(cdev.mac), "%s", item->mac);
+    snprintf(cdev.serial, sizeof(cdev.serial), "%s", item->serial);
+    snprintf(cdev.driver, sizeof(cdev.driver), "%s", item->driver);
+
+    /* ⭐⭐ REFUSE A DEVICE THAT CANNOT BE READ, BEFORE THE HOST HEARS OF IT.
+     *
+     * ⛔ THE FAULT, measured on the U5s 2026-09-13 with both Xbox pads: their
+     * node is /dev/input/jsN, which cannot be read as HID. The session found
+     * that out on its own thread, after BRIDGE_START and after the row read
+     * bridged, and stopped without a word -- the row stayed bridged and the
+     * host kept a session that timed out 30 s later.
+     *
+     * ➡️ Asked here instead, so nothing is started that cannot run. */
+    const int refused = controller_preflight(&cdev);
+    if (refused != 0) {
+        log_append("refused %s: %s cannot be opened for bridging (%s)",
+                   item->name, dev->node, strerror(refused));
+        ctm_gesture_log(NULL, "bridge refused: %s (kind %s) at %s cannot be opened for "
+                        "bridging, errno=%d -- nothing was sent to the host",
+                        item->name, kind, dev->node, refused);
+        return false;
+    }
+
+    char response[512];
+    int port = next_bridge_port();
+    char cmd[256];
+    char busid[32];
+    make_bridge_busid(item, busid, sizeof(busid));
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
+    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
+        log_append("agent bridge start failed: %s", response);
+        return false;
+    }
 
     ctm_controller_t *controller = ctm_controller_create(&cdev);
     if (!controller) {
@@ -638,7 +767,19 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
     }
-    add_session(session_key, busid, controller, port);
+    /* ⛔ Its answer was ignored, which left a controller that could not be
+     * recorded running with nothing able to release it. Now it is torn down
+     * again: the table is full, or the key's previous session is still
+     * stopping (see add_session). */
+    if (!add_session(session_key, busid, controller, port)) {
+        log_append("controller for %s not recorded (table full, or its last session is "
+                   "still stopping); undoing the plug", session_key);
+        ctm_controller_plug_out(controller);
+        ctm_controller_destroy(controller);
+        snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
+        (void)send_agent_command(cmd, response, sizeof(response));
+        return false;
+    }
     log_append("controller started kind=%s node=%s busid=%s host=%s port=%d",
                kind, dev->node, busid, g_agent_host, port);
     return true;

@@ -142,6 +142,20 @@ void ctm_gesture_set_enabled(int on)
     g_gesture_enabled = on ? 1 : 0;
 }
 
+/* ⭐ The same switch and the same hold, for a DS4's chord in controller_ds4.c.
+ * ⛔ Read through here rather than by including this file a second time -- it
+ * defines the switch and the setter, and a second copy would be a second
+ * switch nobody sets. Nothing about the DualSense's chord changes. */
+int gesture_chord_enabled(void)
+{
+    return g_gesture_enabled;
+}
+
+int gesture_chord_hold_ms(void)
+{
+    return DS5_CHORD_HOLD_MS;
+}
+
 static void ds5_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c) return;

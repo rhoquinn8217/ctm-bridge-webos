@@ -6,6 +6,8 @@
 
 #include "ctm_state.h"
 #include "ctm_hid.h"   /* read_report_descriptor + interface classification */
+#include "device_identity.inl"
+#include "name_list.inl"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -46,7 +48,10 @@ device_info_t *find_or_add_input_device(scan_result_t *result,
         if (usb_busid && usb_busid[0] && strcmp(dev->usb_busid, usb_busid) == 0) {
             return dev;
         }
-        if (input_name && input_name[0] && strstr(dev->inputs, input_name)) {
+        /* ⛔ The whole name, never a substring (name_list.inl): "input3" was
+         * found inside "input30", and a GameSir's pad vanished into an Xbox One
+         * S pad's entry (U5s, 2026-09-14). */
+        if (input_name && input_name[0] && name_list_has(dev->inputs, input_name)) {
             return dev;
         }
     }
@@ -93,6 +98,70 @@ void usb_busid_from_input_path(const char *input_path, char *out, size_t out_len
     }
 }
 
+/* The USB device an input device hangs off, read from sysfs: its maker and
+ * product joined as the HID driver joins them for a name, and its own serial.
+ * ⛔ Only for a device on USB. From a Bluetooth device the walk up reaches the
+ * Bluetooth adapter's USB device, whose name and serial are not the device's. */
+static void usb_strings_for_input(const char *input_path, char *name, size_t name_len,
+                                  char *serial, size_t serial_len)
+{
+    name[0] = '\0';
+    serial[0] = '\0';
+    char link[PATH_MAX];
+    char dir[PATH_MAX];
+    snprintf(link, sizeof(link), "%s/device", input_path);
+    if (!realpath(link, dir)) {
+        return;
+    }
+    while (dir[0]) {
+        char attr[PATH_MAX + 16];
+        struct stat st;
+        snprintf(attr, sizeof(attr), "%s/idVendor", dir);
+        if (stat(attr, &st) == 0) {
+            char maker[TEXT_LEN] = {0};
+            char product[TEXT_LEN] = {0};
+            snprintf(attr, sizeof(attr), "%s/manufacturer", dir);
+            read_text_file(attr, maker, sizeof(maker));
+            snprintf(attr, sizeof(attr), "%s/product", dir);
+            read_text_file(attr, product, sizeof(product));
+            snprintf(attr, sizeof(attr), "%s/serial", dir);
+            read_text_file(attr, serial, serial_len);
+            if (maker[0] && product[0]) {
+                snprintf(name, name_len, "%.120s %.120s", maker, product);
+            } else {
+                snprintf(name, name_len, "%s", maker[0] ? maker : product);
+            }
+            return;
+        }
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) {
+            return;
+        }
+        *slash = '\0';
+    }
+}
+
+/* ⭐ WHICH PHYSICAL DEVICE A PART BELONGS TO (2026-09-14). A USB HID part's
+ * physical path is "usb-<controller>-<port path>/input<interface number>", so
+ * everything before "/input" is shared by every part of one device and by no
+ * other device, even an identical one in another port. The Xbox driver's path
+ * has the same shape. Anything else, Bluetooth included, is one part: its own
+ * group. */
+static void part_group_for_device(device_info_t *dev)
+{
+    dev->iface_num = -1;
+    if (strcmp(dev->bus, "0003") == 0 && starts_with(dev->phys, "usb-")) {
+        snprintf(dev->group, sizeof(dev->group), "%s", dev->phys);
+        char *input = strstr(dev->group, "/input");
+        if (input) {
+            dev->iface_num = atoi(input + 6);
+            *input = '\0';
+        }
+        return;
+    }
+    snprintf(dev->group, sizeof(dev->group), "node:%s", dev->node[0] ? dev->node : dev->hidraw);
+}
+
 void inspect_hidraw(device_info_t *dev)
 {
     if (!dev || !dev->node[0]) {
@@ -120,15 +189,25 @@ void inspect_hidraw(device_info_t *dev)
 
     struct hidraw_devinfo info;
     memset(&info, 0, sizeof(info));
+    bool on_usb = false;
     if (ioctl(fd, HIDIOCGRAWINFO, &info) == 0) {
         if (!dev->bus[0]) snprintf(dev->bus, sizeof(dev->bus), "%04x", info.bustype);
         if (!dev->vid[0]) snprintf(dev->vid, sizeof(dev->vid), "%04x", (unsigned short)info.vendor);
         if (!dev->pid[0]) snprintf(dev->pid, sizeof(dev->pid), "%04x", (unsigned short)info.product);
+        on_usb = info.bustype == 0x03;   /* BUS_USB */
     }
 
     char raw_name[TEXT_LEN] = {0};
-    if (!dev->name[0] && ioctl(fd, HIDIOCGRAWNAME(sizeof(raw_name) - 1), raw_name) >= 0) {
-        snprintf(dev->name, sizeof(dev->name), "%s", raw_name);
+    if (ioctl(fd, HIDIOCGRAWNAME(sizeof(raw_name) - 1), raw_name) >= 0) {
+        if (!dev->name[0]) {
+            snprintf(dev->name, sizeof(dev->name), "%s", raw_name);
+        }
+        /* ⓘ On USB the HID driver builds this name from the device's maker and
+         * product strings, so it stands in for sysfs when a part has no input
+         * node to reach the USB device through. */
+        if (on_usb && !dev->device_name[0]) {
+            snprintf(dev->device_name, sizeof(dev->device_name), "%s", raw_name);
+        }
     }
 
     char raw_phys[TEXT_LEN] = {0};
@@ -139,6 +218,11 @@ void inspect_hidraw(device_info_t *dev)
     char raw_uniq[64] = {0};
     if (!dev->mac[0] && ioctl(fd, HIDIOCGRAWUNIQ(sizeof(raw_uniq) - 1), raw_uniq) >= 0) {
         snprintf(dev->mac, sizeof(dev->mac), "%s", raw_uniq);
+    }
+    /* ⓘ The same for the serial: on USB the HID driver copies the device's
+     * serial into uniq, unless a driver put a MAC there instead (a DualSense). */
+    if (on_usb && !dev->usb_serial[0] && dev->mac[0] && !identity_mac_shaped(dev->mac)) {
+        snprintf(dev->usb_serial, sizeof(dev->usb_serial), "%s", dev->mac);
     }
 
     int desc_size = 0;
@@ -226,8 +310,14 @@ bool is_gulikit_named_device(const char *name)
 
 bool is_xpad_input_only_candidate(const char *bus, const char *vid,
                                          const char *pid, const char *name,
-                                         const char *usb_busid)
+                                         const char *usb_busid, const char *driver)
 {
+    /* ⭐ Anything the Xbox driver runs is one, whatever it is called and whoever
+     * made it: the names and ids below miss pads like a GameSir in its Xbox mode
+     * ("Generic X-Box pad", vendor 3537) and Microsoft's own wired 360 pad. */
+    if (driver && strcmp(driver, "xpad") == 0) {
+        return true;
+    }
     return usb_busid && usb_busid[0] &&
            (strcmp(bus_label(bus), "USB") == 0) &&
            (is_xpad_compatible_pid(vid, pid) ||
@@ -375,6 +465,8 @@ logical_device_t *find_or_add_logical_device(logical_result_t *logical, const de
     snprintf(item->pid, sizeof(item->pid), "%s", dev->pid);
     snprintf(item->mac, sizeof(item->mac), "%s", dev->mac);
     snprintf(item->usb_busid, sizeof(item->usb_busid), "%s", dev->usb_busid);
+    snprintf(item->driver, sizeof(item->driver), "%s", dev->driver);
+    snprintf(item->serial, sizeof(item->serial), "%s", dev->serial);
     item->plugged = plug_key_is_set(item->key);
     item->device_indices[item->device_count++] = scan_index;
     return item;
@@ -618,6 +710,26 @@ void enumerate_devices(scan_result_t *result)
             read_text_file((snprintf(child_path, sizeof(child_path), "%s/id/version", input_path), child_path), version, sizeof(version));
             read_text_file((snprintf(child_path, sizeof(child_path), "%s/uniq", input_path), child_path), uniq, sizeof(uniq));
             usb_busid_from_input_path(input_path, usb_busid, sizeof(usb_busid));
+            char usb_name[TEXT_LEN] = {0};
+            char usb_serial[64] = {0};
+            if (strcmp(bus, "0003") == 0) {
+                usb_strings_for_input(input_path, usb_name, sizeof(usb_name),
+                                      usb_serial, sizeof(usb_serial));
+            }
+
+            /* ⭐ Which driver runs it, read from the link rather than resolved:
+             * realpath of sysfs links is flaky inside the dev-mode jail, and
+             * only the link's last element is wanted. */
+            char driver[32] = {0};
+            {
+                char target[PATH_MAX];
+                snprintf(child_path, sizeof(child_path), "%s/device/driver", input_path);
+                const ssize_t n = readlink(child_path, target, sizeof(target) - 1);
+                if (n > 0) {
+                    target[n] = '\0';
+                    identity_link_leaf(target, driver, sizeof(driver));
+                }
+            }
 
             char event_names[TEXT_LEN] = {0};
             char input_node[64] = {0};
@@ -642,7 +754,7 @@ void enumerate_devices(scan_result_t *result)
             snprintf(hidraw_path, sizeof(hidraw_path), "%s/device/hidraw", input_path);
             DIR *hidraw_dir = opendir(hidraw_path);
             if (!hidraw_dir) {
-                if (is_xpad_input_only_candidate(bus, vid, pid, name, usb_busid)) {
+                if (is_xpad_input_only_candidate(bus, vid, pid, name, usb_busid, driver)) {
                     device_info_t *dev = find_or_add_input_device(result, input_ent->d_name, usb_busid);
                     if (dev) {
                         if (!dev->node[0]) {
@@ -657,6 +769,20 @@ void enumerate_devices(scan_result_t *result)
                         if (!dev->version[0]) snprintf(dev->version, sizeof(dev->version), "%s", version);
                         if (!dev->mac[0]) snprintf(dev->mac, sizeof(dev->mac), "%s", uniq);
                         if (!dev->usb_busid[0]) snprintf(dev->usb_busid, sizeof(dev->usb_busid), "%s", usb_busid);
+                        if (!dev->driver[0]) snprintf(dev->driver, sizeof(dev->driver), "%s", driver);
+                        if (!dev->device_name[0]) snprintf(dev->device_name, sizeof(dev->device_name), "%s", usb_name);
+                        if (!dev->usb_serial[0]) snprintf(dev->usb_serial, sizeof(dev->usb_serial), "%s", usb_serial);
+                        if (!dev->serial[0]) {
+                            /* ⭐ The Xbox driver fills no uniq, so the identity is
+                             * the USB device's own serial number: the parent of
+                             * the interface this input device hangs off. Measured
+                             * on the U5s 2026-09-13 -- the Series pad gave
+                             * 3039373031333032333734303237, the GameSir 3286967D. */
+                            char usb_serial[64] = {0};
+                            snprintf(child_path, sizeof(child_path), "%s/device/../serial", input_path);
+                            read_text_file(child_path, usb_serial, sizeof(usb_serial));
+                            identity_pick_serial(uniq, usb_serial, dev->serial, sizeof(dev->serial));
+                        }
                         append_unique(dev->inputs, sizeof(dev->inputs), input_ent->d_name);
                         append_unique(dev->events, sizeof(dev->events), event_names);
                     }
@@ -681,6 +807,9 @@ void enumerate_devices(scan_result_t *result)
                 if (!dev->version[0]) snprintf(dev->version, sizeof(dev->version), "%s", version);
                 if (!dev->mac[0]) snprintf(dev->mac, sizeof(dev->mac), "%s", uniq);
                 if (!dev->usb_busid[0]) snprintf(dev->usb_busid, sizeof(dev->usb_busid), "%s", usb_busid);
+                if (!dev->driver[0]) snprintf(dev->driver, sizeof(dev->driver), "%s", driver);
+                if (!dev->device_name[0]) snprintf(dev->device_name, sizeof(dev->device_name), "%s", usb_name);
+                if (!dev->usb_serial[0]) snprintf(dev->usb_serial, sizeof(dev->usb_serial), "%s", usb_serial);
                 append_unique(dev->inputs, sizeof(dev->inputs), input_ent->d_name);
                 append_unique(dev->events, sizeof(dev->events), event_names);
 
@@ -711,7 +840,40 @@ void enumerate_devices(scan_result_t *result)
     }
 
     for (int i = 0; i < result->count; ++i) {
-        inspect_hidraw(&result->devices[i]);
+        device_info_t *dev = &result->devices[i];
+        inspect_hidraw(dev);
+        /* ⭐ A HID device's identity is its uniq, read last because
+         * inspect_hidraw() may only just have filled it: the USB serial number
+         * on a cable, which the HID driver copies in, and the MAC over
+         * Bluetooth. An input-only device already has its own from above. */
+        if (!dev->serial[0]) {
+            identity_pick_serial(dev->mac, "", dev->serial, sizeof(dev->serial));
+        }
+    }
+
+    /* ⭐ Which physical device each part belongs to, then each device's name and
+     * serial shared across all of its parts: a part with no input node of its
+     * own may have been read without them. */
+    for (int i = 0; i < result->count; ++i) {
+        part_group_for_device(&result->devices[i]);
+    }
+    for (int i = 0; i < result->count; ++i) {
+        device_info_t *dev = &result->devices[i];
+        if (!starts_with(dev->group, "usb-")) {
+            continue;
+        }
+        for (int j = 0; j < result->count && (!dev->device_name[0] || !dev->usb_serial[0]); ++j) {
+            const device_info_t *other = &result->devices[j];
+            if (j == i || strcmp(other->group, dev->group) != 0) {
+                continue;
+            }
+            if (!dev->device_name[0] && other->device_name[0]) {
+                snprintf(dev->device_name, sizeof(dev->device_name), "%s", other->device_name);
+            }
+            if (!dev->usb_serial[0] && other->usb_serial[0]) {
+                snprintf(dev->usb_serial, sizeof(dev->usb_serial), "%s", other->usb_serial);
+            }
+        }
     }
 }
 
@@ -731,5 +893,59 @@ bool item_is_mouse_or_keyboard(const logical_device_t *item)
         }
     }
     return false;
+}
+
+/* ⭐ Is this a game controller? Only controllers are auto-bridged or given a
+ * config (rhoquinn8217, 2026-09-13), and a HID gamepad is as much one as a
+ * DualSense.
+ *
+ * A kind the bridge knows -- DualSense, DS4, Xbox, which includes everything
+ * the Xbox driver runs -- is a controller. So is any HID device whose top-level
+ * usage is a joystick (1/4), a gamepad (1/5) or a multi-axis controller (1/8).
+ * ⛔ A keyboard or a mouse is not, whatever its name says. */
+bool item_is_controller(const logical_device_t *item)
+{
+    if (!item) return false;
+    const char *kind = bridge_kind_for_item(item);
+    /* ⚠️ PREFIXES, NOT EXACT NAMES. Each family has a wired kind as well as a
+     * Bluetooth one -- ds4 and ds4_usb, ds5 through ds5e_usb -- and an exact
+     * match on the Bluetooth name drops the cabled pad out of being a
+     * controller at all, taking its type label and its auto-bridge mark with it. */
+    if (kind && (strncmp(kind, "ds5", 3) == 0 || strncmp(kind, "ds4", 3) == 0 ||
+                 strcmp(kind, "xbox") == 0)) {
+        return true;
+    }
+    for (int i = 0; i < item->device_count; ++i) {
+        int idx = item->device_indices[i];
+        if (idx < 0 || idx >= g_scan.count) continue;
+        const device_info_t *dev = &g_scan.devices[idx];
+        if (dev->usage_page == 1 && (dev->usage == 4 || dev->usage == 5 || dev->usage == 8)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ⭐ A word for what the device is, for a person reading a row: "controller",
+ * "keyboard", "mouse", or "other" when its description names none of those.
+ * rhoquinn8217, 2026-09-13: a row named "Microsoft Xbox 360 for Windows
+ * Controller" that is really a keyboard needs "some hint as to what it is"; and
+ * 2026-09-14, anything else is "other" rather than no word at all. */
+const char *item_type_label(const logical_device_t *item)
+{
+    if (!item) return "other";
+    if (item_is_controller(item)) return "controller";
+    const char *found = "other";
+    for (int i = 0; i < item->device_count; ++i) {
+        int idx = item->device_indices[i];
+        if (idx < 0 || idx >= g_scan.count) continue;
+        const device_info_t *dev = &g_scan.devices[idx];
+        const char *type = identity_type_for_usage(dev->usage_page, dev->usage);
+        /* ⓘ A keyboard wins over a mouse sharing the row: the keys are the
+         * part that would type on the PC. */
+        if (strcmp(type, "keyboard") == 0) return "keyboard";
+        if (type[0] != '\0') found = type;
+    }
+    return found;
 }
 

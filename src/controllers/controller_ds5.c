@@ -253,14 +253,14 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
                     patched = 1;
                 }
             }
-            if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
+            if (block_id == 0x91 && payload_len >= 6) {
                 for (size_t i = 3; i <= 7; ++i) {
                     if (data[pos + i] != auto_latency) {
                         data[pos + i] = auto_latency;
                         patched = 1;
                     }
                 }
-            } else if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
+            } else if (block_id == 0x90 && payload_len >= 8) {
                 /* AUTO MEANS "FOLLOW THE HOST" -- AND THE HOST ASKS FOR
                  * NOTHING.
                  *
@@ -392,26 +392,26 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         if (block_id == 0 && payload_len == 0) break;
         if (block_len > limit - pos) break;
 
-        /* ⭐ Withhold the host's lightbar claim for the moment after a bridge,
-         * while the app draws its confirmation. See light_hold_until_ms. */
-        if (block_id == 0x90 && payload_len >= 2 && ctm_controller_light_held(c)) {
-            if (data[pos + 3] & 0x04) {              /* lightbar control */
-                data[pos + 3] &= (uint8_t)~0x04;
-                patched = 1;
-                /* ⭐ COUNTED, because "the light still flickers" cannot say
-                 * whether this ran. ⛔ Silence in the log means the hold never
-                 * fired -- the deadline was not set, or the window had already
-                 * closed. A count means it fired and the colour arrived some
-                 * other way. ⓘ Logged once per session, not per report. */
-                static int s_held_logged;
-                if (!s_held_logged) {
-                    s_held_logged = 1;
-                    ctl_log(c, "lightbar: withholding the host's claim during the handover");
-                }
-            }
-        }
+        /* ⛔ THE 1.4 SECOND LIGHTBAR HOLD IS GONE (measured 2026-09-15).
+         *
+         * It withheld the host's lightbar claim for 1.4 s after a session
+         * opened, so the app's confirmation could have the light to itself --
+         * and it never once fired. The line it printed when it did appears in
+         * no log on either set.
+         *
+         * ⭐ THE REASON IS A TIMING ONE, and it could not have been read off
+         * the code: the hold ran from the session opening, while the TV's own
+         * connected signal over Bluetooth takes about 2.4 s
+         * (`btsig: call #1 ... took 2421ms`). The host's claim arrives after
+         * that signal ends, so it was always outside the window.
+         *
+         * ⓘ Watched on a pad on the U5s (rhoquinn8217): teal from Steam before
+         * the bridge, through the emulated DS4; then the pre-plug pulse's
+         * purple, the core's green, and teal again when Steam claims the real
+         * pad. The app's own gate still drops the host's colour while one of
+         * ITS patterns plays, and that one does fire. */
 
-        if (BT_FEAT_AUDIO && block_id == 0x90 && payload_len >= 8) {
+        if (block_id == 0x90 && payload_len >= 8) {
             /* WHAT ARRIVES HERE, measured on C3 over Bluetooth 2026-08-11.
              *
              * Recorded because two builds of logging were spent finding it,
@@ -457,19 +457,19 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             if (ctm_controller_tone_take(c, &data[pos + 2], (int)payload_len) > 0) {
                 patched = 1;
             }
-        } else if (BT_FEAT_AUDIO && (block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
+        } else if ((block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {
             if (data[pos] != audio_block) {
                 data[pos] = audio_block;
                 patched = 1;
             }
-        } else if (BT_FEAT_LATENCY && block_id == 0x91 && payload_len >= 6) {
+        } else if (block_id == 0x91 && payload_len >= 6) {
             for (size_t i = 3; i <= 7; ++i) {
                 if (data[pos + i] != latency) {
                     data[pos + i] = latency;
                     patched = 1;
                 }
             }
-        } else if (BT_FEAT_HAPTICS && block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
+        } else if (block_id == 0x92 && payload_len >= 2 && settings->haptics_gain_centi != 100) {
             double gain = ds5_haptics_gain(settings->haptics_gain_centi);
             for (size_t i = 2; i < block_len; ++i) {
                 int sample = (int)(int8_t)data[pos + i];
@@ -548,6 +548,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .needs_host_config = true,
     .grab_evdev = true,
     .request_bt_mode = true,
+    .speaks_ds5 = true,
     .matches = ds5_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
@@ -565,6 +566,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .needs_host_config = true,
     .grab_evdev = true,
     .request_bt_mode = true,
+    .speaks_ds5 = true,
     .matches = ds5e_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,

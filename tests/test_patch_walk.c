@@ -158,20 +158,6 @@ static void test_nothing_is_not_a_crash(void)
     ok(walk(rep, 0, f, 4, &touched) == 0, "a zero-length report is safe");
 }
 
-/* Stripping the lightbar claim must touch that bit and no other.
- *
- * ⛔ The bit next to it is the PLAYER LEDS and the one below is POWER SAVE,
- * which can switch a controller off. A careless mask reaches both. */
-static void test_stripping_the_lightbar_leaves_its_neighbours(void)
-{
-    puts("withholding the lightbar claim touches nothing else");
-    uint8_t flags2 = 0x14 | 0x02;   /* lightbar, player LEDs, power save */
-    uint8_t after = (uint8_t)(flags2 & ~0x04);
-    ok((after & 0x04) == 0, "the lightbar claim is gone");
-    ok((after & 0x10) != 0, "the player-LED claim is untouched");
-    ok((after & 0x02) != 0, "the power-save claim is untouched");
-}
-
 /* ⭐⭐ THE GUARD ON THE MIRROR. */
 static void test_mirrors_the_real_source(void)
 {
@@ -198,7 +184,12 @@ static void test_mirrors_the_real_source(void)
     fclose(fp);
     ok(guard,      "the overrun guard is still there");
     ok(terminator, "the terminator check is still there");
-    ok(strip,      "the lightbar strip still clears only bit 0x04");
+    /* ⛔ AND THE STRIP SHOULD STAY GONE. It withheld the host's lightbar claim
+     * for 1.4 s after a session opened and never once fired: the connected
+     * signal beside it runs longer than the window did, so the claim always
+     * arrived late. Removed 2026-09-15; this check is what stops it coming
+     * back unnoticed. */
+    ok(!strip,     "the lightbar strip is gone, as it was removed for never firing");
 }
 
 int main(void)
@@ -209,7 +200,6 @@ int main(void)
     test_a_truncated_last_block_is_refused();       puts("");
     test_the_walk_always_advances();                puts("");
     test_nothing_is_not_a_crash();                  puts("");
-    test_stripping_the_lightbar_leaves_its_neighbours(); puts("");
     test_mirrors_the_real_source();                 puts("");
     printf("%d checks, %d failed\n\n", checks, failed);
     return failed ? 1 : 0;

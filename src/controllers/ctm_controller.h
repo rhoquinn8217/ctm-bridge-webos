@@ -29,21 +29,68 @@ typedef struct {
     char bus[8];      /* "USB" / "BT" */
     char name[128];
     char path[64];    /* /dev/hidrawN */
-    char mac[64];
+    char mac[64];     /* ⚠️ the kernel's uniq, which is not always a MAC */
+    /* ⭐ The identity the host links a config on (device_identity.inl): uniq, or
+     * the USB serial where no driver filled uniq. A DualSense replaces it with
+     * its own MAC once its session has asked, and so does a cabled DS4 (its
+     * type's read_pad_mac). */
+    char serial[64];
+    /* The kernel driver bound to the device, e.g. "xpad"; empty if unknown. */
+    char driver[32];
 } ctm_controller_dev_t;
 
 typedef struct ctm_controller ctm_controller_t;   /* opaque; defined in stage 2 */
 
+/* Why a controller is being unplugged. The routes mean different things and
+ * end in the same place, so the caller says which it was: the log records it,
+ * and the controller's own signal can eventually differ. */
+typedef enum {
+    CTM_UNPLUG_REQUESTED = 0,   /* the user asked -- gesture or overlay button */
+    CTM_UNPLUG_SHUTDOWN,        /* everything torn down at once */
+    CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
+} ctm_unplug_reason_t;
+
 typedef struct {
-    const char *kind;   /* "ds5" / "ds4" / "xbox" / "steam_puck" / "generic" */
+    const char *kind;   /* "ds5" / "ds4" / "ds4_usb" / "xbox" / "xpad" / "steam_puck" / "generic" */
 
     /* Behaviour flags preserving each path's proven semantics in the shared
-     * pump. DS (worker) = all true; puck/xbox/generic (relay) = all false. */
+     * pump. DS (worker) = all true; puck, xbox and xpad = all false; generic
+     * grabs keyboards and mice and nothing else. */
     bool needs_host_config;   /* block for HOST_CONFIG after HELLO (DS pacing) */
-    bool grab_evdev;          /* EVIOCGRAB the device's evdev nodes (BT/DS) */
+    /* EVIOCGRAB the device's input nodes, so the TV stops using its input while
+     * the host has it. ⛔ Generic was false until 2026-09-13, and a bridged
+     * keyboard typed every key twice: once through the bridge, once through the
+     * stream, because the TV still read it.
+     *
+     * ⛔⛔ BUT NEVER A PAD SDL READS THROUGH EVDEV. A grab hides it from SDL,
+     * and rhoquinn8217 set that the overlay combo works while bridged. ⓘ A
+     * DualSense is grabbed safely only because SDL opens it through hidraw,
+     * which a grab does not touch. A handed-over pad needs no grab to stay off
+     * the host: Moonlight's pad for it is retired. */
+    bool grab_evdev;
+    /* With grab_evdev: leave the device alone when its report descriptor says
+     * joystick, gamepad or multi-axis controller. For generic, which serves
+     * keyboards, mice and pads alike. */
+    bool grab_skips_gamepads;
     bool request_bt_mode;     /* send the Sony feature-0x05 full-BT-mode probe */
     bool composite;           /* forward EVERY HID interface, each tagged by its IN
                                * endpoint (puck); host plugs the whole composite. */
+
+    /* ⭐⭐ Does this device speak the DualSense protocol? Its feature report
+     * 0x09, its Bluetooth reports 0x31, 0x32 and 0x36, its microphone and its
+     * USB sound card. True for the DualSense and the Edge, and nothing else.
+     *
+     * ⛔ Every session step built for a DualSense asks this before it runs: the
+     * identity probe, the speaker wake, the card match, the microphone, the
+     * confirmation tone and the microphone-safety check. They used to ask the
+     * bus, or whether an audio device was open, and both say yes for things
+     * that are not DualSenses. Measured on the U5s 2026-09-13: a keyboard
+     * dongle waited 5 s at every bridge for a report only a DualSense answers,
+     * and was sent 242 DualSense sound reports at bridge and again at release.
+     *
+     * ⚠️ Not the same question as grab_evdev or needs_host_config, which a DS4
+     * also answers yes to. A DS4 speaks its own protocol, not this one. */
+    bool speaks_ds5;
 
     /* Does this type claim the device? Factory tries specific types first,
      * generic last. */
@@ -57,6 +104,16 @@ typedef struct {
     /* Optional one-shot init after plug, before the pump starts (xbox GIP
      * handshake, puck lizard-mode exit). NULL => none. */
     int (*on_plug_init)(ctm_controller_t *c, ctm_transport_t *t);
+
+    /* ⭐ A TYPE'S OWN READ OF ITS PAD'S MAC ON A CABLE, for a type that does not
+     * speak the DualSense protocol (a DS4's feature report 0x12; a DualSense's
+     * 0x09 is asked through speaks_ds5). Fill `out` with "aa:bb:cc:dd:ee:ff" and
+     * return true, or return false when the pad gave nothing usable. The result
+     * becomes this pad's identity, as the DualSense's does. NULL => none.
+     * When: opening the node, USB only, before the identity the host links a
+     * config on is chosen. ⛔ Set it only for a pad that answers: a device that
+     * ignores a feature request holds the open for the kernel's 5 s timeout. */
+    bool (*read_pad_mac)(ctm_controller_t *c, int fd, char *out, size_t out_len);
 
     /* Peek at each input report as it is relayed, before it goes to the host.
      * Read-only: the report is forwarded unchanged either way. NULL => no peek.
@@ -74,7 +131,9 @@ typedef struct {
      * game. Sending a blank report is what releases it. ⓘ It also keeps the
      * cadence steady, so nothing upstream concludes the controller has gone.
      *
-     * NULL => this type cannot be blanked and its input is relayed unchanged. */
+     * NULL => the pump blanks a gamepad by a plan built from its report
+     * descriptor (pad_blank.inl), and a Pro Controller's full report by its own
+     * layout; a report nothing places is relayed unchanged. */
     void (*blank_input)(uint8_t *data, size_t len);
 
     /* Patch an outbound report in place before it reaches the device (DS audio
@@ -84,6 +143,61 @@ typedef struct {
 
     /* Live UI settings update (DS sliders). NULL => ignored. */
     void (*set_settings)(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
+
+    /* ⭐⭐ A TYPE'S OWN CONFIRMATION SIGNALS, for a controller that does not
+     * speak the DualSense protocol and so gets none of its signals (a cabled
+     * DS4's light and rumble). Called only when speaks_ds5 is false. NULL =>
+     * no signal, which is what every such type had before.
+     *
+     *   signal_connected   the session has started. When: the session thread,
+     *                      at the spot a DualSense's connected signal starts.
+     *                      ⛔ MUST NOT BLOCK -- that thread carries the reports.
+     *                      Play on a thread of your own, and claim the
+     *                      controller for it with controller_signal_begin first.
+     *   signal_unplugging  the controller is being released. When: plug-out,
+     *                      before the session stops and the node closes, and
+     *                      after any signal thread this controller had running
+     *                      has finished. Synchronous: return once it has played. */
+    void (*signal_connected)(ctm_controller_t *c);
+    void (*signal_unplugging)(ctm_controller_t *c, ctm_unplug_reason_t why);
+
+    /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
+     *
+     * A wired Xbox pad under xpad has no hidraw node, so there are no reports
+     * to relay. These let a type read its input node and make the reports
+     * itself. All NULL for every hidraw type, which keeps the pump exactly as
+     * it was for them -- except `current_report` and `keepalive_ms` for a
+     * hidraw pad that reports only when something changes: a Bluetooth Xbox
+     * pad (controller_xbox.c) keeps its last report and has it sent again, and
+     * the generic type sets only `keepalive_ms`, so the pump keeps a gamepad's
+     * last report itself. ⭐ Either way, until the pad has sent a report, the
+     * pump sends one with nothing pressed built from its descriptor
+     * (pad_blank.inl), so a pad bridged and never touched is not dropped.
+     *
+     *   preflight       can the device be opened; 0 or the errno. Replaces
+     *                   the hidraw check before BRIDGE_START.
+     *   open_input      open the node, fill caps (no report descriptor),
+     *                   return the fd or -1. The pump then GRABS THIS FD
+     *                   ITSELF: a grab through another handle would take the
+     *                   events from this one too.
+     *   read_input      turn what the node has into one report; its length,
+     *                   0 for nothing complete yet, -1 on error.
+     *   current_report  the report for the present state, with no I/O. Sent
+     *                   at once when a session starts and again whenever
+     *                   `keepalive_ms` pass with nothing sent, because an
+     *                   input node is silent while nothing moves. ⛔ Not only
+     *                   for the listener's 15 s silence limit: its cursor,
+     *                   scroll and turbo advance when a report arrives, so a
+     *                   pad needs the steady stream a hidraw pad sends (every
+     *                   4 ms for an Xbox pad).
+     *   write_output    act on a report from the host (rumble); 0 or -1. */
+    int (*preflight)(const ctm_controller_dev_t *dev);
+    int (*open_input)(ctm_controller_t *c, const ctm_controller_dev_t *dev,
+                      ctmb_device_caps_t *caps);
+    int (*read_input)(ctm_controller_t *c, int fd, uint8_t *report, size_t cap);
+    int (*current_report)(ctm_controller_t *c, uint8_t *report, size_t cap);
+    int (*write_output)(ctm_controller_t *c, int fd, const uint8_t *report, size_t len);
+    unsigned keepalive_ms;
 } ctm_controller_ops_t;
 
 /* Live bridging status — read-only snapshot for the UI status panel. */
@@ -114,16 +228,31 @@ typedef struct {
 /* --- lifecycle (controller_common.c) ----------------------------------------
  * Each controller runs in isolation: its own pump (reader + session threads),
  * HID fd, transport, settings, and per-MAC log file. */
+
+/* Can this device be bridged at all? Opens the node the session would open,
+ * checks it is the device the row says (a HID device, or the type's own check
+ * for an input-node type), and closes it again. Returns 0, or the errno that
+ * refused it.
+ *
+ * When: before BRIDGE_START. ⛔ A node that cannot be read used to be found out
+ * on the session thread, after the host had built a session for it and the row
+ * already read bridged -- and nothing then told either of them. */
+int controller_preflight(const ctm_controller_dev_t *dev);
+
+/* Somewhere for a TYPE to keep its own per-controller state, which the opaque
+ * struct otherwise gives it no room for. Freed with free() when the controller
+ * is destroyed. When: an input-node type keeps its pad state here. */
+void *controller_type_ctx(const ctm_controller_t *c);
+void controller_set_type_ctx(ctm_controller_t *c, void *ctx);
+
+/* Is this a Microsoft Xbox pad's product id? Shared by the Bluetooth type and
+ * the wired, input-node type. */
+bool xbox_known_pid(const char *pid);
+
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev);
 int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
-/* Why a controller is being unplugged. The routes mean different things and
- * end in the same place, so the caller says which it was: the log records it,
- * and the controller's own signal can eventually differ. */
-typedef enum {
-    CTM_UNPLUG_REQUESTED = 0,   /* the user asked -- gesture or overlay button */
-    CTM_UNPLUG_SHUTDOWN,        /* everything torn down at once */
-    CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
-} ctm_unplug_reason_t;
+/* ⓘ ctm_unplug_reason_t is declared at the top, beside the opaque type: the
+ * ops table's signal_unplugging takes one. */
 
 void ctm_controller_plug_out(ctm_controller_t *c);
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why);
@@ -145,58 +274,14 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
  * button for it yet. */
 #define CTM_SIGNALS_ENABLED 1
 
-/* T-120: the Bluetooth confirmation tone, gated separately so the layered
- * rebuild in aurora can add it last. Bluetooth-only by construction -- it is
- * read inside the alsa_fd < 0 branch of feedback_play(). Wired is untouched.
- * The matching gates for gesture, light and rumble live in aurora's
- * ctm_bridge_gesture.c. */
-/* ⚠️ NAMED BT_LAYER_TONE UNTIL STEP 5, WHICH WAS MISLEADING. It gates the
- * core's WHOLE Bluetooth signal -- light, sound and feel together. On Bluetooth
- * the controller's speaker and its haptics are the same audio device and the
- * lightbar rides the same report, so the three arrive as one stream and cannot
- * be gated apart. The old name cost a step to notice: BT_LAYER_RUMBLE could do
- * nothing while this was off, and nobody expected a "tone" switch to silence a
- * rumble. */
-#define BT_LAYER_CORE_SIGNAL 1
-
-/* ⭐⭐ T-120: WHAT THE BRIDGE WRITES TO A CONTROLLER WHILE IT IS BRIDGED.
- *
- * The BT_LAYER_ gates above cover the CONFIRMATION signals -- the things that
- * happen once, at the moment of bridging. These cover the ongoing ones: what
- * the output patcher puts into every report the host sends.
- *
- * ⛔ Separate on purpose. A confirmation that costs five seconds is a bad
- * bridge; an ongoing write that costs anything is a bad SESSION, and the two
- * fail in ways that look nothing alike.
- *
- * ⚠️ THESE ARE NOT BLUETOOTH-ONLY. The patcher runs on the Bluetooth report
- * format, so a cable never reaches it -- but that is a property of the report,
- * not of a check, and it is worth knowing the difference. A wired controller
- * gets its audio through ALSA and its haptics inside the same reports.
- *
- * ⓘ All 1: nothing is switched off. They exist so a layer can be removed for
- * one build and put back, the way the confirmation gates were.
- *
- *   BT_FEAT_AUDIO    block 0x90 -- volumes, routing, echo cancellation
- *                    and 0x93-0x96 -- the speaker's own audio frames
- *   BT_FEAT_LATENCY  block 0x91 -- the audio buffer, host-owned
- *   BT_FEAT_HAPTICS  block 0x92 -- haptics gain
- *
- * ⛔ THE LIGHTBAR HAS NO GATE HERE, and that is not an oversight: the core
- * writes no lightbar at all. It belongs to the player colour from the app side
- * and to the Bluetooth confirmation signal, which BT_LAYER_LIGHT already
- * covers. */
-/* ⭐ How long after a session opens the relay withholds the host's lightbar
- * claim, so the app's confirmation pattern has the light to itself.
- *
- * ⓘ Slightly longer than one breath (1100 ms), and far shorter than anything a
- * game would notice. ⛔ Not a policy about who owns the lightbar -- the host
- * does. This is the handover. */
-#define LIGHT_HOLD_MS    1400
-
-#define BT_FEAT_AUDIO    1
-#define BT_FEAT_LATENCY  1
-#define BT_FEAT_HAPTICS  1
+/* ⓘ T-120 REBUILT THE BLUETOOTH PATH ONE LAYER AT A TIME, behind switches: the
+ * core's Bluetooth confirmation signal (BT_LAYER_CORE_SIGNAL) and what the
+ * output patcher writes into a bridged pad's reports -- block 0x90 volumes,
+ * routing and the speaker's audio frames 0x93-0x96 (BT_FEAT_AUDIO), 0x91 the
+ * audio buffer (BT_FEAT_LATENCY), 0x92 haptics gain (BT_FEAT_HAPTICS). Every
+ * layer came back on, the switches stayed pinned to 1, and they were removed
+ * with the branches they guarded on 2026-09-15. The user's own settings are
+ * what decide those writes now. */
 
 /* Signal a REFUSED plug, with no session behind it.
  *
@@ -256,16 +341,14 @@ void ctm_bt_sign_output(uint8_t *data, size_t len);
  * differently per transport -- report formats differ between the two. */
 const char *ctm_controller_bus(const ctm_controller_t *c);
 
-/* Should the host's lightbar claim be withheld right now?
- *
- * ⭐ True only for the moment after a session opens, while the app draws its
- * confirmation pattern. See LIGHT_HOLD_MS. ⓘ An accessor because the struct is
- * opaque outside controller_common.c. */
-bool ctm_controller_light_held(ctm_controller_t *c);
-
 /* Switch the UNBRIDGE chord on or off. ⭐ The app owns the setting and owns the
  * bridge half of the gesture; this is the half it cannot see. Defaults on. */
 void ctm_gesture_set_enabled(int on);
+/* That same switch, and the DualSense chord's hold in milliseconds, for another
+ * type's unbridge chord (a DS4's). ⭐ Read from ctm_gesture_chord.inl, so there
+ * is one switch and one hold, not a copy of each that can drift. */
+int gesture_chord_enabled(void);
+int gesture_chord_hold_ms(void);
 
 /* ⭐⭐ Hold a bridged controller's INPUT while the TV's own overlay is open.
  *
@@ -298,6 +381,12 @@ void ctm_input_set_held(int held);
  *
  * ⓘ All default ON, so a core told nothing behaves as it always has. */
 void ctm_signals_set_enabled(int light, int rumble, int tone);
+/* Is the felt pulse allowed right now? For a type that confirms with a rumble
+ * of its own rather than the DualSense signal. */
+int signals_rumble_on(void);
+/* Is the light allowed right now? The same, for a type that paints a lightbar
+ * of its own. ⓘ Like the pulse's, it answers no when CTM_SIGNALS_ENABLED is off. */
+int signals_light_on(void);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for
  * voice chat through the controller itself. ⓘ Defaults on. */
@@ -312,6 +401,48 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c);
  * report along. */
 int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t len);
 
+/* ⭐⭐ A TYPE'S CONFIRMATION SIGNAL ON A THREAD OF ITS OWN, and what keeps that
+ * thread from outliving the node it writes to.
+ *
+ * ⛔ THE HAZARD: plug-out closes the node and the caller frees the controller
+ * straight after, so a signal thread still writing when a release lands would
+ * write to a closed -- or already reused -- descriptor and read freed memory.
+ * ➡️ So a signal thread holds the controller from begin to end, and plug-out
+ * waits for it before closing anything.
+ *
+ *   controller_signal_begin        claim the controller for a signal, on the
+ *                                  session thread, before starting the thread.
+ *                                  False when one is still running or plug-out
+ *                                  has begun -- and then start nothing.
+ *   controller_signal_end          the thread's LAST touch of the controller.
+ *                                  With `gave_back`, it ends only if the host
+ *                                  has asked for nothing newer than that value
+ *                                  since; false means give the newer one back
+ *                                  and ask again. NULL ends it regardless.
+ *   controller_signal_stopping     plug-out is waiting: stop at the next step.
+ *   controller_signal_host_report  a host report is passing: keep `value` as
+ *                                  the host's latest when `keep`, and say
+ *                                  whether a signal holds the controller -- one
+ *                                  is playing, or plug-out has begun.
+ *   controller_signal_kept         the host's latest kept value, 0 if none.
+ *   controller_signal_motors_done  the signal thread has sent its pulse's stop
+ *                                  and no longer drives the motors.
+ *   controller_signal_motors_held  whether the host's motor claims are still to
+ *                                  be withheld: a signal is playing and has not
+ *                                  let the motors go, or plug-out has begun.
+ *
+ * ⓘ What the value means is the type's: a DS4 keeps the lightbar colour the
+ * host last set, so its signal can hand the light back as it found it.
+ * ⓘ The motors go back sooner than the light: a pulse is a fraction of a breath,
+ * and a game's rumble should not wait for the colour to finish. */
+bool controller_signal_begin(ctm_controller_t *c);
+bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back);
+bool controller_signal_stopping(ctm_controller_t *c);
+bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value);
+uint32_t controller_signal_kept(ctm_controller_t *c);
+void controller_signal_motors_done(ctm_controller_t *c);
+bool controller_signal_motors_held(ctm_controller_t *c);
+
 /* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
  * to the app's console sink if one is set. When: a type wants to record
  * something about its device. Cheap, but it opens a file -- do not call it per
@@ -322,9 +453,10 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...);
  * recognises a local gesture. Sets a flag and notifies the app; it does NOT
  * tear down, because the caller is the input thread and unplugging joins that
  * same thread. */
-/* Write a line to /tmp/ctm-gesture.log, the file the app's plug-in watcher
- * also writes, so a gesture reads end to end in one place. `c` may be NULL
- * when the caller holds a key rather than a controller. */
+/* Write a line to ctm-gesture.log in the app's logs directory (see
+ * ctm_log_path), the file the app's plug-in watcher also writes, so a gesture
+ * reads end to end in one place. `c` may be NULL when the caller holds a key
+ * rather than a controller. */
 void ctm_gesture_log(const ctm_controller_t *c, const char *fmt, ...);
 
 void ctm_controller_request_unplug(ctm_controller_t *c);
@@ -335,6 +467,12 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c);
  * the handler must only signal, never tear down. */
 typedef void (*ctm_controller_unplug_cb)(ctm_controller_t *c);
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
+
+/* ⭐ Told when a bridged keyboard presses the streaming overlay's shortcut,
+ * Ctrl+Alt+Shift+O, which its own grab keeps from the app. When: the keyboard's
+ * input thread, so the app hands the work to its main thread. */
+typedef void (*overlay_request_cb)(void);
+void controller_set_overlay_cb(overlay_request_cb cb);
 
 /* Scratch value owned by the controller's TYPE, one per controller. When: a
  * type needs to remember something between reports -- gesture timing, say.
@@ -352,6 +490,10 @@ extern const ctm_controller_ops_t ctm_controller_ds4_ops;
 extern const ctm_controller_ops_t ctm_controller_xbox_ops;
 extern const ctm_controller_ops_t ctm_controller_steam_puck_ops;
 extern const ctm_controller_ops_t ctm_controller_generic_ops;
+/* A wired Xbox pad, read through its input node (controller_xpad.c). */
+extern const ctm_controller_ops_t controller_xpad_ops;
+/* A cabled DualShock 4 (controller_ds4.c). */
+extern const ctm_controller_ops_t controller_ds4_usb_ops;
 
 /* Pick ops for a device: specific types first (puck/ds5/ds4/xbox), generic
  * fallback. Never returns NULL. */

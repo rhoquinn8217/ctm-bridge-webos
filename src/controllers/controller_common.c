@@ -55,6 +55,15 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #ifndef EVIOCGRAB
 #define EVIOCGRAB _IOW('E', 0x90, int)
 #endif
+#ifndef HIDIOCGRAWPHYS
+#define HIDIOCGRAWPHYS(len) _IOC(_IOC_READ, 'H', 0x05, len)
+#endif
+
+/* Can a node be read as HID, and which input nodes are a device's own. */
+#include "hid_node_checks.inl"
+#include "device_identity.inl"
+#include "kbd_chord.inl"
+#include "pad_blank.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -237,9 +246,16 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
-    /* ⭐ Until when the relay should NOT let the host claim the lightbar.
-     * Monotonic milliseconds; 0 means never. See ds5_patch_output. */
-    unsigned long long light_hold_until_ms;
+    /* ⭐⭐ A TYPE'S OWN SIGNAL THREAD, and plug-out's wait for it -- see
+     * controller_signal_begin. Guarded by signal_mutex, which nothing else
+     * takes. ⚠️ The DualSense's connected signal does not use this: its thread
+     * is handed the bare controller and nothing waits for it. */
+    pthread_mutex_t signal_mutex;
+    pthread_cond_t signal_idle;
+    int signal_running;      /* a signal thread holds the controller */
+    int signal_closed;       /* plug-out has begun: none may start, a running one stops */
+    int signal_motors_done;  /* the running signal has let the motors go (its pulse is over) */
+    uint32_t signal_kept;    /* the host's latest value, for the signal to give back */
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
@@ -256,6 +272,37 @@ struct ctm_controller {
 
     evdev_grab_t evdev_grabs[MAX_EVDEV_GRABS];
     int evdev_grab_count;
+    /* What tells this device's input nodes from anyone else's -- see
+     * hid_node_checks.inl. ⛔ kernel_uniq is copied at create, BEFORE the
+     * pairing probe can fill dev.mac: an input node carries the kernel's
+     * serial, never the one we read from the pad. */
+    char kernel_uniq[64];
+    char hid_phys[64];
+    /* An input-node type grabs the fd it reads, not a second one. */
+    int self_grabbed;
+    /* The report descriptor's top level is a joystick, gamepad or multi-axis
+     * controller. Set by open_hid; see grab_skips_gamepads. */
+    int is_gamepad;
+    /* ⭐ A bridged keyboard's layout, for the overlay's shortcut
+     * (kbd_chord.inl); kbd.present only for a hidraw keyboard it understands.
+     * kbd_chord_down: the shortcut is held right now. kbd_handed_back: the TV's
+     * overlay holds input, so the keyboard is ungrabbed and reaches the TV. */
+    kbd_layout_t kbd;
+    int kbd_chord_down;
+    int kbd_handed_back;
+    /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
+     * for a type with no blank of its own (pad_blank.inl). present only when its
+     * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
+     * for every gamepad, because its rest report also stands in for a still
+     * pad that has sent nothing yet (pad_keep). */
+    pad_blank_plan_t pad_blank;
+    /* ⭐ A still pad's last report, for ops->keepalive_ms when the type has no
+     * current_report of its own (pad_blank.inl). */
+    pad_keep_t pad_keep;
+    /* When an input report last went to the host, for ops->keepalive_ms. */
+    uint64_t last_input_us;
+    /* Per-controller state owned by the type; freed at destroy. */
+    void *type_ctx;
 
     FILE *log;
 
@@ -404,7 +451,13 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
 
         snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
         fd = open(path, O_WRONLY | O_NONBLOCK);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            /* ⭐ Say why, as the microphone opener does. A card that is found
+             * and then silently skipped leaves only "playback open failed",
+             * which cannot tell a busy card from a bus with no room left. */
+            alsa_log("[alsa-open]", "card=%d open failed errno=%d", card, errno);
+            continue;
+        }
         struct snd_pcm_hw_params hw;
         memset(&hw, 0, sizeof(hw));
         /* Init all intervals to full range ("any"), then constrain */
@@ -438,8 +491,11 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
          * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
          * **49152 frames = 1.024 SECONDS**, which is exactly the delay
          * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
-         * stayed on time. ⓘ The C1 does not do this, which is why the fault
-         * looked device-specific rather than like an unbounded parameter.
+         * stayed on time.
+         * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
+         * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
+         * the same second-long buffer. The fault was never device-specific; it
+         * was an unbounded parameter on both, and the cap is needed on both.
          *
          * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
          * five times the floor, so there is still room for jitter. ⛔ A tighter
@@ -456,15 +512,26 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
         struct snd_pcm_hw_params hw_unbounded = hw;
         hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
         int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        int hw_errno = (hw_rc < 0) ? errno : 0;
         if (hw_rc < 0) {
             hw = hw_unbounded;
             hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
             if (hw_rc >= 0) {
-                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused, reopened unbounded", card);
+                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
+                         card, hw_errno);
+            } else {
+                hw_errno = errno;
             }
         }
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
+        int prep_errno = (hw_rc >= 0 && prep_rc < 0) ? errno : 0;
         if (hw_rc < 0 || prep_rc < 0) {
+            /* ⭐ The errno is the finding. ENOSPC (28) means the USB bus had no
+             * room left for another audio stream; depending on the kernel that
+             * surfaces here or at the first write, which [alsa-write] logs.
+             * EBUSY (16) means something else holds the card. */
+            alsa_log("[alsa-open]", "card=%d not opened: hw_params rc=%d errno=%d, prepare rc=%d errno=%d",
+                     card, hw_rc, hw_errno, prep_rc, prep_errno);
             close(fd);
             fd = -1;
             continue;
@@ -483,6 +550,14 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
  * at open. Frames are what it counts in, so an arriving chunk is divided by
  * this to get them. */
 #define DS5_AUDIO_CHANNELS 4
+/* The rate the device was configured for at open, so a count of frames can be
+ * read back as a duration. */
+#define DS5_AUDIO_RATE     48000
+/* How long past the audio's own duration to keep offering it before giving up
+ * on a device that will not take it. Bounds a stall; it does not police timing. */
+#define ISO_WRITE_GRACE_US 250000
+
+static uint64_t now_us(void);
 
 /* Write one chunk of arriving PCM to the controller's playback device.
  *
@@ -516,39 +591,78 @@ static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t le
 {
     if (!c || c->alsa_fd < 0 || !pcm || len == 0) return;
 
-    struct snd_xferi xfer;
-    memset(&xfer, 0, sizeof(xfer));
-    xfer.buf = (void *)pcm;
-    xfer.frames = len / (DS5_AUDIO_CHANNELS * sizeof(int16_t));
-    if (xfer.frames == 0) return;
+    const size_t frame_bytes = DS5_AUDIO_CHANNELS * sizeof(int16_t);
+    const unsigned long total = (unsigned long)(len / frame_bytes);
+    if (total == 0) return;
 
-    int rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
-    int first_errno = (rc < 0) ? errno : 0;
+    /* ⭐⭐ KEEP OFFERING IT UNTIL THE DEVICE HAS TAKEN ALL OF IT.
+     *
+     * ⛔ THE FAULT THIS FIXES: one ioctl was assumed to carry the whole buffer.
+     * On a NON-BLOCKING handle it carries only what fits in the ring, reports
+     * how much that was in xfer.result, and the rest was dropped without a
+     * word -- the log even printed the frames ASKED FOR rather than the frames
+     * taken, so a truncated write read as a clean one.
+     *
+     * ⛔ Invisible for as long as the buffer was whatever the kernel chose,
+     * because everything fit in one go. Capping it at 4800 frames (100 ms) to
+     * cure the speaker lag left the confirmation tone -- 17760 frames, 370 ms
+     * -- nearly four times too big for a single write, and it was heard as one
+     * clipped note where there should be two. ⭐ MEASURED on the C1 2026-09-14,
+     * the same pad minutes apart: build 313 chose buffer_frames=49152 and
+     * played two notes; build 333 capped at 4800 and played one.
+     *
+     * ⓘ The streaming path pays nothing for this. The host's chunks are about
+     * 480 frames against a 4800-frame ring, so they are taken whole and the
+     * loop runs exactly once, as the single write did. */
+    const uint64_t deadline_us = now_us()
+                               + (uint64_t)total * 1000000ull / DS5_AUDIO_RATE
+                               + ISO_WRITE_GRACE_US;
+    unsigned long done = 0;
+    int rc = 0;
+    int first_errno = 0;
     int retries = 0;
-    while (rc < 0 && retries < 3) {
-        if (errno == EPIPE) {
+
+    while (done < total) {
+        struct snd_xferi xfer;
+        memset(&xfer, 0, sizeof(xfer));
+        xfer.buf = (void *)(pcm + (size_t)done * frame_bytes);
+        xfer.frames = (unsigned long)(total - done);
+        rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+        if (rc >= 0 && xfer.result > 0) {
+            done += (unsigned long)xfer.result;
+            continue;
+        }
+        /* ⓘ Taking nothing without reporting an error is the ring being full,
+         * which wants exactly the wait EAGAIN asks for. */
+        const int err = (rc < 0) ? errno : EAGAIN;
+        if (first_errno == 0) first_errno = err;
+        if (err == EPIPE) {
             ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
-        } else if (errno == EAGAIN) {
+        } else if (err == EAGAIN) {
             struct timespec ts = {0, 1000000};   /* 1 ms for buffer space */
             nanosleep(&ts, NULL);
         } else {
             break;                               /* not recoverable */
         }
-        xfer.result = 0;
-        rc = ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
-        retries++;
+        ++retries;
+        if (now_us() >= deadline_us) break;
     }
 
-    if (rc < 0) c->alsa_consec_fail++; else c->alsa_consec_fail = 0;
+    const int complete = (done == total);
+    if (!complete) c->alsa_consec_fail++; else c->alsa_consec_fail = 0;
     if (first_errno != 0) c->alsa_retry_streak++; else c->alsa_retry_streak = 0;
 
     /* This line is where the fault counts come from -- there is no separate
      * one -- so it is written on anything that went wrong, and periodically
      * when nothing did, to prove the path is still alive. */
     c->alsa_writes++;
-    if (first_errno != 0 || rc < 0 || (c->alsa_writes % 500) == 0) {
-        alsa_log("[alsa-write]", "n=%llu frames=%lu final_rc=%d first_errno=%d retries=%d",
-                 (unsigned long long)c->alsa_writes, (unsigned long)xfer.frames,
+    if (first_errno != 0 || !complete || (c->alsa_writes % 500) == 0) {
+        /* ⭐ BOTH COUNTS, because one of them was the fault. "frames" is what
+         * the audio needed and "wrote" is what the device took; when they
+         * differ the sound was cut short, which this line could not show while
+         * it printed only what was asked for. */
+        alsa_log("[alsa-write]", "n=%llu frames=%lu wrote=%lu final_rc=%d first_errno=%d retries=%d",
+                 (unsigned long long)c->alsa_writes, total, done,
                  rc, first_errno, retries);
     }
 
@@ -590,6 +704,15 @@ static ctm_controller_unplug_cb g_unplug_cb;
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb)
 {
     g_unplug_cb = cb;
+}
+
+/* Told when a bridged keyboard presses the overlay's shortcut; see
+ * controller_set_overlay_cb in ctm_controller.h. */
+static overlay_request_cb g_overlay_cb;
+
+void controller_set_overlay_cb(overlay_request_cb cb)
+{
+    g_overlay_cb = cb;
 }
 
 /* Write a line to the gesture log -- the same file the app's plug-in watcher
@@ -681,23 +804,13 @@ void ctm_mic_capture_set_enabled(int on)
 
 static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
+int signals_rumble_on(void) { return CTM_SIGNALS_ENABLED && g_sig_rumble; }
+int signals_light_on(void)  { return CTM_SIGNALS_ENABLED && g_sig_light; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
 {
     return g_input_held;
-}
-
-bool ctm_controller_light_held(ctm_controller_t *c)
-{
-    if (!c || !c->light_hold_until_ms) return false;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    unsigned long long now_ms = (unsigned long long)ts.tv_sec * 1000ull
-                              + (unsigned long long)(ts.tv_nsec / 1000000);
-    if (now_ms < c->light_hold_until_ms) return true;
-    c->light_hold_until_ms = 0;   /* over; stop checking */
-    return false;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -1457,6 +1570,32 @@ static void ds_mac_from_pairing_info(const uint8_t *reply, char *out, size_t out
              reply[6], reply[5], reply[4], reply[3], reply[2], reply[1]);
 }
 
+/* Take a MAC the pad reported about itself as its identity. `source` names the
+ * report, for the log. ⓘ One copy of these rules for every pad that can say its
+ * own MAC -- a DualSense's 0x09 below, and a type's read_pad_mac (a DS4's 0x12);
+ * the log lines are the ones the DualSense's probe always wrote. */
+static void adopt_pad_mac(ctm_controller_t *c, const char *pad, const char *source)
+{
+    /* ⭐⭐ THE PAD'S OWN MAC IS WHAT THE HOST LINKS A CONFIG ON, even where the
+     * kernel supplied something else (rhoquinn8217, 2026-09-13). ⛔ Through a
+     * DS5dongle on the C1 the kernel's uniq was the DONGLE's serial, so a config
+     * linked on it followed the dongle to whichever pad was plugged in next.
+     * ⓘ On the U5s the kernel reads 0x09 itself, and the two agree. */
+    if (c->dev.serial[0] != '\0' && !identity_same(c->dev.serial, pad)) {
+        ctl_log(c, "identity: MAC %s from %s replaces %s as this pad's identity",
+                pad, source, c->dev.serial);
+    }
+    snprintf(c->dev.serial, sizeof(c->dev.serial), "%s", pad);
+
+    /* ⭐ dev.mac itself is only FILLED, never replaced. Where the kernel supplied
+     * a value it stays -- the log file is named from it, and replacing it would
+     * make this change capable of breaking a set that already worked. */
+    if (c->dev.mac[0] != '\0') return;
+    snprintf(c->dev.mac, sizeof(c->dev.mac), "%s", pad);
+    ctl_log(c, "identity: MAC %s taken from %s (the kernel gave none)",
+            c->dev.mac, source);
+}
+
 static void probe_pairing_info(ctm_controller_t *c, int fd)
 {
     uint8_t feature[20];
@@ -1473,26 +1612,19 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
     }
     ctl_log(c, "probe: feature 0x09 (pairing info) = %s", hex);
 
-    /* ⭐ FILL THE IDENTITY ONLY IF IT IS MISSING. Where the kernel already
-     * supplied one, that value stays -- it is the same MAC from a source that
-     * has been trusted for months, and replacing it would make this change
-     * capable of breaking a set that already worked.
-     *
-     * ⚠️ A REPLY OF ALL ZEROES IS NOT AN ANSWER. An unpaired controller, or one
+    /* ⚠️ A REPLY OF ALL ZEROES IS NOT AN ANSWER. An unpaired controller, or one
      * whose reply we misread, would otherwise be given the identity
      * 00:00:00:00:00:00 -- and EVERY such controller would share it, which is
      * exactly the silent-collision the listener's config store refuses to
      * allow. Better to leave it empty and let the host use its constant. */
-    if (c->dev.mac[0] != '\0') return;
-
     if (reply_is_zero(feature + 1, 6)) {
         ctl_log(c, "identity: 0x09 answered with zeroes -- leaving the MAC empty");
         return;
     }
 
-    ds_mac_from_pairing_info(feature, c->dev.mac, sizeof(c->dev.mac));
-    ctl_log(c, "identity: MAC %s taken from feature 0x09 (the kernel gave none)",
-            c->dev.mac);
+    char pad[24];
+    ds_mac_from_pairing_info(feature, pad, sizeof(pad));
+    adopt_pad_mac(c, pad, "feature 0x09");
 }
 
 /* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
@@ -1519,6 +1651,22 @@ void ctm_bt_sign_output(uint8_t *data, size_t len)
     data[len - 3] = (uint8_t)((crc >> 8) & 0xffu);
     data[len - 2] = (uint8_t)((crc >> 16) & 0xffu);
     data[len - 1] = (uint8_t)((crc >> 24) & 0xffu);
+}
+
+/* A report descriptor into the controller's log, 32 bytes a line, so a pad seen
+ * in the field can join tests/test_pad_blank.c as it really is. When: opening a
+ * gamepad that gets a blank built from its descriptor. */
+static void log_descriptor(ctm_controller_t *c, const uint8_t *d, uint32_t n)
+{
+    char line[3 * 32 + 1];
+    for (uint32_t i = 0; i < n; i += 32) {
+        size_t at = 0;
+        line[0] = '\0';
+        for (uint32_t k = i; k < n && k < i + 32; ++k) {
+            at += (size_t)snprintf(line + at, sizeof(line) - at, "%02x ", d[k]);
+        }
+        ctl_log(c, "descriptor %03x: %s", (unsigned)i, line);
+    }
 }
 
 /* Open the controller's hidraw node (ops->select_node or dev.path), validate
@@ -1548,6 +1696,12 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         close(fd);
         return -1;
     }
+    /* ⓘ Truncation leaves no terminator, hence the zeroed buffer and one byte
+     * held back. Empty is fine: the grab then matches by serial or vendor. */
+    memset(c->hid_phys, 0, sizeof(c->hid_phys));
+    if (ioctl(fd, HIDIOCGRAWPHYS(sizeof(c->hid_phys) - 1), c->hid_phys) < 0) {
+        c->hid_phys[0] = '\0';
+    }
 
     memset(caps, 0, sizeof(*caps));
     caps->vendor_id = (uint16_t)vid;
@@ -1564,17 +1718,81 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
      * the only place that value reaches the host. ⚠️ It used to run at the end
      * of this function, purely as an investigation -- moving it is the whole
      * change on this side. */
-    if (strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
+    /* ⛔ DualSense only. Asked of every USB device until 2026-09-13, and a
+     * device that does not answer 0x09 makes the kernel wait out its 5 s
+     * control-transfer timeout: measured on a keyboard dongle, errno=110. */
+    if (c->ops->speaks_ds5 && strcmp(ctm_controller_bus(c), "USB") == 0) probe_pairing_info(c, fd);
+    /* ⭐ And a type that reads its pad's MAC its own way (a cabled DS4, whose
+     * kernel on the C1 leaves uniq empty). ⓘ Only a type that sets the hook is
+     * asked, for the same 5 s reason. */
+    else if (c->ops->read_pad_mac && strcmp(ctm_controller_bus(c), "USB") == 0) {
+        char pad[24];
+        if (c->ops->read_pad_mac(c, fd, pad, sizeof(pad))) adopt_pad_mac(c, pad, "the pad's pairing report");
+    }
 
-    snprintf(caps->serial, sizeof(caps->serial), "%s", c->dev.mac);
+    /* ⭐⭐ THE IDENTITY THE HOST LINKS A CONFIG ON (device_identity.inl, decided
+     * 2026-09-13). A DualSense is its own MAC: on a cable the probe above has
+     * just put it in dev.serial, and over Bluetooth uniq is the MAC. ⛔ It is
+     * never given a dongle's serial in its place -- nothing rather than the
+     * wrong pad. Anything else is its serial, and never a blank or all-zeros one. */
+    {
+        char identity[64];
+        identity_pick_serial(c->dev.serial, c->dev.mac, identity, sizeof(identity));
+        if (c->ops->speaks_ds5 && !identity_mac_shaped(identity)) identity[0] = '\0';
+        snprintf(caps->serial, sizeof(caps->serial), "%s", identity);
+        ctl_log(c, "identity: the host is told %s", identity[0] ? identity : "nothing (no usable one)");
+    }
     snprintf(caps->manufacturer, sizeof(caps->manufacturer), "hidraw");
     if (ioctl(fd, HIDIOCGRAWNAME(sizeof(caps->product) - 1), caps->product) < 0 ||
         caps->product[0] == '\0') {
         snprintf(caps->product, sizeof(caps->product), "hidraw");
     }
 
+    memset(&c->pad_blank, 0, sizeof(c->pad_blank));
+    memset(&c->pad_keep, 0, sizeof(c->pad_keep));
     *report_desc_len = read_report_descriptor(fd, report_desc, MAX_REPORT_DESCRIPTOR);
     if (*report_desc_len) {
+        uint16_t usage_page = 0, usage = 0;
+        ctm_hid_top_usage(report_desc, *report_desc_len, &usage_page, &usage, NULL);
+        c->is_gamepad = usage_page == 0x01 && (usage == 0x04 || usage == 0x05 || usage == 0x08);
+        /* ⭐ A keyboard gets the overlay's shortcut watched in its reports
+         * (kbd_chord.inl). ⓘ Only a layout it can read: one it cannot has no
+         * shortcut while bridged, and nothing else changes. */
+        if (!c->is_gamepad &&
+            kbd_layout_from_descriptor(report_desc, *report_desc_len, &c->kbd)) {
+            ctl_log(c, "keyboard: overlay shortcut watched (report id %u, modifiers at %u, "
+                       "%u keys at %u, %u bytes)",
+                    (unsigned)c->kbd.report_id, (unsigned)c->kbd.mod_offset,
+                    (unsigned)c->kbd.keys_count, (unsigned)c->kbd.keys_offset,
+                    (unsigned)c->kbd.report_len);
+        }
+        /* ⭐ A gamepad whose type cannot blank its reports gets a blank built
+         * from its descriptor, for while the TV's overlay holds input
+         * (pad_blank.inl). A type with its own blank keeps it. */
+        if (c->is_gamepad) {
+            const uint16_t vid = (uint16_t)strtoul(c->dev.vid, NULL, 16);
+            const uint16_t pid = (uint16_t)strtoul(c->dev.pid, NULL, 16);
+            pad_blank_from_descriptor(report_desc, *report_desc_len, vid, pid, &c->pad_blank);
+            if (!c->ops->blank_input) {
+                ctl_log(c, "overlay blank: %u field(s)%s%s from a %u-byte descriptor",
+                        (unsigned)c->pad_blank.count,
+                        c->pad_blank.switch_layout ? ", and the Switch layout for its full reports" : "",
+                        c->pad_blank.truncated ? " (more fields than fit; the rest left alone)" : "",
+                        (unsigned)*report_desc_len);
+                log_descriptor(c, report_desc, *report_desc_len);
+            }
+            if (c->ops->keepalive_ms) {
+                if (c->pad_blank.rest_len) {
+                    ctl_log(c, "still pad: report 0x%02x (%u bytes) sent again after %u ms "
+                               "without one, nothing pressed until the pad sends its own",
+                            (unsigned)c->pad_blank.rest_id, (unsigned)c->pad_blank.rest_len,
+                            c->ops->keepalive_ms);
+                } else {
+                    ctl_log(c, "still pad: no report to send again%s",
+                            c->pad_blank.switch_layout ? " (a Pro Controller never goes quiet)" : "");
+                }
+            }
+        }
         derive_report_lengths(report_desc, *report_desc_len, caps);
         if (caps->input_report_len < 1024) caps->input_report_len = 1024;
         if (caps->output_report_len < 1024) caps->output_report_len = 1024;
@@ -1585,22 +1803,46 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
 }
 
 /* EVIOCGRAB the device's evdev nodes so webOS doesn't double-consume input.
- * When: at session start, BT/DS only (gated by ops->grab_evdev). */
+ * When: at session start, for ops with grab_evdev.
+ *
+ * ⭐ Only THIS device's nodes: see hid_node_checks.inl for how they are told
+ * apart, and why vendor and product alone were not enough. */
 static void grab_matching_evdev(ctm_controller_t *c)
 {
+    /* ⭐ AN INPUT-NODE TYPE GRABS THE NODE IT READS, THROUGH THAT SAME FD. A
+     * grab hands events only to the grabbing handle, so grabbing through a
+     * second one would starve this session of its own input. ⓘ The grab still
+     * does its job: SDL, joydev and the compositor stop receiving the pad. */
+    if (c->ops->open_input) {
+        if (c->hid_fd >= 0 && ioctl(c->hid_fd, EVIOCGRAB, 1) == 0) {
+            c->self_grabbed = 1;
+            ctl_log(c, "evdev: grabbed the input node it reads");
+        } else {
+            ctl_log(c, "evdev: grab of the input node it reads refused errno=%d", errno);
+        }
+        return;
+    }
     DIR *dir = opendir("/sys/class/input");
     if (!dir) return;
     struct dirent *ent;
+    evdev_match_t how_matched = EVDEV_NOT_OURS;
     while ((ent = readdir(dir)) != NULL) {
         if (strncmp(ent->d_name, "input", 5) != 0) continue;
-        char vendor_path[160], product_path[160], vendor[32] = {0}, product[32] = {0};
-        snprintf(vendor_path, sizeof(vendor_path), "/sys/class/input/%s/id/vendor", ent->d_name);
-        snprintf(product_path, sizeof(product_path), "/sys/class/input/%s/id/product", ent->d_name);
-        if (read_text_file(vendor_path, vendor, sizeof(vendor)) != 0 ||
-            read_text_file(product_path, product, sizeof(product)) != 0 ||
-            !hex_equals(vendor, c->vid_num) || !hex_equals(product, c->pid_num)) {
-            continue;
-        }
+        char attr[160], vendor[32] = {0}, product[32] = {0}, phys[96] = {0}, uniq[96] = {0};
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/vendor", ent->d_name);
+        if (read_text_file(attr, vendor, sizeof(vendor)) != 0) continue;
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/product", ent->d_name);
+        if (read_text_file(attr, product, sizeof(product)) != 0) continue;
+        /* ⓘ Either may be absent or empty; that only means it cannot decide. */
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/phys", ent->d_name);
+        (void)read_text_file(attr, phys, sizeof(phys));
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/uniq", ent->d_name);
+        (void)read_text_file(attr, uniq, sizeof(uniq));
+        const evdev_match_t how = evdev_input_belongs(c->vid_num, c->pid_num,
+                                                      c->hid_phys, c->kernel_uniq,
+                                                      vendor, product, phys, uniq);
+        if (how == EVDEV_NOT_OURS) continue;
+        how_matched = how;
         char input_dir[160];
         snprintf(input_dir, sizeof(input_dir), "/sys/class/input/%s", ent->d_name);
         DIR *input = opendir(input_dir);
@@ -1616,19 +1858,61 @@ static void grab_matching_evdev(ctm_controller_t *c)
                 int idx = c->evdev_grab_count++;
                 c->evdev_grabs[idx].fd = fd;
                 snprintf(c->evdev_grabs[idx].path, sizeof(c->evdev_grabs[idx].path), "%s", dev_path);
-                ctl_log(c, "grabbed %s", dev_path);
+                ctl_log(c, "grabbed %s (%s)", dev_path, ent->d_name);
             } else {
+                ctl_log(c, "grab refused for %s errno=%d", dev_path, errno);
                 close(fd);
             }
         }
         closedir(input);
     }
     closedir(dir);
+    /* ⭐ One line saying what decided it, so a keyboard still typing twice can
+     * be told from a grab that matched nothing. */
+    ctl_log(c, "evdev: %d node(s) grabbed, matched by %s (phys=\"%s\" uniq=\"%s\")",
+            c->evdev_grab_count, evdev_match_name(how_matched),
+            c->hid_phys, c->kernel_uniq);
+}
+
+/* ⭐⭐ A BRIDGED KEYBOARD GOES TO THE TV WHILE ITS OVERLAY IS OPEN, AND BACK.
+ * rhoquinn8217, 2026-09-13: the shortcut "hands the keyboard back to the TV
+ * while the overlay is open". The overlay holds input (ctm_input_set_held), so:
+ * the host is sent one report with nothing pressed, the evdev grabs are let go
+ * so the TV reads the keys, and nothing more goes to the host until the hold
+ * ends and the grabs are taken again. ⓘ Keyboards only; the fds stay open.
+ * When: the input thread, on each report and each idle poll. */
+static void kbd_sync_hold(ctm_controller_t *c)
+{
+    if (!c->kbd.present) return;
+    const int held = ctm_input_is_held();
+    if (held == c->kbd_handed_back) return;
+    if (held && c->kbd.report_len > 0 && c->kbd.report_len <= MAX_REPORT) {
+        uint8_t released[MAX_REPORT];
+        memset(released, 0, c->kbd.report_len);
+        if (c->kbd.report_id) released[0] = c->kbd.report_id;
+        (void)c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep,
+                     released, c->kbd.report_len);
+    }
+    int changed = 0;
+    for (int i = 0; i < c->evdev_grab_count; ++i) {
+        if (c->evdev_grabs[i].fd >= 0 &&
+            ioctl(c->evdev_grabs[i].fd, EVIOCGRAB, held ? 0 : 1) == 0) {
+            ++changed;
+        }
+    }
+    c->kbd_handed_back = held;
+    ctl_log(c, "keyboard: %s (%d grab(s) %s)",
+            held ? "handed to the TV while its overlay is open" : "taken back from the TV",
+            changed, held ? "let go" : "taken again");
 }
 
 /* Un-grab + close the evdev nodes. When: each time a session ends. */
 static void release_evdev_grabs(ctm_controller_t *c)
 {
+    if (c->self_grabbed) {
+        if (c->hid_fd >= 0) (void)ioctl(c->hid_fd, EVIOCGRAB, 0);
+        c->self_grabbed = 0;
+    }
     for (int i = 0; i < c->evdev_grab_count; ++i) {
         if (c->evdev_grabs[i].fd >= 0) {
             ioctl(c->evdev_grabs[i].fd, EVIOCGRAB, 0);
@@ -1699,6 +1983,110 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
     return n == (ssize_t)len ? 0 : -1;
 }
 
+/* --- a type's signal thread, and plug-out's wait for it --------------------
+ *
+ * ⛔⛔ WHY ANY OF THIS EXISTS. The DualSense's connected signal is handed the
+ * bare controller on a detached thread and nothing ever waits for it: it writes
+ * the node and the speaker for up to a couple of seconds, while plug-out closes
+ * both and every caller frees the controller the moment plug-out returns. A
+ * release inside that window writes to a closed or reused descriptor and reads
+ * freed memory. ➡️ These give a type's signal thread the one guarantee it
+ * needs -- plug-out does not close anything until it has finished -- without
+ * changing a line of the DualSense's.
+ *
+ * ⓘ Every touch is under signal_mutex, including the value kept for the
+ * signal to give back: the session thread writes it, the signal thread reads
+ * it, and the check that nothing newer arrived has to be one step with ending
+ * the signal, or a colour the host sets in between is lost. */
+bool controller_signal_begin(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool ok = !c->signal_running && !c->signal_closed;
+    if (ok) {
+        c->signal_running = 1;
+        c->signal_motors_done = 0;
+    }
+    pthread_mutex_unlock(&c->signal_mutex);
+    return ok;
+}
+
+void controller_signal_motors_done(ctm_controller_t *c)
+{
+    if (!c) return;
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_motors_done = 1;
+    pthread_mutex_unlock(&c->signal_mutex);
+}
+
+bool controller_signal_motors_held(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    /* ⓘ Once plug-out has begun the pad is going back to the TV, so the host's
+     * motors stay withheld to the end, as its light does. */
+    const bool held = c->signal_closed || (c->signal_running && !c->signal_motors_done);
+    pthread_mutex_unlock(&c->signal_mutex);
+    return held;
+}
+
+bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back)
+{
+    if (!c) return true;
+    pthread_mutex_lock(&c->signal_mutex);
+    /* ⓘ Once plug-out has begun the host's wishes no longer matter: the
+     * controller is on its way back to the TV. */
+    const bool done = !gave_back || c->signal_closed || c->signal_kept == *gave_back;
+    if (done) {
+        c->signal_running = 0;
+        pthread_cond_broadcast(&c->signal_idle);
+    }
+    pthread_mutex_unlock(&c->signal_mutex);
+    return done;
+}
+
+bool controller_signal_stopping(ctm_controller_t *c)
+{
+    if (!c) return true;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool closed = c->signal_closed != 0;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return closed;
+}
+
+bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    if (keep) c->signal_kept = value;
+    const bool held = c->signal_running || c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return held;
+}
+
+uint32_t controller_signal_kept(ctm_controller_t *c)
+{
+    if (!c) return 0;
+    pthread_mutex_lock(&c->signal_mutex);
+    const uint32_t kept = c->signal_kept;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return kept;
+}
+
+/* Plug-out's half: no signal may start from here on, and one already running
+ * is told to stop and waited for. ⚠️ Unbounded on purpose -- the other choice
+ * is closing the node under a write. A signal thread checks between steps of a
+ * few tens of milliseconds, so the wait is one step long -- or one write, if
+ * the pad is stalling its writes. ⓘ Instant for every type that never begins
+ * a signal, the DualSense included. */
+static void signal_close(ctm_controller_t *c)
+{
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_closed = 1;
+    while (c->signal_running) pthread_cond_wait(&c->signal_idle, &c->signal_mutex);
+    pthread_mutex_unlock(&c->signal_mutex);
+}
+
 /* Remember any audio setting a report claims, so a later reopen can restore it.
  *
  * The audio device can vanish mid-session and be reopened, and a reopen has to
@@ -1734,6 +2122,13 @@ static void remember_audio_settings(ctm_controller_t *c, const uint8_t *data, si
 static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
     if (!c || c->hid_fd < 0 || !data || len == 0) return -1;
+    /* An input-node type has no HID reports to write: it acts on the host's
+     * report itself (rumble, for a wired Xbox pad). */
+    if (c->ops->write_output) {
+        const int rc = c->ops->write_output(c, c->hid_fd, data, len);
+        if (rc == 0) c->st_reports_out++;
+        return rc;
+    }
     uint8_t patched[MAX_REPORT];
     if (len > sizeof(patched)) return -1;
     memcpy(patched, data, len);
@@ -1940,30 +2335,111 @@ static void *composite_reader_main(void *arg)
     return NULL;
 }
 
+/* ⭐ What the host gets while the TV's overlay holds input: the type's own blank
+ * where it has one, else the blank built from the pad's descriptor, else the
+ * report as it came (a keyboard is handed back to the TV instead; see
+ * kbd_sync_hold). */
+static void blank_held_report(ctm_controller_t *c, uint8_t *buf, size_t n)
+{
+    if (c->ops && c->ops->blank_input) c->ops->blank_input(buf, n);
+    else pad_blank_apply(&c->pad_blank, buf, n);
+}
+
+/* ⭐ Send a still pad's present state when nothing has gone to the host for
+ * ops->keepalive_ms -- and at once when the session starts, since
+ * last_input_us begins at 0. An input node, and a hidraw pad that reports only
+ * on a change, says nothing while the pad is still, and the listener drops a
+ * pad that is silent for 15 s. Returns -1 if the link is gone. When: the input
+ * thread, whenever its poll times out.
+ *
+ * ⭐⭐ The type's current_report first; when it has none, or nothing yet, the
+ * pump's own: the pad's last report, else one with nothing pressed from its
+ * descriptor (pad_keep_current). ⛔ Without that second half a pad bridged from
+ * the panel and never touched had nothing to send, and left after 15 s
+ * (rhoquinn8217, 2026-09-16, two Bluetooth Xbox pads on the rooted LG). */
+static int send_keepalive(ctm_controller_t *c)
+{
+    if (!c->ops->keepalive_ms) return 0;
+    const uint64_t now = now_us();
+    if (c->last_input_us != 0 &&
+        now - c->last_input_us < (uint64_t)c->ops->keepalive_ms * 1000u) {
+        return 0;
+    }
+    uint8_t buf[MAX_REPORT];
+    int n = c->ops->current_report ? c->ops->current_report(c, buf, sizeof(buf)) : 0;
+    if (n <= 0) n = (int)pad_keep_current(&c->pad_keep, &c->pad_blank, buf, sizeof(buf));
+    if (n <= 0) return 0;
+    if (ctm_input_is_held()) blank_held_report(c, buf, (size_t)n);
+    if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
+        return -1;
+    }
+    c->last_input_us = now;
+    return 0;
+}
+
 static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    c->last_input_us = 0;
     while (!c->stop) {
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
         int pr = poll(pfds, 2, 1);
         if (pr < 0) { if (errno == EINTR) continue; break; }
-        if (pr == 0) continue;
+        if (pr == 0) {
+            /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
+            kbd_sync_hold(c);
+            if (send_keepalive(c) != 0) { c->stop = 1; break; }
+            continue;
+        }
         if (pfds[1].revents & POLLIN) break;
         if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
         if (!(pfds[0].revents & POLLIN)) continue;
         for (;;) {
             uint8_t buf[MAX_REPORT];
-            ssize_t n = read(c->hid_fd, buf, sizeof(buf));
+            ssize_t n;
+            if (c->ops->read_input) {
+                /* ⓘ 0 is "no complete frame yet", not an error. */
+                n = c->ops->read_input(c, c->hid_fd, buf, sizeof(buf));
+                if (n == 0) break;
+            } else {
+                n = read(c->hid_fd, buf, sizeof(buf));
+            }
             if (n > 0) {
                 /* ⛔ Nothing here arms a microphone, so a report carrying audio
                  * means something else did -- and every reader on this TV,
                  * including SDL, will parse it as sticks and buttons. See the
                  * long note in ctm_mic_safety.inl. */
-                if (micsafe_check_report(c->dev.path, buf, (size_t)n)) {
+                /* ⚠️ DualSense reports only. Any other device may use report
+                 * id 0x31 for something else entirely, and this exits the app. */
+                if (c->ops->speaks_ds5 && micsafe_check_report(c->dev.path, buf, (size_t)n)) {
                     ctl_log(c, "mic-safety: shutting down, see stderr");
                     exit(1);
+                }
+                /* ⭐⭐ A BRIDGED KEYBOARD: THE OVERLAY'S SHORTCUT, AND THE TV'S TURN.
+                 * rhoquinn8217, 2026-09-13: Ctrl+Alt+Shift+O opens the streaming
+                 * overlay bridged or not. The grab keeps these keys from the
+                 * app, so the shortcut is found here; the report that completes
+                 * it goes to the host with nothing pressed, and so does every
+                 * report while it is held. While the overlay is open the TV has
+                 * the keyboard and the host gets nothing (kbd_sync_hold). */
+                if (c->kbd.present) {
+                    kbd_sync_hold(c);
+                    if (c->kbd_handed_back) {
+                        continue;
+                    }
+                    if (kbd_overlay_chord_down(&c->kbd, buf, (size_t)n)) {
+                        if (!c->kbd_chord_down) {
+                            c->kbd_chord_down = 1;
+                            ctl_log(c, "keyboard: overlay shortcut pressed%s",
+                                    g_overlay_cb ? "" : " (no app to tell)");
+                            if (g_overlay_cb) g_overlay_cb();
+                        }
+                        kbd_released_report(&c->kbd, buf, (size_t)n);
+                    } else {
+                        c->kbd_chord_down = 0;
+                    }
                 }
                 /* ⭐⭐ LOOK FIRST WHEN INPUT IS HELD, because the copy the host
                  * gets is about to be blanked and the chord lives in the real
@@ -1979,14 +2455,21 @@ static void *input_thread_main(void *arg)
                 if (held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
                 }
-                if (held && c->ops && c->ops->blank_input) {
-                    c->ops->blank_input(buf, (size_t)n);
+                /* ⭐ A still pad's state is kept as the pad sent it, before a
+                 * hold blanks it, so what is sent again after the overlay
+                 * closes is what the pad still holds. */
+                if (c->ops->keepalive_ms && !c->ops->current_report) {
+                    pad_keep_update(&c->pad_keep, &c->pad_blank, buf, (size_t)n);
+                }
+                if (held) {
+                    blank_held_report(c, buf, (size_t)n);
                 }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
                     c->stop = 1;
                     break;
                 }
                 c->st_reports_in++;
+                if (c->ops->keepalive_ms) c->last_input_us = now_us();
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
                 if (!held && c->ops && c->ops->on_input_report) {
@@ -2338,11 +2821,23 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * Costs the second controller a few seconds before its audio settles --
      * its buttons already work by then. rhoquinn8217: "sometimes computers need to
      * think more", which is exactly what is happening. */
-    pthread_mutex_lock(&g_cardmatch_lock);
-    cardmatch_identify(c);
-    mic_capture_start(c);
-    feedback_play_connected(c);
-    pthread_mutex_unlock(&g_cardmatch_lock);
+    /* ⛔ A DUALSENSE'S SOUND CARD, MICROPHONE AND TONE, SO ONLY A DUALSENSE.
+     * For anything else the card match went looking for a free DualSense card
+     * and could claim one by elimination, and the tone was written to the
+     * device as DualSense reports. */
+    if (c->ops->speaks_ds5) {
+        pthread_mutex_lock(&g_cardmatch_lock);
+        cardmatch_identify(c);
+        mic_capture_start(c);
+        feedback_play_connected(c);
+        pthread_mutex_unlock(&g_cardmatch_lock);
+    } else {
+        ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
+        /* ⭐ A type with a signal of its own starts it here, where the
+         * DualSense's starts -- a cabled DS4's light and rumble. It returns at
+         * once; the signal plays on its own thread. */
+        if (c->ops->signal_connected) c->ops->signal_connected(c);
+    }
 
     c->comp_run = 1;
     if (c->ops->composite) {
@@ -2444,7 +2939,11 @@ static void *session_main(void *arg)
      * stretch left that logs nothing at all. */
     struct timespec oh0, oh1;
     clock_gettime(CLOCK_MONOTONIC, &oh0);
-    c->hid_fd = open_hid(c, &caps, report_desc, &report_desc_len);
+    /* ⓘ An input-node type opens its own node and has no report descriptor:
+     * the host's device for it is a fixed profile. */
+    c->hid_fd = c->ops->open_input
+                    ? c->ops->open_input(c, &c->dev, &caps)
+                    : open_hid(c, &caps, report_desc, &report_desc_len);
     clock_gettime(CLOCK_MONOTONIC, &oh1);
     ctl_log(c, "open_hid took %ldms",
             (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
@@ -2563,7 +3062,16 @@ static void *session_main(void *arg)
         }
         ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
 
-        if (c->ops->grab_evdev) grab_matching_evdev(c);
+        if (c->ops->grab_evdev && c->ops->grab_skips_gamepads && c->is_gamepad) {
+            ctl_log(c, "evdev: not grabbed -- a gamepad, which the TV must still see "
+                       "for the overlay combo");
+        } else if (c->ops->grab_evdev) {
+            grab_matching_evdev(c);
+        }
+        /* ⓘ A fresh grab means the host has the keyboard again, whatever the
+         * last session left. */
+        c->kbd_handed_back = 0;
+        c->kbd_chord_down = 0;
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
 
         /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE
@@ -2588,33 +3096,9 @@ static void *session_main(void *arg)
          *
          * ⓘ Wired takes the other branch: it has a real audio device, opened
          * in on_plug_init just above. */
-        if (c->alsa_fd < 0) btsig_wake_speaker(c);
-
-        /* ⭐⭐ HOLD THE LIGHTBAR FOR THE MOMENT THE APP IS DRAWING ON IT.
-         *
-         * ⛔ THE FAULT: the green confirmation breathes correctly and flickers
-         * the whole time. rhoquinn8217, 2026-08-19: "I could notice it gradually
-         * getting brighter and darker but it was flickering the whole time."
-         * ⭐ The shape being right and the light still stuttering is the
-         * signature of a SECOND WRITER, not a bad curve.
-         *
-         * ⓘ That writer is the host, through this relay: its reports claim the
-         * lightbar about 25 times a second, and a bridge hands the controller
-         * over just as the app starts drawing. An unbridge has no such problem
-         * because nothing is being relayed by then -- which is exactly the
-         * asymmetry that was seen.
-         *
-         * ⚠️ THIS IS NOT "THE TV TAKES THE LIGHTBAR". That was considered and
-         * rejected the same day: some games drive it meaningfully and the
-         * emulated pad is a DS4, so they reach it. ⭐ This hands it straight
-         * back -- it is the second or two of a handover, nothing more. */
-        {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            c->light_hold_until_ms = (unsigned long long)ts.tv_sec * 1000ull
-                                   + (unsigned long long)(ts.tv_nsec / 1000000)
-                                   + LIGHT_HOLD_MS;
-        }
+        /* ⚠️ "No audio device" is not "Bluetooth DualSense": a keyboard has no
+         * audio device either, and was sent this 398-byte report. */
+        if (c->ops->speaks_ds5 && c->alsa_fd < 0) btsig_wake_speaker(c);
 
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
@@ -2628,6 +3112,33 @@ static void *session_main(void *arg)
 
 /* --- lifecycle ----------------------------------------------------------- */
 
+void *controller_type_ctx(const ctm_controller_t *c)
+{
+    return c ? c->type_ctx : NULL;
+}
+
+void controller_set_type_ctx(ctm_controller_t *c, void *ctx)
+{
+    if (c) c->type_ctx = ctx;
+}
+
+int controller_preflight(const ctm_controller_dev_t *dev)
+{
+    if (!dev) return EINVAL;
+    const ctm_controller_ops_t *ops = ctm_controller_ops_for(dev);
+    /* An input-node type knows how to open what it reads. */
+    if (ops->preflight) return ops->preflight(dev);
+    /* ⭐ The node the session will actually open, which for a composite
+     * device may not be dev->path. */
+    char node[64];
+    const char *path = dev->path;
+    if (ops->select_node && ops->select_node(dev, node, sizeof(node)) == 0 && node[0]) {
+        path = node;
+    }
+    return hid_node_preflight(path, (unsigned int)strtoul(dev->vid, NULL, 16),
+                              (unsigned int)strtoul(dev->pid, NULL, 16));
+}
+
 /* Build an idle controller for a detected device (factory picks its ops).
  * When: the UI/monitor decides to offer a device; before plug_in. */
 ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
@@ -2636,6 +3147,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     ctm_controller_t *c = (ctm_controller_t *)calloc(1, sizeof(*c));
     if (!c) return NULL;
     c->dev = *dev;
+    snprintf(c->kernel_uniq, sizeof(c->kernel_uniq), "%s", dev->mac);
     c->ops = ctm_controller_ops_for(dev);
     c->vid_num = (unsigned int)strtoul(dev->vid, NULL, 16);
     c->pid_num = (unsigned int)strtoul(dev->pid, NULL, 16);
@@ -2658,6 +3170,8 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     pthread_mutex_init(&c->hid_mutex, NULL);
     pthread_mutex_init(&c->settings_mutex, NULL);
     pthread_mutex_init(&c->status_mutex, NULL);
+    pthread_mutex_init(&c->signal_mutex, NULL);
+    pthread_cond_init(&c->signal_idle, NULL);
     return c;
 }
 
@@ -2705,6 +3219,12 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     snprintf(c->host, sizeof(c->host), "%s", host);
     c->port = port;
     c->stop = 0;
+    /* ⓘ A controller plugged in again after a plug-out may signal again. Left
+     * closed, a type's patcher would withhold the host's claims for good. No
+     * signal thread can be running here: plug-out waited for it. */
+    pthread_mutex_lock(&c->signal_mutex);
+    c->signal_closed = 0;
+    pthread_mutex_unlock(&c->signal_mutex);
     open_log(c);
 
     pthread_once(&g_enet_once, enet_global_init_once);
@@ -2830,15 +3350,31 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
      * ⓘ Nothing on this branch turns a microphone on. This is the same class
      * of guard as the startup sweep above: it exists for a state we cannot
      * cause, and it runs on the one path where we still own the device. */
-    micsafe_disarm_node(c->dev.path);
+    /* ⓘ The node write is a DualSense report, so it goes to a DualSense only.
+     * The shutdown sweep below stays unconditional: it is not about this
+     * device, and it is the one pass that reaches a pad nothing tracked. */
+    if (c->ops->speaks_ds5) micsafe_disarm_node(c->dev.path);
     if (why == CTM_UNPLUG_SHUTDOWN) {
         ctm_mic_safety_disarm_all_reason("the bridge is shutting down");
     }
 
     /* Before anything is torn down, while the audio device is still open.
      * There is no "after" -- the unplug closes the very thing that would
-     * play it. */
-    feedback_play_unplugging(c, why);
+     * play it. ⛔ DualSense only: for anything else this was 2.4 s of
+     * DualSense sound reports written to it, and the release waited for them. */
+    /* ⭐ First, no type's signal thread may still be writing: nothing below
+     * may close what it writes to while it does, and two signals on one light
+     * is a flicker. See controller_signal_begin. */
+    signal_close(c);
+    if (c->ops->speaks_ds5) {
+        feedback_play_unplugging(c, why);
+    } else if (c->ops->signal_unplugging) {
+        /* ⓘ A type's own release signal -- a cabled DS4's. Played here for the
+         * same reason as the DualSense's: afterwards there is no node. */
+        c->ops->signal_unplugging(c, why);
+    } else {
+        ctl_log(c, "unplugging -- no DualSense signal for this device");
+    }
     c->stop = 1;
     if (c->xport.fd >= 0) shutdown(c->xport.fd, SHUT_RDWR);
     if (c->wake_pipe[1] >= 0) (void)write(c->wake_pipe[1], "x", 1);
@@ -2944,7 +3480,10 @@ void ctm_controller_destroy(ctm_controller_t *c)
     pthread_mutex_destroy(&c->hid_mutex);
     pthread_mutex_destroy(&c->settings_mutex);
     pthread_mutex_destroy(&c->status_mutex);
+    pthread_mutex_destroy(&c->signal_mutex);
+    pthread_cond_destroy(&c->signal_idle);
     free(c->enum_payload);
+    free(c->type_ctx);
     free(c);
 }
 
@@ -2955,6 +3494,11 @@ static const ctm_controller_ops_t *const k_registry[] = {
     &ctm_controller_ds5_ops,
     &ctm_controller_ds5e_ops,
     &ctm_controller_ds4_ops,
+    /* ⭐ A cabled DS4. ⛔ It must stay ahead of generic, which claims anything
+     * and ran this pad until now: no chord, no blanking, no signal. */
+    &controller_ds4_usb_ops,
+    /* ⓘ Before the Bluetooth Xbox type, which only takes hidraw nodes anyway. */
+    &controller_xpad_ops,
     &ctm_controller_xbox_ops,
     &ctm_controller_generic_ops,
 };
