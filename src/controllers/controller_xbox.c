@@ -74,6 +74,10 @@ const ctm_controller_ops_t ctm_controller_xbox_ops = {
      * Bluetooth it reports only on a change, so the listener's 15 s silence
      * limit took a pad that had been put down, and a stick held still would
      * stall its scroll the way a cabled pad's did before 4 ms (controller_xpad.c).
-     * See xbox_bt_report.inl. */
+     * See xbox_bt_report.inl.
+     * ⛔ Its last report only exists once the pad has sent one. Two pads bridged
+     * from the USB Bridge panel and put down never did, and both left after
+     * 15 s (rhoquinn8217, 2026-09-16, the rooted LG). Until then the pump sends
+     * a report with nothing pressed from the pad's descriptor (send_keepalive). */
     .keepalive_ms = 4,
 };

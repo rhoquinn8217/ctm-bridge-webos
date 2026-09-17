@@ -292,8 +292,13 @@ struct ctm_controller {
     int kbd_handed_back;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
-     * descriptor gave something to blank, or it is a Pro Controller. */
+     * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
+     * for every gamepad, because its rest report also stands in for a still
+     * pad that has sent nothing yet (pad_keep). */
     pad_blank_plan_t pad_blank;
+    /* ⭐ A still pad's last report, for ops->keepalive_ms when the type has no
+     * current_report of its own (pad_blank.inl). */
+    pad_keep_t pad_keep;
     /* When an input report last went to the host, for ops->keepalive_ms. */
     uint64_t last_input_us;
     /* Per-controller state owned by the type; freed at destroy. */
@@ -1743,6 +1748,8 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         snprintf(caps->product, sizeof(caps->product), "hidraw");
     }
 
+    memset(&c->pad_blank, 0, sizeof(c->pad_blank));
+    memset(&c->pad_keep, 0, sizeof(c->pad_keep));
     *report_desc_len = read_report_descriptor(fd, report_desc, MAX_REPORT_DESCRIPTOR);
     if (*report_desc_len) {
         uint16_t usage_page = 0, usage = 0;
@@ -1762,17 +1769,29 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         /* ⭐ A gamepad whose type cannot blank its reports gets a blank built
          * from its descriptor, for while the TV's overlay holds input
          * (pad_blank.inl). A type with its own blank keeps it. */
-        memset(&c->pad_blank, 0, sizeof(c->pad_blank));
-        if (c->is_gamepad && !c->ops->blank_input) {
+        if (c->is_gamepad) {
             const uint16_t vid = (uint16_t)strtoul(c->dev.vid, NULL, 16);
             const uint16_t pid = (uint16_t)strtoul(c->dev.pid, NULL, 16);
             pad_blank_from_descriptor(report_desc, *report_desc_len, vid, pid, &c->pad_blank);
-            ctl_log(c, "overlay blank: %u field(s)%s%s from a %u-byte descriptor",
-                    (unsigned)c->pad_blank.count,
-                    c->pad_blank.switch_layout ? ", and the Switch layout for its full reports" : "",
-                    c->pad_blank.truncated ? " (more fields than fit; the rest left alone)" : "",
-                    (unsigned)*report_desc_len);
-            log_descriptor(c, report_desc, *report_desc_len);
+            if (!c->ops->blank_input) {
+                ctl_log(c, "overlay blank: %u field(s)%s%s from a %u-byte descriptor",
+                        (unsigned)c->pad_blank.count,
+                        c->pad_blank.switch_layout ? ", and the Switch layout for its full reports" : "",
+                        c->pad_blank.truncated ? " (more fields than fit; the rest left alone)" : "",
+                        (unsigned)*report_desc_len);
+                log_descriptor(c, report_desc, *report_desc_len);
+            }
+            if (c->ops->keepalive_ms) {
+                if (c->pad_blank.rest_len) {
+                    ctl_log(c, "still pad: report 0x%02x (%u bytes) sent again after %u ms "
+                               "without one, nothing pressed until the pad sends its own",
+                            (unsigned)c->pad_blank.rest_id, (unsigned)c->pad_blank.rest_len,
+                            c->ops->keepalive_ms);
+                } else {
+                    ctl_log(c, "still pad: no report to send again%s",
+                            c->pad_blank.switch_layout ? " (a Pro Controller never goes quiet)" : "");
+                }
+            }
         }
         derive_report_lengths(report_desc, *report_desc_len, caps);
         if (caps->input_report_len < 1024) caps->input_report_len = 1024;
@@ -2326,21 +2345,29 @@ static void blank_held_report(ctm_controller_t *c, uint8_t *buf, size_t n)
     else pad_blank_apply(&c->pad_blank, buf, n);
 }
 
-/* ⭐ Send an input-node type's present state when nothing has gone to the host
- * for ops->keepalive_ms -- and at once when the session starts, since
- * last_input_us begins at 0. An input node says nothing while the pad is
- * still, and the listener drops a pad that is silent for 15 s. Returns -1 if
- * the link is gone. When: the input thread, whenever its poll times out. */
+/* ⭐ Send a still pad's present state when nothing has gone to the host for
+ * ops->keepalive_ms -- and at once when the session starts, since
+ * last_input_us begins at 0. An input node, and a hidraw pad that reports only
+ * on a change, says nothing while the pad is still, and the listener drops a
+ * pad that is silent for 15 s. Returns -1 if the link is gone. When: the input
+ * thread, whenever its poll times out.
+ *
+ * ⭐⭐ The type's current_report first; when it has none, or nothing yet, the
+ * pump's own: the pad's last report, else one with nothing pressed from its
+ * descriptor (pad_keep_current). ⛔ Without that second half a pad bridged from
+ * the panel and never touched had nothing to send, and left after 15 s
+ * (rhoquinn8217, 2026-09-16, two Bluetooth Xbox pads on the rooted LG). */
 static int send_keepalive(ctm_controller_t *c)
 {
-    if (!c->ops->keepalive_ms || !c->ops->current_report) return 0;
+    if (!c->ops->keepalive_ms) return 0;
     const uint64_t now = now_us();
     if (c->last_input_us != 0 &&
         now - c->last_input_us < (uint64_t)c->ops->keepalive_ms * 1000u) {
         return 0;
     }
     uint8_t buf[MAX_REPORT];
-    const int n = c->ops->current_report(c, buf, sizeof(buf));
+    int n = c->ops->current_report ? c->ops->current_report(c, buf, sizeof(buf)) : 0;
+    if (n <= 0) n = (int)pad_keep_current(&c->pad_keep, &c->pad_blank, buf, sizeof(buf));
     if (n <= 0) return 0;
     if (ctm_input_is_held()) blank_held_report(c, buf, (size_t)n);
     if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
@@ -2427,6 +2454,12 @@ static void *input_thread_main(void *arg)
                 const int held = ctm_input_is_held();
                 if (held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
+                }
+                /* ⭐ A still pad's state is kept as the pad sent it, before a
+                 * hold blanks it, so what is sent again after the overlay
+                 * closes is what the pad still holds. */
+                if (c->ops->keepalive_ms && !c->ops->current_report) {
+                    pad_keep_update(&c->pad_keep, &c->pad_blank, buf, (size_t)n);
                 }
                 if (held) {
                     blank_held_report(c, buf, (size_t)n);

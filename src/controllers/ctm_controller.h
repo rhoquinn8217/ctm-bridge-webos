@@ -168,7 +168,11 @@ typedef struct {
      * itself. All NULL for every hidraw type, which keeps the pump exactly as
      * it was for them -- except `current_report` and `keepalive_ms` for a
      * hidraw pad that reports only when something changes: a Bluetooth Xbox
-     * pad (controller_xbox.c) keeps its last report and has it sent again.
+     * pad (controller_xbox.c) keeps its last report and has it sent again, and
+     * the generic type sets only `keepalive_ms`, so the pump keeps a gamepad's
+     * last report itself. ⭐ Either way, until the pad has sent a report, the
+     * pump sends one with nothing pressed built from its descriptor
+     * (pad_blank.inl), so a pad bridged and never touched is not dropped.
      *
      *   preflight       can the device be opened; 0 or the errno. Replaces
      *                   the hidraw check before BRIDGE_START.

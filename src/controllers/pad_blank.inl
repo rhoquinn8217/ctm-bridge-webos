@@ -40,6 +40,19 @@
  * ⚠️ A pad's true centre is a little off 0x800 by its calibration; a blank at
  * 0x800 still sits inside a game's dead zone.
  *
+ * ⭐⭐ THE SAME PLAN KEEPS A STILL PAD BRIDGED (pad_keep_*). A pad that reports
+ * only when something changes says nothing once it is put down, and the
+ * listener drops a gamepad that is silent for 15 s. rhoquinn8217, 2026-09-16, on
+ * the rooted LG: two Bluetooth Xbox pads bridged from the USB Bridge panel and
+ * put down left after 15 s, and a GameSir 15 s after its last press. ➡️ The pump
+ * sends the pad's own last report again, and until the pad has sent one, a
+ * report with nothing pressed built from this plan: what the host already
+ * believes of a device it has only just met.
+ * ⛔ Not for a Pro Controller. It never goes quiet (its simple report about 68
+ * times a second on a TV with no Nintendo driver, its full report once a driver
+ * or a host has shaken hands), and over a cable anything sent before that
+ * handshake lands among the replies Steam is waiting for.
+ *
  * ⓘ Pure: no controller, no I/O. tests/test_pad_blank.c runs it. */
 
 #ifndef PAD_BLANK_INL
@@ -51,6 +64,12 @@
 #include <string.h>
 
 #define PAD_BLANK_MAX_FIELDS 96
+/* The longest report a still pad is sent again as. A pad whose report is longer
+ * gets no keepalive rather than a stale one. */
+#define PAD_KEEP_MAX 128
+/* Relative fields a report sent again has zeroed; a device with more gets no
+ * keepalive. */
+#define PAD_REL_MAX 16
 
 typedef struct {
     uint8_t report_id;     /* 0 when the device's reports carry no id */
@@ -60,12 +79,30 @@ typedef struct {
 } pad_blank_field_t;
 
 typedef struct {
+    uint8_t report_id;
+    uint8_t bit_size;
+    uint16_t bit_offset;
+} pad_rel_field_t;
+
+typedef struct {
     bool present;          /* something to blank: fields, or the Switch layout */
     bool ids_used;         /* the reports start with an id byte */
     bool switch_layout;    /* a Pro Controller: 0x21 and 0x30 to 0x33 by its own layout */
     bool truncated;        /* more fields than fit; the rest are left alone */
     uint16_t count;
     pad_blank_field_t field[PAD_BLANK_MAX_FIELDS];
+    /* The report a still pad is sent again as (pad_keep_current): the id of the
+     * first report with a field planned, and its length in bytes with the id.
+     * rest_len 0: none, which is always so for a Pro Controller. */
+    uint8_t rest_id;
+    uint16_t rest_len;
+    /* ⛔ Every relative input field, in any collection. A relative field is a
+     * movement since the last report, so a report sent again with it would
+     * move again: pad_keep_current zeroes them. rel_overflow: more than fit,
+     * and then there is no rest report at all. */
+    uint8_t rel_count;
+    bool rel_overflow;
+    pad_rel_field_t rel[PAD_REL_MAX];
 } pad_blank_plan_t;
 
 /* The report ids a Pro Controller's own layout covers. */
@@ -133,6 +170,15 @@ static inline void pad_blank_add(pad_blank_plan_t *p, uint8_t report_id, uint32_
     f->bit_size = size;
     f->bit_offset = (uint16_t)bit;
     f->value = (uint32_t)value & mask;
+}
+
+static inline void pad_rel_add(pad_blank_plan_t *p, uint8_t report_id, uint32_t bit, uint8_t size)
+{
+    if (p->rel_count >= PAD_REL_MAX || bit > 0xffff) { p->rel_overflow = true; return; }
+    pad_rel_field_t *f = &p->rel[p->rel_count++];
+    f->report_id = report_id;
+    f->bit_size = size;
+    f->bit_offset = (uint16_t)bit;
 }
 
 typedef struct {
@@ -228,6 +274,10 @@ static inline bool pad_blank_from_descriptor(const uint8_t *d, size_t n, uint16_
             const bool constant = (v & 0x01) != 0;
             const bool variable = (v & 0x02) != 0;
             const bool relative = (v & 0x04) != 0;
+            if (!constant && variable && relative && count > 0) {
+                if (fsize < 1 || fsize > 32 || count > PAD_REL_MAX) out->rel_overflow = true;
+                else for (uint32_t k = 0; k < count; ++k) pad_rel_add(out, g.report_id, at + k * fsize, (uint8_t)fsize);
+            }
             if (pad_depth != 0 && !constant && fsize >= 1 && fsize <= 32 && count <= 1024) {
                 for (uint32_t k = 0; k < count; ++k) {
                     uint32_t u;
@@ -252,6 +302,17 @@ static inline bool pad_blank_from_descriptor(const uint8_t *d, size_t n, uint16_
         have_min = have_max = false;
     }
     out->present = out->count > 0 || out->switch_layout;
+    /* ⓘ Fields are planned in descriptor order, so the first one is in the
+     * pad's first report. Its length counts every input item with that id,
+     * padding included, inside the collection or not. */
+    if (out->count > 0 && !out->switch_layout && !out->rel_overflow) {
+        const uint8_t id = out->field[0].report_id;
+        const uint32_t len = (bits[id] + 7u) / 8u + (out->ids_used ? 1u : 0u);
+        if (len <= PAD_KEEP_MAX) {
+            out->rest_id = id;
+            out->rest_len = (uint16_t)len;
+        }
+    }
     return out->present;
 }
 
@@ -300,6 +361,61 @@ static inline void pad_blank_apply(const pad_blank_plan_t *p, uint8_t *data, siz
         if (f->report_id != id) continue;
         pad_blank_put(data, len, base + f->bit_offset, f->bit_size, f->value);
     }
+}
+
+/* A report with nothing pressed: the rest id, every planned field at rest, and
+ * zero everywhere else. Its length, or 0 when the plan has none or it does not
+ * fit. */
+static inline size_t pad_rest_report(const pad_blank_plan_t *p, uint8_t *out, size_t cap)
+{
+    if (!p || p->rest_len == 0 || !out || p->rest_len > cap) return 0;
+    memset(out, 0, p->rest_len);
+    if (p->ids_used) out[0] = p->rest_id;
+    pad_blank_apply(p, out, p->rest_len);
+    return p->rest_len;
+}
+
+/* A still pad's state for the pump to send again. `off` for the rest of the
+ * session once the pad sends a report of that id too long to keep: sending an
+ * older one would undo whatever it holds. */
+typedef struct {
+    uint8_t report[PAD_KEEP_MAX];
+    uint16_t len;
+    bool off;
+} pad_keep_t;
+
+/* Keep `data` when it is the pad's report of the rest id. ⚠️ Call it with the
+ * report as the pad sent it, before any blank. */
+static inline void pad_keep_update(pad_keep_t *k, const pad_blank_plan_t *p,
+                                   const uint8_t *data, size_t len)
+{
+    if (!k || !p || p->rest_len == 0 || k->off || !data || len == 0) return;
+    if (p->ids_used && data[0] != p->rest_id) return;
+    if (len > sizeof(k->report)) {
+        k->off = true;
+        k->len = 0;
+        return;
+    }
+    memcpy(k->report, data, len);
+    k->len = (uint16_t)len;
+}
+
+/* What to send for a still pad: its own last report with every relative field
+ * at 0, else its rest report. 0 for nothing to send. */
+static inline size_t pad_keep_current(const pad_keep_t *k, const pad_blank_plan_t *p,
+                                      uint8_t *out, size_t cap)
+{
+    if (!k || !p || p->rest_len == 0 || k->off || !out) return 0;
+    if (k->len == 0) return pad_rest_report(p, out, cap);
+    if (k->len > cap) return 0;
+    memcpy(out, k->report, k->len);
+    const uint32_t base = p->ids_used ? 8u : 0u;
+    for (uint8_t i = 0; i < p->rel_count; ++i) {
+        const pad_rel_field_t *f = &p->rel[i];
+        if (f->report_id != p->rest_id) continue;
+        pad_blank_put(out, k->len, base + f->bit_offset, f->bit_size, 0);
+    }
+    return k->len;
 }
 
 #endif /* PAD_BLANK_INL */
