@@ -384,6 +384,21 @@ void ctm_signals_set_enabled(int light, int rumble, int tone);
 /* Is the felt pulse allowed right now? For a type that confirms with a rumble
  * of its own rather than the DualSense signal. */
 int signals_rumble_on(void);
+
+/* ⭐⭐ WILL THE CORE PLAY A CONNECTED SIGNAL FOR THIS DEVICE? (T-212)
+ *
+ * ⛔ THE FAULT THIS EXISTS FOR. The TV stands aside at a bridge and lets the
+ * core signal the pad -- and for a Bluetooth Xbox pad or a Bluetooth DS4 the
+ * core has nothing to play, so NOBODY signals and the bridge is silent. The TV
+ * could not tell the difference: it asked whether the pad was plugged, which is
+ * true either way.
+ *
+ * ⭐ So it asks this instead, and the answer is computed from the SAME two
+ * fields the core's own branch uses -- `speaks_ds5`, which plays the DualSense's
+ * tone and light on both transports, and `signal_connected`, which only a cabled
+ * DS4 has. ⚠️ Keep it that way: a copy of the rule on the TV side would drift
+ * from the branch in controller_common.c the first time a type gains a signal. */
+int ctm_controller_will_signal_connect(const ctm_controller_dev_t *dev);
 /* Is the light allowed right now? The same, for a type that paints a lightbar
  * of its own. ⓘ Like the pulse's, it answers no when CTM_SIGNALS_ENABLED is off. */
 int signals_light_on(void);

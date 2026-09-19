@@ -2825,6 +2825,11 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * For anything else the card match went looking for a free DualSense card
      * and could claim one by elimination, and the tone was written to the
      * device as DualSense reports. */
+    /* ⚠️ THIS BRANCH IS THE ONE ctm_controller_will_signal_connect() ANSWERS FOR
+     * THE TV (T-212): the `if` plays a DualSense's signal, the `else` plays a
+     * type's own. A pad that reaches neither gets nothing from the core, and
+     * before T-212 the TV stood aside for it anyway. Change either side and
+     * change the other. */
     if (c->ops->speaks_ds5) {
         pthread_mutex_lock(&g_cardmatch_lock);
         cardmatch_identify(c);
@@ -3502,6 +3507,18 @@ static const ctm_controller_ops_t *const k_registry[] = {
     &ctm_controller_xbox_ops,
     &ctm_controller_generic_ops,
 };
+
+/* T-212. ⚠️ THE TWO FIELDS HERE ARE THE TWO THE BRANCH IN start_session USES --
+ * `speaks_ds5` for the DualSense's tone and light, `signal_connected` for a type
+ * with a signal of its own. If a type gains one, it becomes true here for free;
+ * if this is ever rewritten as a list of kinds, it will drift the first time. */
+int ctm_controller_will_signal_connect(const ctm_controller_dev_t *dev)
+{
+    if (dev == NULL) return 0;
+    const ctm_controller_ops_t *ops = ctm_controller_ops_for(dev);
+    if (ops == NULL) return 0;
+    return (ops->speaks_ds5 || ops->signal_connected != NULL) ? 1 : 0;
+}
 
 const ctm_controller_ops_t *ctm_controller_ops_for(const ctm_controller_dev_t *dev)
 {
