@@ -339,17 +339,37 @@ static void btsig_wait_for(const struct timespec *t0, int n)
 static char g_btsig_primed[BTSIG_PRIMED_MAX][40];
 static int  g_btsig_primed_n;
 
-static bool btsig_mark_primed(const char *key)
+/* ASKING AND MARKING ARE TWO STEPS, AND THEY USED TO BE ONE.
+ *
+ * The single call marked the key before a frame of the prime had been written,
+ * so anything that stopped the tone early left a pad recorded as primed with a
+ * decoder that was never warmed -- and the NEXT tone then took the short prime
+ * into a cold one, which is the silent-first-tone fault the prime exists to
+ * cure, returning by a new road.
+ *
+ * Two ways that already happened, before a plug-out could stop a tone at all:
+ * `tone_on` is read AFTER the mark and zeroes the prime, so switching the tone
+ * off, bridging, and switching it back on marked a pad primed with nothing ever
+ * sent; and a write that failed marked it just the same.
+ *
+ * So: ask at the top, and mark only once the prime has actually gone out.
+ * Split 2026-09-21 alongside the claim that stops two tones overlapping. */
+static bool btsig_is_primed(const char *key)
 {
     if (!key || !key[0]) return false;   /* unknown: prime long, it is the safe way to be wrong */
     for (int i = 0; i < g_btsig_primed_n; ++i) {
         if (strcmp(g_btsig_primed[i], key) == 0) return true;
     }
+    return false;
+}
+
+static void btsig_mark_primed(const char *key)
+{
+    if (!key || !key[0] || btsig_is_primed(key)) return;
     if (g_btsig_primed_n < BTSIG_PRIMED_MAX) {
         snprintf(g_btsig_primed[g_btsig_primed_n], sizeof(g_btsig_primed[0]), "%s", key);
         ++g_btsig_primed_n;
     }
-    return false;
 }
 
 static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_to,
@@ -453,7 +473,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * ⓘ Keyed on whatever identity the caller has: a MAC from a session, the
      * device node from a refusal, which has no controller object. Different
      * keys for the same controller cost one extra long prime, no more. */
-    const int primed = btsig_mark_primed(prime_key);
+    const int primed = btsig_is_primed(prime_key);
     int prime_frames = primed ? BTSIG_PRIME_FRAMES : (BTSIG_PRIME_FRAMES * 3);
     /* ⭐ With the tone switched off the report still carries the light and the
      * felt pulse, so it is sent -- with silence where the audio would be. ⓘ
@@ -461,13 +481,28 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * longer feeding. */
     const int tone_on = ctm_sig_tone_on();
     if (!tone_on) prime_frames = 0;
+    /* STOPS WHEN A PLUG-OUT IS WAITING ON US. Checked in each of the paced
+     * loops below, so the wait is one frame long rather than the whole signal:
+     * this tone runs for one and a quarter to two and a half seconds, and the
+     * release cannot start until it ends. See controller_signal_cancelled for
+     * why it is not merely "the pad is closing" -- the release tone runs in
+     * exactly that state and must play in full. */
+    bool stopped = false;
     for (int i = 0; i < prime_frames; ++i) {
+        if (controller_signal_cancelled(log_to)) { stopped = true; break; }
         f.audio = NULL; f.seq = seq++; f.haptics = 0; f.claim_led = 0;
         f.configure = (i == 0);   /* the first report only -- see btsig_build */
         btsig_build(rep, &f);
         if (write(fd, rep, sizeof(rep)) == (ssize_t)sizeof(rep)) ++sent;
         else ++failed;
         btsig_wait_for(&t0, ++paced);
+    }
+    /* THE DECODER IS WARM ONLY IF THE PRIME ACTUALLY WENT OUT -- so the mark is
+     * here and not at the test above. A tone cut short, one skipped because the
+     * tone is switched off, or one whose writes failed all leave the key unset,
+     * and the pad primes properly next time instead of arriving silent. */
+    if (prime_frames > 0 && !stopped && failed == 0) {
+        btsig_mark_primed(prime_key);
     }
 
     /* The signal itself: colour ramping up, a pulse to feel, a tone to hear. */
@@ -525,6 +560,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     const int LIT   = (pattern == BTSIG_REFUSED) ? VOICE * 2 : VOICE;
 
     for (int i = 0; i < VOICE; ++i) {
+        if (stopped || controller_signal_cancelled(log_to)) { stopped = true; break; }
         const uint8_t *note = NULL;
         if (i < BTSIG_TONE_FRAMES) {
             note = first + (size_t)i * BTSIG_FRAME_BYTES;
@@ -596,6 +632,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     /* Let the light finish its pattern after the tone has stopped, and keep
      * the stream alive so it does not end mid-frame. */
     for (int i = VOICE; i < LIT; ++i) {
+        if (stopped || controller_signal_cancelled(log_to)) { stopped = true; break; }
         int lvl = btsig_level(pattern, i, LIT);
         /* The pulse carries on past the sound, for the same reason the light
          * does: it is what makes you look down in the first place. */
@@ -647,8 +684,9 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
 
     if (log_to) {
         ctl_log(log_to,
-                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio (prime %d)",
-                call, (int)pattern, sent, failed, took_ms, owed_ms, prime_frames);
+                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio (prime %d)%s",
+                call, (int)pattern, sent, failed, took_ms, owed_ms, prime_frames,
+                stopped ? " -- CUT SHORT, a release is waiting" : "");
     } else {
         fprintf(stderr,
                 "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio\n",

@@ -2054,6 +2054,33 @@ bool controller_signal_stopping(ctm_controller_t *c)
     return closed;
 }
 
+/* TRUE ONLY INSIDE A CLAIMED SIGNAL THAT PLUG-OUT IS NOW WAITING FOR, which is
+ * the question a signal has to ask before it cuts itself short.
+ *
+ * NOT controller_signal_stopping() on its own, and the difference is the whole
+ * point. The release tone plays AFTER signal_close() has set the closed flag --
+ * that is the order the unplug requires, because the audio device is torn down
+ * straight afterwards. So "closed" alone reads true throughout the release
+ * tone, and a signal that trusted it would abort the very tone the release
+ * exists to play, then let the teardown close the device with it still queued.
+ *
+ * The CLAIM is what tells the two apart: the connect signal holds one, the
+ * release tone does not. Both flags together mean "you are the claimed signal,
+ * and something is blocked waiting for you to finish".
+ *
+ * A signal with no controller -- the refusal path -- can have nothing waiting
+ * on it, so it is never cancelled. That is the opposite of
+ * controller_signal_stopping's answer for NULL, deliberately: that one is asked
+ * by callers who own the controller, this one by a write loop that may not. */
+bool controller_signal_cancelled(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool cancelled = c->signal_running && c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return cancelled;
+}
+
 bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value)
 {
     if (!c) return false;

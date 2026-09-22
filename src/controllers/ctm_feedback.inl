@@ -271,7 +271,11 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * ⓘ Builds 293 and 294 tried 600 ms of silence in front and a second
      * settings report twelve milliseconds in. Both silent: it was never the
      * first samples or the settings, it was the first stream. */
-    const int twice = c->card_fresh ? 1 : 0;
+    /* NOT IF A RELEASE IS ALREADY WAITING ON US. The repeat sleeps a second and
+     * a half before it even plays, and a plug-out now waits for this thread --
+     * see the claim in feedback_play_connected. A second play of a connect tone
+     * is not worth holding a release for. */
+    const int twice = (c->card_fresh && !controller_signal_cancelled(c)) ? 1 : 0;
     if (twice) {
         /* The first play is for the speaker, which cannot hear it; the
          * haptics can, and a pulse now and another with the tone read as two
@@ -362,6 +366,8 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         const long pulses = (pattern == BTSIG_HANDING_OVER) ? 1 : 2;
         const long span   = wait_ms / pulses;
         for (long done = 0; done < wait_ms; done += step_ms) {
+            /* The settle below still runs, so the light is never left mid-breath. */
+            if (controller_signal_cancelled(c)) break;
             const long within = done % span;
             const long half   = span / 2;
             long lvl = half ? ((within < half) ? (within * 255) / half
@@ -395,7 +401,12 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
 /* Runs a connect signal off the session thread. See the note at the call. */
 static void *feedback_signal_thread(void *arg)
 {
-    feedback_play((ctm_controller_t *)arg, 2, "connected", true, BTSIG_HANDING_OVER);
+    ctm_controller_t *c = (ctm_controller_t *)arg;
+    feedback_play(c, 2, "connected", true, BTSIG_HANDING_OVER);
+    /* THE LAST TOUCH OF `c`. A plug-out blocks in signal_close() until this
+     * returns, and may tear the controller down the instant it does -- so
+     * nothing may read or write it below this line. */
+    controller_signal_end(c, NULL);
     return NULL;
 }
 
@@ -407,11 +418,40 @@ static void feedback_play_connected(ctm_controller_t *c)
      *
      * Detached deliberately -- nobody waits for a confirmation, and joining
      * would put the wait back where it must not be. */
+    /* CLAIM THE CONTROLLER FIRST, WHICH THIS NEVER DID.
+     *
+     * The cabled DS4's signal has always claimed, and its comment says so in as
+     * many words: "unlike the DualSense's, it claims the controller first, so
+     * plug-out cannot close the node under it". This one did not -- so
+     * signal_close(), whose entire job is to be sure no signal thread is still
+     * writing, returned instantly for a DualSense and waited for nothing at
+     * all. Its own comment recorded the hole without naming it a hole:
+     * "instant for every type that never begins a signal, the DualSense
+     * included."
+     *
+     * WHAT IT COST, found on the rooted monitor 2026-09-21: a release arriving
+     * while this thread was still writing put TWO tones into one pad at once,
+     * their frames interleaved on the one descriptor. rhoquinn8217 heard it as
+     * the tone doubling, on bridge and on release alike. The log had it
+     * plainly -- a connect tone and a release tone three milliseconds apart,
+     * each stretched five to thirty times its own length by the two of them
+     * fighting over the same write. Six of thirty-six calls were stretched
+     * that way. The same race could also close the descriptor under this
+     * thread, which is the very thing signal_close was written to prevent.
+     *
+     * The claim buys both halves: a second signal is refused rather than
+     * interleaved, and a plug-out now waits for this one to finish. */
+    if (!controller_signal_begin(c)) {
+        ctl_log(c, "feedback: connected -- not played, a signal is still playing "
+                   "or the pad is being released");
+        return;
+    }
     pthread_t sig;
     if (pthread_create(&sig, NULL, feedback_signal_thread, c) == 0) {
         pthread_detach(sig);
     } else {
         ctl_log(c, "feedback: connected -- could not start the signal thread");
+        controller_signal_end(c, NULL);   /* nothing will run: give the claim back */
     }
 }
 
