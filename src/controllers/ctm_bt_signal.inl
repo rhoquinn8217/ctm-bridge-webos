@@ -702,16 +702,24 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
                           (t1.tv_nsec - t0.tv_nsec) / 1000000L);
     long owed_ms = (long)sent * (BTSIG_PACE_US / 1000);
 
-    if (log_to) {
-        ctl_log(log_to,
-                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio (prime %d)%s",
-                call, (int)pattern, sent, failed, took_ms, owed_ms, prime_frames,
-                stopped ? " -- CUT SHORT, a release is waiting" : "");
-    } else {
-        fprintf(stderr,
-                "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio\n",
-                call, (int)pattern, sent, failed, took_ms, owed_ms);
-    }
+    /* ONE LINE FOR EVERY TONE, WITH OR WITHOUT A CONTROLLER BEHIND IT.
+     *
+     * A refusal has no controller object, so it used to take an stderr branch
+     * that named no device, carried neither the prime nor the cut marker, and
+     * never reached the sink that writes the app's own log. A refusal
+     * therefore left NOTHING in any file: on 2026-09-21 one fired on the
+     * rooted monitor and the only evidence it had happened at all was the call
+     * counter stepping from #2 to #4. rhoquinn8217 heard a tone that nothing
+     * had recorded, and asked for this.
+     *
+     * ctl_log takes NULL now, so a refusal gets the same line as every other
+     * tone, with the node standing in for the name it does not have. */
+    ctl_log(log_to,
+            "btsig: call #%u pattern=%d, %d sent, %d failed, took %ldms for %ldms of audio (prime %d)%s%s%s",
+            call, (int)pattern, sent, failed, took_ms, owed_ms, prime_frames,
+            stopped ? " -- CUT SHORT, a release is waiting" : "",
+            log_to ? "" : " -- REFUSAL, no controller, node ",
+            log_to ? "" : (prime_key && prime_key[0] ? prime_key : "unknown"));
     return failed ? -1 : 0;
 }
 

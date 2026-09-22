@@ -845,7 +845,13 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
-    const char *kind = c->ops ? c->ops->kind : "ctl";
+    /* NULL-SAFE, AND IT WAS NOT. Every line below dereferenced `c`, so a
+     * caller holding no controller could not log at all without crashing --
+     * which is exactly why the Bluetooth refusal tone wrote a line to stderr
+     * by hand and reached neither a log file nor the sink. A refusal is the
+     * one signal worth being certain of, and it was the one nothing recorded.
+     * (2026-09-21) */
+    const char *kind = (c && c->ops) ? c->ops->kind : "ctl";
 
     /* ⛔⛔ TIMESTAMPED, AT LAST. Flagged on 2026-07-31 as the obstacle to the
      * hang investigation -- "the TV log has no wall-clock time, so duration and
@@ -866,13 +872,15 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     const double t = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 
     fprintf(stderr, "[%s] %s\n", kind, body);
-    if (c->log) {
+    if (c && c->log) {
         fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
-    pthread_mutex_lock(&c->status_mutex);
-    snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
-    pthread_mutex_unlock(&c->status_mutex);
+    if (c) {
+        pthread_mutex_lock(&c->status_mutex);
+        snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
+        pthread_mutex_unlock(&c->status_mutex);
+    }
     if (g_log_sink) {
         char line[600];
         snprintf(line, sizeof(line), "%s: %s", kind, body);
