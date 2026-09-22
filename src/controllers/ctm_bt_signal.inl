@@ -560,7 +560,27 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     const int LIT   = (pattern == BTSIG_REFUSED) ? VOICE * 2 : VOICE;
 
     for (int i = 0; i < VOICE; ++i) {
-        if (stopped || controller_signal_cancelled(log_to)) { stopped = true; break; }
+        /* THE VOICE IS NEVER CUT INTO, only skipped before it starts.
+         *
+         * rhoquinn8217, 2026-09-21, listening to the first build of this:
+         * "when you started tweaking it sounded too short and it crackled
+         * more". Both halves of that were right, and the crackle is spelled
+         * out in the drain's own comment further down: "a decoder cut off
+         * mid-stream pops". Stopping in the middle of a note leaves the
+         * waveform at whatever amplitude it had reached, and the step to
+         * silence is the click.
+         *
+         * And there was nothing to buy. The whole voice is 32 frames, 320 ms
+         * -- two 140 ms notes and the 40 ms between them -- against a prime of
+         * 600 ms and a drain of 300. Cutting into it saves at most a third of
+         * a second and ruins the sound; the prime before it is silence and can
+         * be abandoned at any frame for nothing.
+         *
+         * So the cancel is checked in the prime, and here only as "was the
+         * prime abandoned". Worst case a release now waits 320 ms of voice and
+         * 300 ms of drain, about six tenths of a second, and every tone that
+         * starts is heard whole. */
+        if (stopped) break;
         const uint8_t *note = NULL;
         if (i < BTSIG_TONE_FRAMES) {
             note = first + (size_t)i * BTSIG_FRAME_BYTES;
