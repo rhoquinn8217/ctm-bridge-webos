@@ -845,7 +845,13 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
-    const char *kind = c->ops ? c->ops->kind : "ctl";
+    /* NULL-SAFE, AND IT WAS NOT. Every line below dereferenced `c`, so a
+     * caller holding no controller could not log at all without crashing --
+     * which is exactly why the Bluetooth refusal tone wrote a line to stderr
+     * by hand and reached neither a log file nor the sink. A refusal is the
+     * one signal worth being certain of, and it was the one nothing recorded.
+     * (2026-09-21) */
+    const char *kind = (c && c->ops) ? c->ops->kind : "ctl";
 
     /* ⛔⛔ TIMESTAMPED, AT LAST. Flagged on 2026-07-31 as the obstacle to the
      * hang investigation -- "the TV log has no wall-clock time, so duration and
@@ -866,13 +872,15 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
     const double t = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 
     fprintf(stderr, "[%s] %s\n", kind, body);
-    if (c->log) {
+    if (c && c->log) {
         fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
-    pthread_mutex_lock(&c->status_mutex);
-    snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
-    pthread_mutex_unlock(&c->status_mutex);
+    if (c) {
+        pthread_mutex_lock(&c->status_mutex);
+        snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
+        pthread_mutex_unlock(&c->status_mutex);
+    }
     if (g_log_sink) {
         char line[600];
         snprintf(line, sizeof(line), "%s: %s", kind, body);
@@ -2052,6 +2060,33 @@ bool controller_signal_stopping(ctm_controller_t *c)
     const bool closed = c->signal_closed != 0;
     pthread_mutex_unlock(&c->signal_mutex);
     return closed;
+}
+
+/* TRUE ONLY INSIDE A CLAIMED SIGNAL THAT PLUG-OUT IS NOW WAITING FOR, which is
+ * the question a signal has to ask before it cuts itself short.
+ *
+ * NOT controller_signal_stopping() on its own, and the difference is the whole
+ * point. The release tone plays AFTER signal_close() has set the closed flag --
+ * that is the order the unplug requires, because the audio device is torn down
+ * straight afterwards. So "closed" alone reads true throughout the release
+ * tone, and a signal that trusted it would abort the very tone the release
+ * exists to play, then let the teardown close the device with it still queued.
+ *
+ * The CLAIM is what tells the two apart: the connect signal holds one, the
+ * release tone does not. Both flags together mean "you are the claimed signal,
+ * and something is blocked waiting for you to finish".
+ *
+ * A signal with no controller -- the refusal path -- can have nothing waiting
+ * on it, so it is never cancelled. That is the opposite of
+ * controller_signal_stopping's answer for NULL, deliberately: that one is asked
+ * by callers who own the controller, this one by a write loop that may not. */
+bool controller_signal_cancelled(ctm_controller_t *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool cancelled = c->signal_running && c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return cancelled;
 }
 
 bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value)

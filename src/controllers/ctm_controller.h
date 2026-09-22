@@ -453,6 +453,10 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
 bool controller_signal_begin(ctm_controller_t *c);
 bool controller_signal_end(ctm_controller_t *c, const uint32_t *gave_back);
 bool controller_signal_stopping(ctm_controller_t *c);
+/* Asked from inside a signal's own write loop: is this a claimed signal that a
+ * plug-out is now waiting on? A release tone, which runs after the close, says
+ * no -- see the note on the definition. */
+bool controller_signal_cancelled(ctm_controller_t *c);
 bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t value);
 uint32_t controller_signal_kept(ctm_controller_t *c);
 void controller_signal_motors_done(ctm_controller_t *c);
