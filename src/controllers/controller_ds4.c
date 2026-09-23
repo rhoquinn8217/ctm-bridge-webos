@@ -216,7 +216,7 @@ static void ds4_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
  * told apart from it working. */
 static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
 {
-    if (!c || c->hid_fd < 0 || !s) return;
+    if (!c || !s) return;
 
     const uint8_t headset = ds4_volume_raw_byte(s->headset_volume_percent);
     const uint8_t speaker = ds4_volume_raw_byte(s->speaker_volume_percent);
@@ -239,10 +239,14 @@ static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settin
     rep[24] = speaker;
     ctm_bt_sign_output(rep, sizeof rep);
 
-    const ssize_t n = write(c->hid_fd, rep, sizeof rep);
+    /* ctm_controller_write_raw, not a bare write: it is the documented way for a
+     * type to say something to the controller itself rather than pass a host
+     * report along, it checks the fd, and it takes hid_mutex -- which a bare
+     * write would not, racing every other writer on this pad. */
+    const int rc = ctm_controller_write_raw(c, rep, sizeof rep);
     ctm_controller_set_type_state(c, DS4_SLOT_AUDIO, now);
-    ctl_log(c, "ds4 audio: told the pad headset=%u speaker=%u route=0x%02x, wrote %d of %zu",
-            headset, speaker, route, (int)n, sizeof rep);
+    ctl_log(c, "ds4 audio: told the pad headset=%u speaker=%u route=0x%02x, rc=%d",
+            headset, speaker, route, rc);
 }
 
 /* set_settings: a live slider moved. ⓘ The FIRST set_settings in this tree --
