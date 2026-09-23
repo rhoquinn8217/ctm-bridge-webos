@@ -885,6 +885,31 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
         char line[600];
         snprintf(line, sizeof(line), "%s: %s", kind, body);
         g_log_sink(line);
+    } else if (!c) {
+        /* NO CONTROLLER AND NO SINK: THE LINE WOULD VANISH, SO IT GOES TO THE
+         * GESTURE LOG INSTEAD.
+         *
+         * A caller holding a controller still gets a file, `c->log`. A caller
+         * without one -- the Bluetooth refusal is the only one today -- had
+         * nowhere to go: `c->log` needs a controller, and `g_log_sink` is set
+         * ONLY by the standalone UI app (`ui_app.c`). aurora-tv never sets it,
+         * so on a TV the line reached `fprintf(stderr, ...)` and nothing else,
+         * and stderr is not captured into the app's log files.
+         *
+         * MEASURED on the rooted monitor 2026-09-22, build 398: a refusal was
+         * forced by killing the listener inside the TV's 11 s probe gap. It
+         * fired -- `refused on /dev/hidraw8: core sounded=1 lit=1` -- and left
+         * NO btsig line in any file, with the call counter not advancing. The
+         * whole point of making ctl_log NULL-safe had been to record exactly
+         * that, and it recorded nothing.
+         *
+         * The gesture log is the right destination: it is where the app
+         * already writes its own `[app] refused: ...` line for the same event,
+         * so the two halves land together and in order.
+         *
+         * ctm_gesture_log takes a NULL controller by design and writes with
+         * fprintf, never through ctl_log, so this cannot recurse. */
+        ctm_gesture_log(NULL, "%s", body);
     }
 }
 
