@@ -204,6 +204,10 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
 int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
 {
     if (!c || c->hid_fd < 0) return -1;
+    /* ⓘ Slot 3 counts host audio reports the patch hook dropped while this
+     * signal held the pad. Zeroed here and read by the caller's log line, so a
+     * run says whether the drop fired rather than leaving it to be assumed. */
+    ctm_controller_set_type_state(c, 3 /* DS4_SLOT_AUDIO_DROPPED */, 0);
     return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path);
 }
 

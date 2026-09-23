@@ -92,6 +92,8 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
          * ⓘ Returning 1 means the patch CONSUMED the report: it is not
          * written on. 🔗 apply_output_settings. */
         if (controller_signal_host_report(c, false, 0)) {
+            ctm_controller_set_type_state(c, DS4_SLOT_AUDIO_DROPPED,
+                ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED) + 1);
             return 1;
         }
         uint8_t route = ds4_route_for_mode(settings->audio_mode);
@@ -135,6 +137,11 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 #define DS4_SLOT_CHORD     0   /* the input thread's: when the chord began */
 #define DS4_SLOT_WITHHELD  1   /* the session thread's: host reports withheld in a row */
 #define DS4_SLOT_AUDIO     2   /* the last audio values SENT, so a resend only happens on a change */
+/* ⓘ DIAGNOSTIC, added 2026-09-22. Counts host audio reports dropped while a
+ * signal plays, so the tone's own log line can say whether the drop fired at
+ * all. ⚠️ A count of ZERO during a manual bridge would mean host audio does
+ * not reach ds4_patch_output, and the competition is somewhere else. */
+#define DS4_SLOT_AUDIO_DROPPED 3
 
 static uint64_t ds4_now_ms(void)
 {
@@ -334,7 +341,8 @@ static void *ds4_bt_connected_thread(void *arg)
         return NULL;
     }
     const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
-    ctl_log(c, "signal: connected -- tone rc=%d", rc);
+    ctl_log(c, "signal: connected -- tone rc=%d, host audio reports dropped=%llu",
+            rc, (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED));
     controller_signal_end(c, NULL);
     return NULL;
 }
@@ -372,7 +380,8 @@ static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t wh
     default:                  what = "unplugging (requested)"; break;
     }
     const int rc = ds4_signal_tone_bt(c, 1 /* BTSIG_HANDED_BACK */);
-    ctl_log(c, "signal: %s -- tone rc=%d", what, rc);
+    ctl_log(c, "signal: %s -- tone rc=%d, host audio reports dropped=%llu",
+            what, rc, (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED));
 }
 
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
