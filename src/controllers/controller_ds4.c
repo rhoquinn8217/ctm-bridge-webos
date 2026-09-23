@@ -71,6 +71,29 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
     int patched = 0;
 
     if (data[0] == 0x12 || data[0] == 0x14 || data[0] == 0x17) {
+        /* ⛔⛔ WHILE OUR TONE PLAYS, THE HOST'S AUDIO IS DROPPED.
+         *
+         * ⚠️ THE FAULT THIS FIXES, heard 2026-09-22: rhoquinn8217 on build
+         * 403 -- *"bridge tone is short sometimes I only hear a crack"*. The
+         * REFUSAL tone was clean and the BRIDGE tone was not, and the one
+         * difference is the node. A refusal plays to a pad that is NOT
+         * bridged, so nothing else writes to it. A bridge and a handback play
+         * to a pad that IS, and the host's own audio arrives as these very
+         * reports -- so two streams of SBC frames interleave and the pad
+         * decodes a mixture of both. Our 928 ms of tone becomes a fraction of
+         * that, which is exactly what "short, sometimes a crack" sounds like.
+         *
+         * ⭐ So the signal gets the node to itself, the way the refusal always
+         * had it. The cost is that a game's audio is muted for about a second,
+         * which is the same trade the lightbar and the motors already make
+         * just below -- a confirmation signal owns what it drives while it
+         * plays.
+         *
+         * ⓘ Returning 1 means the patch CONSUMED the report: it is not
+         * written on. 🔗 apply_output_settings. */
+        if (controller_signal_host_report(c, false, 0)) {
+            return 1;
+        }
         uint8_t route = ds4_route_for_mode(settings->audio_mode);
         if (route != 0 && data[5] != route) {
             data[5] = route;
