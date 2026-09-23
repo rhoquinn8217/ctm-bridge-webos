@@ -47,11 +47,18 @@
  * what a Bluetooth link wants.
  * ⓘ The three sizes are the listener map's, LAYOUT B: 0x12 = 142 B / 1 frame,
  * 0x14 = 270 B / 2, 0x17 = 462 B / 4. Nothing here is derived. */
-#define DS4SIG_REPORT_ID     0x17
-#define DS4SIG_REPORT_LEN    462
+/* ⛔ BACK TO 0x14 (two frames) FROM 0x17 (four). 0x17 was tried on the theory
+ * that fewer, larger writes would stop the blocking on a bridged pad -- and it
+ * was MEASURED not to: `writes took 10221ms, worst 5103ms` at 62 writes a
+ * second against `10257ms / 5119ms` at 125. It changed nothing.
+ * ⚠️ And every handback HEARD through the microphone tonight was on 0x14;
+ * none has been captured since the switch. A change that did not fix what it
+ * was for and may have cost something else does not stay. */
+#define DS4SIG_REPORT_ID     0x14
+#define DS4SIG_REPORT_LEN    270
 #define DS4SIG_PAYLOAD_OFF   6
-#define DS4SIG_FRAMES_PER_REPORT 4
-#define DS4SIG_PACE_US       16000  /* four 4 ms frames in every report */
+#define DS4SIG_FRAMES_PER_REPORT 2
+#define DS4SIG_PACE_US       8000   /* two 4 ms frames in every report */
 
 /* ⭐⭐ 1800 ms -- the DualSense's LONG prime, and it is earned rather than
  * copied. It started at 600 ms, its SHORT one, deliberately: the shortest thing
@@ -216,14 +223,19 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     ds4sig_notes_for(pattern, &first, &second);
 
 
-    /* ⭐⭐ THE PRIME'S LENGTH IS THE DUALSENSE'S RULE, not a constant.
-     * Long for a pad this run has not primed, short afterwards -- and keyed
-     * PER PAD, because the decoder is the controller's. 🔗 btsig_is_primed, whose
-     * table this shares; a DS4 key and a DualSense key cannot collide because
-     * both are the pad's own MAC or node. */
-    const int primed = btsig_is_primed(node);
-    const int prime_frames = primed ? DS4SIG_PRIME_FRAMES
-                                    : (DS4SIG_PRIME_FRAMES * 3);
+    /* ⛔⛔ ALWAYS THE LONG PRIME. The DualSense's per-pad memory is WRONG for
+     * this pad, and the logs say so plainly: every handback that was heard
+     * tonight carried `prime 450`, and every silent one carried `prime 150` --
+     * same pad, same build, same perfect delivery (`929ms for 928ms`, writes
+     * 0ms).
+     * ➡️ "Primed once" is not a property that LASTS on a DS4. Its decoder goes
+     * idle between signals, so a table that remembers forever hands a short
+     * prime to a cold decoder and the tone is simply not played.
+     * ⓘ The cost is a 1.8 s lead-in on every tone. ⭐ Worth revisiting with a
+     * LAST-HEARD TIMESTAMP rather than a flag -- short prime only if a tone
+     * played in the last few seconds -- which needs state this file does not
+     * keep yet. Correct and slow beats fast and silent. */
+    const int prime_frames = DS4SIG_PRIME_FRAMES * 3;
 
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
@@ -307,13 +319,6 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
         reports++;
         ds4sig_wait_for(&t0, reports);
     }
-
-    /* ⛔ THE DECODER IS WARM ONLY IF THE PRIME ACTUALLY WENT OUT, so the mark
-     * is here rather than beside the test. A tone whose writes failed leaves
-     * the key unset and the pad primes properly next time instead of arriving
-     * silent. 🔗 The DualSense's note beside btsig_mark_primed, which learned
-     * this the hard way. */
-    if (prime_frames > 0 && failed == 0) btsig_mark_primed(node);
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
