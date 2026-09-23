@@ -330,6 +330,10 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
  * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about
  * five seconds, so this is the only way a DS4 tone reliably plays. */
 int ds4_signal_tone_node(const char *node, int pattern);
+
+/* The light and the felt pulse on a bare node, for a signal with no session --
+ * a refusal. 0 handing over, 1 handed back, 2 refused. ⛔ Bluetooth only. */
+int ds4_signal_light_pulse_node(const char *node, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);

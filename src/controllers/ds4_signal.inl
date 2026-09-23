@@ -404,5 +404,14 @@ int ds4_signal_tone_node(const char *node, int pattern)
 
 int ds4_signal_refused_bt(const char *node)
 {
-    return ds4_signal_tone_node(node, 2 /* BTSIG_REFUSED */);
+    /* ⭐ ALL THREE, like the DualSense: red light, a felt pulse, and the
+     * sinking pair of notes. ⓘ The light goes FIRST because a refusal wants to
+     * be immediate and the light is instant, where the tone takes two seconds.
+     * They are separate reports on a DS4 -- the DualSense carries both in one --
+     * so sequential is the only option. */
+    const int lrc = ds4_signal_light_pulse_node(node, 2 /* BTSIG_REFUSED */);
+    const int trc = ds4_signal_tone_node(node, 2);
+    ctl_log(NULL, "ds4sig: refusal light/pulse rc=%d, tone rc=%d -- node %s",
+            lrc, trc, node ? node : "?");
+    return trc;
 }

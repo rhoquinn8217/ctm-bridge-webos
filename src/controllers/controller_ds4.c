@@ -16,8 +16,10 @@
 #include "ds4_report.inl"
 
 #include <errno.h>
+#include <fcntl.h>    /* open, for the refusal's node-level signal */
 #include <pthread.h>
 #include <string.h>
+#include <unistd.h>   /* write and close, the same */
 #include <sys/ioctl.h>
 #include <time.h>
 
@@ -476,6 +478,12 @@ typedef struct {
     uint8_t r, g, b;
     int breaths;
     long ms;
+    /* ⭐ HOLD AT FULL INSTEAD OF BREATHING, which is what the DualSense does for
+     * a handover. 🔗 btsig_level: *"Handing over: SOLID, not pulsing. The app's
+     * pre-plug pulse has already swelled the light up to full by the time this
+     * runs, so pulsing again animates the same event twice."* The same
+     * reasoning applies here, so the same shape is used. */
+    bool solid;
 } ds4_signal_shape_t;
 
 typedef struct {
@@ -485,8 +493,17 @@ typedef struct {
     long took_ms;
 } ds4_signal_run_t;
 
-static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS };
-static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, 2, DS4_RELEASED_MS };
+/* ⭐⭐ THE SAME THREE PATTERNS THE DUALSENSE PAINTS, so one pad does not mean
+ * something different from the other (rhoquinn8217, 2026-09-23).
+ * 🔗 btsig_level and the colour lines beside it:
+ *   handing over  green, SOLID       -- R=0x00 G=0xff
+ *   handed back   yellow, 3 flashes  -- R=0xff G=0xff
+ *   refused       red, 3 flashes     -- R=0xff G=0x00
+ * ⓘ The colours already matched; the counts did not, and a refusal had no
+ * shape here at all. */
+static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS, true };
+static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, 3, DS4_RELEASED_MS, false };
+static const ds4_signal_shape_t k_ds4_refused   = { 0xff, 0x00, 0x00, 3, DS4_RELEASED_MS, false };
 
 /* What a signal may claim right now, as output valid flags. */
 static uint8_t ds4_signal_drives(void)
@@ -583,7 +600,7 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
             break;
         }
         const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
-        const int level = light ? ds4_breath_level(at, s->ms, s->breaths) : 0;
+        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
         if (level != last_level || (!motors_released && motor != last_motor)) {
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
                                              (motors_released ? 0 : DS4_OUT_MOTORS));
@@ -613,6 +630,73 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
         controller_signal_motors_done(c);
     }
     run->took_ms = ds4_elapsed_ms(&t0);
+}
+
+/* ⭐⭐ THE LIGHT AND THE PULSE ON A BARE NODE, with no session behind them.
+ *
+ * ⛔ A REFUSAL HAS NO CONTROLLER. A plug that failed leaves no object and no
+ * open device, which is why the refusal signal was tone-only while a bridge and
+ * a handback had light and rumble. rhoquinn8217, 2026-09-23: all three, on all
+ * three events, like the ds5.
+ *
+ * ⓘ A trimmed copy of ds4_signal_play's loop rather than a shared one: that
+ * version needs a controller for its cancel check and its mutex, and neither
+ * exists here. The shape, the breath and the pulse are the same.
+ * ⚠️ Bluetooth only -- a cabled refusal has no node of ours to write to. */
+int ds4_signal_light_pulse_node(const char *node, int pattern)
+{
+    const uint8_t drives = ds4_signal_drives();
+    if (!drives || node == NULL || !node[0]) return -1;
+    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
+                                : (pattern == 1) ? &k_ds4_released
+                                                 : &k_ds4_connected;
+    const int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+
+    const bool light = (drives & DS4_OUT_LIGHT) != 0;
+    const bool rumble = (drives & DS4_OUT_MOTORS) != 0;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int last_level = -1, last_motor = -1, sent = 0, failed = 0;
+
+    for (;;) {
+        const long at = ds4_elapsed_ms(&t0);
+        if (at >= s->ms || (!light && at >= DS4_PULSE_MS)) break;
+        const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
+        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
+        if (level != last_level || motor != last_motor) {
+            uint8_t rep[DS4_BT_OUT_LEN];
+            const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
+                                             (rumble ? DS4_OUT_MOTORS : 0));
+            /* ⓘ Full volumes: there is no session to read them from, and a
+             * confirmation nobody can hear is worse than a loud one. 🔗 the note
+             * in ds4_bt_build_output on why the audio bits travel at all. */
+            const size_t n = ds4_bt_build_output(rep, sizeof rep, claims, (uint8_t)motor,
+                                                 (uint8_t)motor,
+                                                 (uint8_t)((s->r * level) / 255),
+                                                 (uint8_t)((s->g * level) / 255),
+                                                 (uint8_t)((s->b * level) / 255),
+                                                 0x4f, 0x4f);
+            if (n == 0) { ++failed; break; }
+            ctm_bt_sign_output(rep, n);
+            if (write(fd, rep, n) != (ssize_t)n) { ++failed; break; }
+            ++sent;
+            last_level = level;
+            last_motor = motor;
+        }
+        struct timespec nap = { 0, 10 * 1000000L };
+        nanosleep(&nap, NULL);
+    }
+    /* ⛔ THE PULSE ALWAYS ENDS WITH A STOP, however the pattern ended -- a
+     * DS4's motors keep running until a report tells them otherwise. And the
+     * light goes dark, because nothing owns it after a refusal. */
+    uint8_t stop[DS4_BT_OUT_LEN];
+    const size_t sn = ds4_bt_build_output(stop, sizeof stop,
+                                          (uint8_t)(DS4_OUT_MOTORS | DS4_OUT_LIGHT),
+                                          0, 0, 0, 0, 0, 0x4f, 0x4f);
+    if (sn) { ctm_bt_sign_output(stop, sn); if (write(fd, stop, sn) == (ssize_t)sn) ++sent; }
+    close(fd);
+    return failed == 0 ? 0 : -1;
 }
 
 /* The connected signal's thread.
