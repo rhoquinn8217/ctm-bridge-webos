@@ -233,14 +233,32 @@ static size_t ds4_build_output(uint8_t *out, size_t cap, uint8_t flags,
  * caller signs instead. 🔗 ds4_signal_write. */
 static size_t ds4_bt_build_output(uint8_t *out, size_t cap, uint8_t flags,
                                   uint8_t weak, uint8_t strong,
-                                  uint8_t r, uint8_t g, uint8_t b)
+                                  uint8_t r, uint8_t g, uint8_t b,
+                                  uint8_t headphone_vol, uint8_t speaker_vol)
 {
     if (!out || cap < DS4_BT_OUT_LEN) return 0;
     memset(out, 0, DS4_BT_OUT_LEN);
     out[0] = DS4_BT_OUT_ID;
     out[1] = 0xc0;                 /* HID bit on: an effects report */
     out[2] = 0xa0;
-    out[DS4_BT_OUT_FLAGS] = flags; /* low nibble only -- the volumes are not claimed */
+    /* ⛔⛔ THE VOLUME BITS ARE CARRIED, NOT LEFT CLEAR.
+     *
+     * Byte 3's HIGH bits are the volume-valid flags -- 0x10/0x20 headphone L/R,
+     * 0x80 speaker -- and ds4_patch_output says what they mean: "without them
+     * the pad ignores bytes 21/22/24". ⚠️ This report was sending them CLEAR
+     * with the volume bytes zeroed, which is not "leave the volumes alone" so
+     * much as an effects report that mentions no audio at all.
+     *
+     * ⭐ MEASURED 2026-09-23 on the C3: with the light and the pulse OFF the
+     * tone played in 5 of 5 runs; with them ON, in 5 of 10, and the RELEASE
+     * tone -- the one that follows two of these reports -- was the worst of
+     * all. The bridge tone, which plays BEFORE any of them, was the better one.
+     * ➡️ So the light carries the pad's audio settings with it and leaves
+     * them as it found them. */
+    out[DS4_BT_OUT_FLAGS] = (uint8_t)(flags | 0xb0u);
+    out[21] = headphone_vol;
+    out[22] = headphone_vol;
+    out[24] = speaker_vol;
     if (flags & DS4_OUT_MOTORS) {
         out[DS4_BT_OUT_WEAK] = weak;
         out[DS4_BT_OUT_STRONG] = strong;

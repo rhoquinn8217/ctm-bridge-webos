@@ -528,8 +528,19 @@ static int ds4_signal_write(ctm_controller_t *c, bool bt, uint8_t claims, uint8_
                             uint8_t r, uint8_t g, uint8_t b)
 {
     uint8_t rep[DS4_BT_OUT_LEN];          /* the larger of the two */
+    /* The pad's own volumes travel with every light report. 🔗 the note in
+     * ds4_bt_build_output: sending the audio bits clear appears to drop the
+     * pad's audio setup, which is what killed the tone that followed. */
+    uint8_t hp = 0x4f, sp = 0x4f;
+    if (bt) {
+        tv_bridge_worker_settings_t st;
+        ctm_controller_get_settings(c, &st);
+        const unsigned h = st.headset_volume_percent, k = st.speaker_volume_percent;
+        if (h > 0 && h <= 100) hp = ds4_volume_raw_byte(h);
+        if (k > 0 && k <= 100) sp = ds4_volume_raw_byte(k);
+    }
     const size_t n = bt
-        ? ds4_bt_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b)
+        ? ds4_bt_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b, hp, sp)
         : ds4_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b);
     if (n == 0) return -1;
     /* ⛔ The signature, and the pad drops the report without it. */
