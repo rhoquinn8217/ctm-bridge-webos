@@ -31,11 +31,27 @@
 
 #include "ds4_signal_data.inl"
 
-#define DS4SIG_REPORT_ID     0x14
-#define DS4SIG_REPORT_LEN    270
+/* ⭐⭐ 0x17 -- FOUR frames a report, not 0x14's two, and it is a fix rather
+ * than a preference.
+ *
+ * ⛔ THE FAULT: with 0x14 the tone writes 125 reports a second, and on a pad
+ * that is BRIDGED those writes BLOCK -- measured 2026-09-22, build 412:
+ * `writes took 10257ms, worst 5119ms` against `0ms / 0ms` on a pad whose
+ * session was tearing down. The link cannot carry the pad's input reports and
+ * that many writes at once, so the frames arrive far too late and the decoder
+ * plays a click.
+ *
+ * ➡️ 0x17 carries the same audio in HALF the writes: 462 bytes every 16 ms
+ * instead of 270 every 8 ms -- 28.9 KB/s against 33.8 KB/s, and more
+ * importantly 62 writes a second rather than 125. Fewer, larger writes are
+ * what a Bluetooth link wants.
+ * ⓘ The three sizes are the listener map's, LAYOUT B: 0x12 = 142 B / 1 frame,
+ * 0x14 = 270 B / 2, 0x17 = 462 B / 4. Nothing here is derived. */
+#define DS4SIG_REPORT_ID     0x17
+#define DS4SIG_REPORT_LEN    462
 #define DS4SIG_PAYLOAD_OFF   6
-#define DS4SIG_FRAMES_PER_REPORT 2
-#define DS4SIG_PACE_US       8000   /* two 4 ms frames in every report */
+#define DS4SIG_FRAMES_PER_REPORT 4
+#define DS4SIG_PACE_US       16000  /* four 4 ms frames in every report */
 
 /* ⭐⭐ 1800 ms -- the DualSense's LONG prime, and it is earned rather than
  * copied. It started at 600 ms, its SHORT one, deliberately: the shortest thing
@@ -101,7 +117,7 @@ static void ds4sig_wait_for(const struct timespec *t0, int n)
  * 0x14 carries no effects section, and effects stay in 0x11. Getting that bit
  * wrong is how a tone report would be read as a malformed effects report. */
 static void ds4sig_build(uint8_t *out, uint16_t counter,
-                         const uint8_t *f0, const uint8_t *f1)
+                         const uint8_t *const *f)
 {
     memset(out, 0, DS4SIG_REPORT_LEN);
     out[0] = DS4SIG_REPORT_ID;
@@ -110,8 +126,10 @@ static void ds4sig_build(uint8_t *out, uint16_t counter,
     out[3] = (uint8_t)(counter & 0xff); /* LE u16, stepping 2 per report */
     out[4] = (uint8_t)(counter >> 8);
     out[5] = DS4SIG_ROUTE;
-    memcpy(out + DS4SIG_PAYLOAD_OFF, f0, DS4SIG_FRAME_BYTES);
-    memcpy(out + DS4SIG_PAYLOAD_OFF + DS4SIG_FRAME_BYTES, f1, DS4SIG_FRAME_BYTES);
+    for (int i = 0; i < DS4SIG_FRAMES_PER_REPORT; ++i) {
+        memcpy(out + DS4SIG_PAYLOAD_OFF + (size_t)i * DS4SIG_FRAME_BYTES,
+               f[i], DS4SIG_FRAME_BYTES);
+    }
     /* The pad drops anything whose signature does not match, so this is the
      * step that decides whether the report is heard or silently discarded. */
     ctm_bt_sign_output(out, DS4SIG_REPORT_LEN);
@@ -273,8 +291,8 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    for (int i = 0; i + 1 < n; i += DS4SIG_FRAMES_PER_REPORT) {
-        ds4sig_build(rep, counter, frames[i], frames[i + 1]);
+    for (int i = 0; i + DS4SIG_FRAMES_PER_REPORT <= n; i += DS4SIG_FRAMES_PER_REPORT) {
+        ds4sig_build(rep, counter, &frames[i]);
         counter = (uint16_t)(counter + DS4SIG_FRAMES_PER_REPORT);
         struct timespec wa, wb;
         clock_gettime(CLOCK_MONOTONIC, &wa);
@@ -345,12 +363,29 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
     return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path);
 }
 
-int ds4_signal_refused_bt(const char *node)
+/* ⭐⭐ A TONE ON A NODE THAT NO SESSION OWNS -- and after tonight this is the
+ * ONLY reliable way to play one.
+ *
+ * ⛔ MEASURED REPEATEDLY, 2026-09-22: a write to a pad that is BRIDGED blocks
+ * for about five seconds, every time, and `worst 5103ms` / `worst 5119ms` /
+ * `worst 5120ms` across builds says TIMEOUT rather than congestion. Halving the
+ * write rate (0x14 to 0x17, 125 writes a second to 62) changed nothing. The
+ * link is only free when no session is running on the pad -- which is exactly
+ * why the refusal has been clean from the first attempt.
+ *
+ * ➡️ So a bridge tone is played HERE, before the session opens, rather than
+ * from inside a session that makes it impossible. */
+int ds4_signal_tone_node(const char *node, int pattern)
 {
     if (!node || !node[0]) return -1;
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    int rc = ds4sig_play_fd(fd, 2 /* BTSIG_REFUSED */, NULL, node);
+    int rc = ds4sig_play_fd(fd, pattern, NULL, node);
     close(fd);
     return rc;
+}
+
+int ds4_signal_refused_bt(const char *node)
+{
+    return ds4_signal_tone_node(node, 2 /* BTSIG_REFUSED */);
 }

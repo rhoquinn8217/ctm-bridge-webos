@@ -738,6 +738,26 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
         return false;
     }
 
+    /* ⭐⭐ THE DS4's HANDOVER TONE, PLAYED BEFORE THE SESSION EXISTS.
+     *
+     * ⛔ It cannot be played after. Measured across builds 412-417 on
+     * 2026-09-22: a write to a BRIDGED DS4 blocks about five seconds every
+     * time, so the frames arrive far too late and the decoder plays a click.
+     * Moving the tone to the session thread fixed the pacing and cost five
+     * seconds of input lag instead; halving the write rate changed nothing.
+     * ✅ The link is free right here, which is why the REFUSAL tone -- the one
+     * signal that has never had a session -- has been clean since its first
+     * attempt.
+     *
+     * ⓘ It costs about a second before the pad bridges, and it reads the
+     * right way round: the tone says "handing over", and then it does.
+     * ⚠️ Synchronous on purpose. On a thread it would overlap the session
+     * starting, which is the very thing that breaks it. */
+    if (strcmp(kind, "ds4") == 0) {
+        const int trc = ds4_signal_tone_node(cdev.path, 0 /* BTSIG_HANDING_OVER */);
+        log_append("ds4 handover tone before the session: rc=%d", trc);
+    }
+
     ctm_controller_t *controller = ctm_controller_create(&cdev);
     if (!controller) {
         log_append("controller create failed");

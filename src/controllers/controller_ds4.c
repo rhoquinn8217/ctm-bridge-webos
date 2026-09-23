@@ -411,7 +411,13 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .set_settings = ds4_bt_set_settings,
     /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
      * light and the pulse want a 0x11 builder that does not exist yet. */
-    .signal_connected = ds4_bt_signal_connected,
+    /* ⛔ NO .signal_connected. The handover tone is played in ui_bridge.c
+     * BEFORE the session opens, because a write to a bridged pad blocks about
+     * five seconds and the tone cannot survive it. Wiring it here as well
+     * would play a second, broken tone straight after the good one.
+     * ⚠️ This makes ctm_controller_will_signal_connect() answer NO for a
+     * Bluetooth DS4 again, so the TV plays its own fallback -- which is right,
+     * because the core no longer signals from inside the session. */
     .signal_unplugging = ds4_bt_signal_unplugging,
 };
 

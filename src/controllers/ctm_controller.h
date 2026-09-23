@@ -325,6 +325,11 @@ int ds4_signal_refused_bt(const char *node);
  * and the session thread carries the pad's reports.
  * ⓘ The tone switch is checked inside, so no caller needs to. */
 int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
+
+/* The same two notes on a bare node, with no session behind it: 0 handing
+ * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about
+ * five seconds, so this is the only way a DS4 tone reliably plays. */
+int ds4_signal_tone_node(const char *node, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
