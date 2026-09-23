@@ -313,6 +313,11 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
 void ctm_mic_safety_disarm_all(void);
 
 int ctm_signal_refused_bt(const char *node);
+
+/* The same thing for a BLUETOOTH DS4, which encodes its audio as SBC rather
+ * than Opus and carries it in a 0x14 report rather than a 0x36. T-238.
+ * ⛔ Bluetooth only -- a cabled DS4 has no sound card on the pads here. */
+int ds4_signal_refused_bt(const char *node);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);

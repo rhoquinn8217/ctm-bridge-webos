@@ -812,3 +812,9 @@ int ctm_signal_refused_bt(const char *node)
     close(fd);
     return rc;
 }
+
+/* ⭐ The DS4's own tone, kept in its own file and included HERE rather than
+ * earlier: it borrows ctl_log and ctm_bt_sign_output, and both are in scope by
+ * this point. ⛔ Nothing above this line is DS4-aware, deliberately -- the
+ * DualSense path is proven and this must not reach into it. */
+#include "ds4_signal.inl"
