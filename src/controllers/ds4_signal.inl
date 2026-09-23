@@ -90,20 +90,63 @@ static void ds4sig_build(uint8_t *out, uint16_t counter,
     ctm_bt_sign_output(out, DS4SIG_REPORT_LEN);
 }
 
-/* Opens nothing and closes nothing: the caller owns the fd. */
-static int ds4sig_play_refused_fd(int fd, const char *node)
+/* ⭐ TWO NOTES, AND THEIR ORDER IS THE MESSAGE -- the DualSense's vocabulary,
+ * at the same three frequencies, so one pad does not mean something different
+ * from the other. 🔗 btsig_pattern_t, whose values these are. */
+static void ds4sig_notes_for(int pattern,
+                             const uint8_t (**first)[DS4SIG_FRAME_BYTES],
+                             const uint8_t (**second)[DS4SIG_FRAME_BYTES])
+{
+    switch (pattern) {
+    case 1:  /* BTSIG_HANDED_BACK -- high then low, falling, coming home */
+        *first = g_ds4sig_high;  *second = g_ds4sig_low;   break;
+    case 2:  /* BTSIG_REFUSED -- low then LOWER, sinking, it did not happen */
+        *first = g_ds4sig_low;   *second = g_ds4sig_lower; break;
+    default: /* BTSIG_HANDING_OVER -- low then high, rising, going to the host */
+        *first = g_ds4sig_low;   *second = g_ds4sig_high;  break;
+    }
+}
+
+/* Opens nothing and closes nothing: the caller owns the fd.
+ *
+ * ⚠️ WHAT IS DIFFERENT FOR A BRIDGE OR A HANDBACK, AND IS NOT YET MEASURED.
+ * A refusal has the node to ITSELF -- the pad is not bridged, so no host audio
+ * is flowing. A bridge and a handback happen around a pad that IS bridged, and
+ * the host's own audio reaches it as 0x14 reports on this same node. Two
+ * writers means interleaved frames. ⭐ SBC frames are independent, each with
+ * its own header and scale factors, so interleaving should sound like a mix
+ * rather than corrupt anything -- but "should" is doing work in that sentence
+ * and nobody has listened to it yet. ⓘ The connect tone fires the instant a
+ * bridge forms, which is the quietest moment available. */
+static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const char *node)
 {
     if (fd < 0) return -1;
 
-    /* REFUSED is low then LOWER -- sinking, it did not happen. The gap is
-     * silence rather than nothing, because the decoder wants a stream. */
+    /* ⛔⛔ THE TONE SWITCH, AND IT BELONGS HERE RATHER THAN AT EACH CALLER.
+     * One check covers the bridge, the handback AND the refusal; a gate per
+     * caller is a gate someone forgets. ⚠️ The refusal shipped earlier today
+     * WITHOUT this and played whatever the switch said -- caught by
+     * rhoquinn8217: *"We need to make sure that rumble lightbar and tone are
+     * also gated by the USB Bridge settings like the dual sense."*
+     * 🔗 The DualSense does the same thing in btsig_play_fd. */
+    if (!ctm_sig_tone_on()) {
+        ctl_log(log_to, "ds4sig: not played, the tone is switched off");
+        return 0;             /* switched off is not a failure */
+    }
+
+    const uint8_t (*first)[DS4SIG_FRAME_BYTES];
+    const uint8_t (*second)[DS4SIG_FRAME_BYTES];
+    ds4sig_notes_for(pattern, &first, &second);
+
+    /* The gap is silence rather than nothing, because the decoder wants a
+     * stream rather than a pause. */
     const uint8_t *frames[DS4SIG_PRIME_FRAMES + DS4SIG_TONE_FRAMES +
                           DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES];
     int n = 0;
     for (int i = 0; i < DS4SIG_PRIME_FRAMES; i++) frames[n++] = g_ds4sig_silence;
-    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = g_ds4sig_low[i];
+    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = first[i];
     for (int i = 0; i < DS4SIG_GAP_FRAMES;   i++) frames[n++] = g_ds4sig_silence;
-    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = g_ds4sig_lower[i];
+    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = second[i];
 
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -131,9 +174,11 @@ static int ds4sig_play_refused_fd(int fd, const char *node)
     /* ⭐ One line, whatever happened, and it names the node -- there is no
      * controller object to name instead. ⚠️ `took` far above `audio` is a
      * decoder running dry, which is the shape that sounds cracked. */
-    ctl_log(NULL, "ds4sig: refusal, %d sent, %d failed, took %ldms for %ldms "
-                  "of audio (prime %d) -- node %s",
-            sent, failed, took_ms, audio_ms, DS4SIG_PRIME_FRAMES,
+    const char *what = (pattern == 1) ? "handback"
+                     : (pattern == 2) ? "refusal" : "bridge";
+    ctl_log(log_to, "ds4sig: %s, %d sent, %d failed, took %ldms for %ldms "
+                    "of audio (prime %d) -- node %s",
+            what, sent, failed, took_ms, audio_ms, DS4SIG_PRIME_FRAMES,
             node ? node : "?");
 
     return (failed == 0 && sent > 0) ? 0 : -1;
@@ -148,12 +193,26 @@ static int ds4sig_play_refused_fd(int fd, const char *node)
  * ⛔ BLUETOOTH ONLY. A cabled DS4 reaches its speaker through a USB sound card,
  * and the pads here have none -- so `ds4_usb` must never arrive at this
  * function. 🔗 T-229 item C. */
+/* The tone for a pad that IS bridged -- a handover or a handback -- played
+ * down the session's own fd rather than a freshly opened node.
+ *
+ * ⚠️ CALLER'S JOB, NOT THIS FUNCTION'S: the claim and the thread. A tone
+ * takes about a second, and the session thread carries the pad's reports, so
+ * sleeping on it starves the very thing being waited for. 🔗 The note beside
+ * feedback_play, which learned that the expensive way.
+ * ⓘ The tone switch is checked inside ds4sig_play_fd, so every caller gets it. */
+int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
+{
+    if (!c || c->hid_fd < 0) return -1;
+    return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path);
+}
+
 int ds4_signal_refused_bt(const char *node)
 {
     if (!node || !node[0]) return -1;
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    int rc = ds4sig_play_refused_fd(fd, node);
+    int rc = ds4sig_play_fd(fd, 2 /* BTSIG_REFUSED */, NULL, node);
     close(fd);
     return rc;
 }

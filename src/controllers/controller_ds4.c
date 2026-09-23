@@ -257,6 +257,70 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
     ds4_bt_send_audio(c, s);
 }
 
+/* --- the BLUETOOTH pad's own signals (T-238) -------------------------------
+ *
+ * ⛔⛔ UNTIL NOW A BLUETOOTH DS4 SIGNALLED NOTHING AT ALL. `signal_connected`
+ * sat on the CABLED ops table alone, and ctm_controller.h says why in words:
+ * *"for a Bluetooth Xbox pad or a Bluetooth DS4 the core has nothing to play,
+ * so NOBODY signals and the bridge is silent."* ⭐ Giving the Bluetooth table
+ * these two hooks also makes ctm_controller_will_signal_connect() answer yes
+ * for this pad, so the TV correctly stands aside -- that rule is COMPUTED from
+ * the ops table rather than copied, which is exactly why this works without
+ * touching the TV.
+ *
+ * ⓘ TONE ONLY, FOR NOW. The light and the pulse need a Bluetooth output
+ * report (0x11, 78 bytes, CRC-signed) and ds4_build_output makes the CABLED
+ * 0x05 -- so they are a separate piece of work, and they will use the gate
+ * ds4_signal_drives() already applies. ⚠️ Until then a Bluetooth bridge is
+ * heard and not seen.
+ *
+ * ✅ THE TONE IS GATED, inside ds4sig_play_fd, by the same switch the
+ * DualSense's uses. */
+static void *ds4_bt_connected_thread(void *arg)
+{
+    ctm_controller_t *c = (ctm_controller_t *)arg;
+    const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
+    ctl_log(c, "signal: connected -- tone rc=%d", rc);
+    controller_signal_end(c, NULL);
+    return NULL;
+}
+
+/* signal_connected: low then high, rising, going to the host.
+ * ⚠️ ON ITS OWN THREAD. The tone takes about a second and the session thread
+ * carries the pad's reports; sleeping on it starves the very thing being
+ * waited for. 🔗 The same reasoning beside feedback_play. */
+static void ds4_bt_signal_connected(ctm_controller_t *c)
+{
+    if (!controller_signal_begin(c)) {
+        ctl_log(c, "signal: connected -- not played, a signal is still playing "
+                   "or the pad is being released");
+        return;
+    }
+    pthread_t sig;
+    const int rc = pthread_create(&sig, NULL, ds4_bt_connected_thread, c);
+    if (rc == 0) {
+        pthread_detach(sig);
+    } else {
+        ctl_log(c, "signal: connected -- could not start the signal thread rc=%d", rc);
+        controller_signal_end(c, NULL);   /* nothing was written, nothing to give back */
+    }
+}
+
+/* signal_unplugging: high then low, falling, coming home.
+ * ⓘ Synchronous, like the cabled one, and for the same reason: it is not cut
+ * short by the release it announces, because it IS the release. */
+static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+{
+    const char *what;
+    switch (why) {
+    case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
+    case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
+    default:                  what = "unplugging (requested)"; break;
+    }
+    const int rc = ds4_signal_tone_bt(c, 1 /* BTSIG_HANDED_BACK */);
+    ctl_log(c, "signal: %s -- tone rc=%d", what, rc);
+}
+
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .kind = "ds4",
     .needs_host_config = true,
@@ -275,6 +339,10 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     /* ⭐ T-229: the volumes and the route are SENT on a change, because
      * patch_output alone only reaches a pad the host is already talking to. */
     .set_settings = ds4_bt_set_settings,
+    /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
+     * light and the pulse want a 0x11 builder that does not exist yet. */
+    .signal_connected = ds4_bt_signal_connected,
+    .signal_unplugging = ds4_bt_signal_unplugging,
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */

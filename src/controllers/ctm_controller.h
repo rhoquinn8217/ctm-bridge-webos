@@ -318,6 +318,13 @@ int ctm_signal_refused_bt(const char *node);
  * than Opus and carries it in a 0x14 report rather than a 0x36. T-238.
  * ⛔ Bluetooth only -- a cabled DS4 has no sound card on the pads here. */
 int ds4_signal_refused_bt(const char *node);
+
+/* The same two notes for a pad that IS bridged: 0 handing over, 1 handed back,
+ * 2 refused -- the values of btsig_pattern_t.
+ * ⚠️ The CALLER owns the claim and the thread: a tone takes about a second
+ * and the session thread carries the pad's reports.
+ * ⓘ The tone switch is checked inside, so no caller needs to. */
+int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
