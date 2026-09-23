@@ -59,6 +59,17 @@ static uint8_t ds4_volume_raw_byte(unsigned int value)
  *   whatever was set last, so an explicit value every frame is the sane
  *   default the user asked for). Rumble/LED bytes untouched.
  * When: every outbound report, from the pump. Returns 0 (never drops). */
+/* ⓘ DIAGNOSTIC, added 2026-09-22. Counts host audio reports dropped while a
+ * signal plays, so the tone's own log line can say whether the drop fired at
+ * all. ⚠️ A count of ZERO during a manual bridge would mean host audio does
+ * not reach ds4_patch_output, and the competition is somewhere else. */
+#define DS4_SLOT_AUDIO_DROPPED 3
+/* ⓘ DIAGNOSTIC: host reports of ANY id seen while a signal holds the pad.
+ * `dropped=0` proved no AUDIO arrives; this says whether ANYTHING does -- a
+ * 0x11 claiming the volumes mid-tone would be just as disruptive and would
+ * never have shown up in that count. */
+#define DS4_SLOT_HOST_SEEN     4
+
 static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 {
     tv_bridge_worker_settings_t s;
@@ -67,6 +78,11 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 
     size_t len = len_io ? *len_io : 0;
     if (!data || len < 10) return 0;
+
+    if (controller_signal_host_report(c, false, 0)) {
+        ctm_controller_set_type_state(c, DS4_SLOT_HOST_SEEN,
+            ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN) + 1);
+    }
 
     int patched = 0;
 
@@ -137,11 +153,6 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 #define DS4_SLOT_CHORD     0   /* the input thread's: when the chord began */
 #define DS4_SLOT_WITHHELD  1   /* the session thread's: host reports withheld in a row */
 #define DS4_SLOT_AUDIO     2   /* the last audio values SENT, so a resend only happens on a change */
-/* ⓘ DIAGNOSTIC, added 2026-09-22. Counts host audio reports dropped while a
- * signal plays, so the tone's own log line can say whether the drop fired at
- * all. ⚠️ A count of ZERO during a manual bridge would mean host audio does
- * not reach ds4_patch_output, and the competition is somewhere else. */
-#define DS4_SLOT_AUDIO_DROPPED 3
 
 static uint64_t ds4_now_ms(void)
 {
@@ -306,25 +317,19 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
  *
  * ✅ THE TONE IS GATED, inside ds4sig_play_fd, by the same switch the
  * DualSense's uses. */
-/* ⛔⛔ WAIT BEFORE THE CONNECT TONE. THIS IS NOT POLITENESS, IT IS THE FIX.
+/* ⛔⛔ BACK ON ITS OWN THREAD, AND THE REASON IS A REGRESSION I CAUSED.
  *
- * ⚠️ MEASURED 2026-09-22 on build 404. The bridge tone was *"just a blip"*
- * while the handback tone was perfect -- and both play to a bridged pad, so
- * the host's audio sharing the node is NOT the difference. The log gave it up
- * in three lines:
- *     50226.862 active host=... transport=TCP     <- the tone starts here
- *     50226.880 ds4 audio: told the pad ...       <- 18 ms into the prime
- *     50227.791 ds4sig: bridge, ... took 929ms
- * The tone begins at the very instant the session goes active, INSIDE the
- * window where the session, the host's audio endpoint and our own volume
- * report are all still setting the pad up. The prime is thrown away and only a
- * fragment survives. ⭐ The handback fires ten seconds later into a settled
- * pad, and the refusal has no host at all -- which is why both were clean and
- * this one was not.
+ * Running it on the session thread DID free the Bluetooth link -- measured,
+ * build 413: writes fell from 10257 ms to 81 ms, and the pacing went from
+ * `24169ms for 928ms of audio` to `929ms for 928ms`. ✅ That part worked.
+ * ⛔ But the configure write BLOCKS for about 4.2 s at bridge time (build 415:
+ * `configure 4152ms`), and on the session thread that delays the pad's input
+ * by five seconds at every bridge. ⚠️ A five-second wait before a controller
+ * responds is far worse than a confirmation tone that does not play.
  *
- * ⓘ 500 ms, chosen to clear the volume report at +18 ms with room to spare
- * rather than to be exact. ⚠️ If a blip ever comes back, this is the first
- * number to raise, and DS4SIG_PRIME_FRAMES is the second. */
+ * ⓘ SO THE TONE IS STILL IMPERFECT ON A BRIDGE, KNOWINGLY. 🔗 T-238 carries
+ * what was measured and what is left. The handback and the refusal are clean;
+ * the bridge is the one that is not. */
 #define DS4_BT_CONNECT_SETTLE_MS  500
 
 static void *ds4_bt_connected_thread(void *arg)
@@ -333,24 +338,24 @@ static void *ds4_bt_connected_thread(void *arg)
     struct timespec settle = { DS4_BT_CONNECT_SETTLE_MS / 1000,
                                (long)(DS4_BT_CONNECT_SETTLE_MS % 1000) * 1000000L };
     nanosleep(&settle, NULL);
-    /* ⓘ A release during the wait is answered here rather than after another
-     * second of tone: plug-out is already waiting on this signal's claim. */
     if (controller_signal_stopping(c)) {
         ctl_log(c, "signal: connected -- not played, the pad was released while settling");
         controller_signal_end(c, NULL);
         return NULL;
     }
     const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
-    ctl_log(c, "signal: connected -- tone rc=%d, host audio reports dropped=%llu",
-            rc, (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED));
+    ctl_log(c, "signal: connected -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
+            rc,
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
     controller_signal_end(c, NULL);
     return NULL;
 }
 
-/* signal_connected: low then high, rising, going to the host.
- * ⚠️ ON ITS OWN THREAD. The tone takes about a second and the session thread
- * carries the pad's reports; sleeping on it starves the very thing being
- * waited for. 🔗 The same reasoning beside feedback_play. */
+/* ⚠️ ON ITS OWN THREAD: the tone takes about a second and the session thread
+ * carries the pad's reports. 🔗 The note beside feedback_play, which learned
+ * that the expensive way -- and which build 413 confirmed from the other
+ * direction. */
 static void ds4_bt_signal_connected(ctm_controller_t *c)
 {
     if (!controller_signal_begin(c)) {
@@ -364,7 +369,7 @@ static void ds4_bt_signal_connected(ctm_controller_t *c)
         pthread_detach(sig);
     } else {
         ctl_log(c, "signal: connected -- could not start the signal thread rc=%d", rc);
-        controller_signal_end(c, NULL);   /* nothing was written, nothing to give back */
+        controller_signal_end(c, NULL);
     }
 }
 
@@ -380,8 +385,10 @@ static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t wh
     default:                  what = "unplugging (requested)"; break;
     }
     const int rc = ds4_signal_tone_bt(c, 1 /* BTSIG_HANDED_BACK */);
-    ctl_log(c, "signal: %s -- tone rc=%d, host audio reports dropped=%llu",
-            what, rc, (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED));
+    ctl_log(c, "signal: %s -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
+            what, rc,
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
 }
 
 const ctm_controller_ops_t ctm_controller_ds4_ops = {

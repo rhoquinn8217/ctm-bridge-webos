@@ -37,9 +37,36 @@
 #define DS4SIG_FRAMES_PER_REPORT 2
 #define DS4SIG_PACE_US       8000   /* two 4 ms frames in every report */
 
-/* 600 ms, the same as the DualSense's SHORT prime. ⛔ Deliberately not its LONG
- * one: that is 1800 ms and exists for a pad never seen before, which is exactly
- * the length this pad has history with. Start at the short one. */
+/* ⭐⭐ 1800 ms -- the DualSense's LONG prime, and it is earned rather than
+ * copied. It started at 600 ms, its SHORT one, deliberately: the shortest thing
+ * that has ever worked, given this pad's history with silence.
+ *
+ * ⚠️ WHAT 600 ms COULD NOT DO, measured 2026-09-22 across builds 402-407.
+ * rhoquinn8217 heard a "pop" and one short note on a manual bridge, while the
+ * SAME tone was correct when the auto-bridge fired at stream start. Three
+ * readings settled it:
+ *   - stream start: the host's audio has just begun, decoder WARM  -> correct
+ *   - manual bridge, nothing playing: decoder IDLE                 -> fragment
+ *   - release: warm if sound had been playing, cold if not   -> mostly correct
+ * ⛔ And the theory it replaced was WRONG, twice: the host's audio sharing the
+ * node. The drop added for that counted `dropped=0` on every tone, so no host
+ * audio was arriving at all and there was never anything to compete with.
+ *
+ * ➡️ So the prime is not about a pad never seen before, as the DualSense's
+ * comment frames it. It is about a decoder that has gone IDLE, which happens
+ * whenever nothing has played for a while -- far more often than once.
+ *
+ * ⓘ Cost: the tone runs about 2.1 s instead of 0.9 s. ⭐ Worth revisiting once
+ * it is known to work: priming long only when nothing has played recently would
+ * give a short tone in the common case, and needs a "last audio seen" timestamp
+ * this file does not have yet. */
+/* ⛔ THE BASE IS THE SHORT PRIME. The per-pad rule below triples it for a pad
+ * this run has not primed, which is where 1800 ms comes from -- exactly the
+ * DualSense's pair of numbers.
+ * ⚠️ It was briefly 450 here, which the tripling turned into 1350 frames, and
+ * THAT measured `716 sent, took 19576ms for 5728ms of audio` -- the pad's link
+ * cannot absorb a burst that long and the pacing collapsed to a third of real
+ * time. ⭐ A prime long enough to starve the decoder is worse than a short one. */
 #define DS4SIG_PRIME_FRAMES  150
 
 /* ⭐ Route 0x02, and the content is the same in both channels. The map's probed
@@ -90,6 +117,38 @@ static void ds4sig_build(uint8_t *out, uint16_t counter,
     ctm_bt_sign_output(out, DS4SIG_REPORT_LEN);
 }
 
+/* ⭐⭐ THE CONFIGURE REPORT, AND IT IS THE PIECE THAT WAS MISSING.
+ *
+ * rhoquinn8217, 2026-09-22: *"are you trying the primer method we did for
+ * ds5?"* ⛔ The answer was no. The DualSense's prime is not silence alone --
+ * `f.configure = (i == 0)` makes its FIRST report a configure: claim the
+ * audio, set the volumes, set the routing. 🔗 btsig_play_fd, and the suite's
+ * "the speaker is configured only when asked". This tone had no such step; it
+ * simply began firing 0x14 frames at a pad it had never told to listen.
+ *
+ * ⛔ IT IS AN EFFECTS REPORT, NOT AN AUDIO ONE: 0x11 with the HID bit ON
+ * (0xc0), where the audio frames are 0x14 with it OFF. Byte 3's high bits are
+ * the volume-valid flags -- 0x10/0x20 headphone L/R, 0x80 speaker -- and its
+ * low nibble is left at zero so the rumble and the lightbar are not claimed.
+ * 🔗 The same shape ds4_bt_send_audio uses, which the pad is known to obey.
+ *
+ * ⓘ Once, at the head of the prime, exactly as the DualSense does it. The
+ * suite's note beside that -- "doing it 100x/s stalled the link" -- is why. */
+#define DS4SIG_CFG_LEN  78
+
+static void ds4sig_build_configure(uint8_t *out, uint8_t headphone, uint8_t speaker)
+{
+    memset(out, 0, DS4SIG_CFG_LEN);
+    out[0]  = 0x11;
+    out[1]  = 0xc0;   /* HID bit ON: an effects report */
+    out[2]  = 0xa0;
+    out[3]  = 0xb0;   /* volumes valid; rumble and light NOT claimed */
+    out[21] = headphone;
+    out[22] = headphone;
+    out[24] = speaker;
+    ctm_bt_sign_output(out, DS4SIG_CFG_LEN);
+}
+
 /* ⭐ TWO NOTES, AND THEIR ORDER IS THE MESSAGE -- the DualSense's vocabulary,
  * at the same three frequencies, so one pad does not mean something different
  * from the other. 🔗 btsig_pattern_t, whose values these are. */
@@ -138,32 +197,105 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     const uint8_t (*second)[DS4SIG_FRAME_BYTES];
     ds4sig_notes_for(pattern, &first, &second);
 
+
+    /* ⭐⭐ THE PRIME'S LENGTH IS THE DUALSENSE'S RULE, not a constant.
+     * Long for a pad this run has not primed, short afterwards -- and keyed
+     * PER PAD, because the decoder is the controller's. 🔗 btsig_is_primed, whose
+     * table this shares; a DS4 key and a DualSense key cannot collide because
+     * both are the pad's own MAC or node. */
+    const int primed = btsig_is_primed(node);
+    const int prime_frames = primed ? DS4SIG_PRIME_FRAMES
+                                    : (DS4SIG_PRIME_FRAMES * 3);
+
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
-    const uint8_t *frames[DS4SIG_PRIME_FRAMES + DS4SIG_TONE_FRAMES +
+    const uint8_t *frames[(DS4SIG_PRIME_FRAMES * 3) + DS4SIG_TONE_FRAMES +
                           DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES];
     int n = 0;
-    for (int i = 0; i < DS4SIG_PRIME_FRAMES; i++) frames[n++] = g_ds4sig_silence;
+    for (int i = 0; i < prime_frames; i++) frames[n++] = g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = first[i];
     for (int i = 0; i < DS4SIG_GAP_FRAMES;   i++) frames[n++] = g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = second[i];
 
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-
     uint8_t rep[DS4SIG_REPORT_LEN];
     uint16_t counter = 0;
     int sent = 0, failed = 0, reports = 0;
+    /* ⛔ TIMED, because `took 23953ms for 928ms of audio` on a bridged pad says
+     * the writes are BLOCKING and the decoder is being starved to nothing. The
+     * pacer sleeps against an absolute deadline and returns at once when late,
+     * so it cannot be the one spending that time. This says so rather than
+     * leaving it inferred. */
+    long worst_write_ms = 0, total_write_ms = 0, cfg_ms = 0;
+    unsigned cfg_hp = 0, cfg_sp = 0;
+
+    /* The configure report, first and once. ⓘ Full volume when there is no
+     * controller to ask -- a refusal has none, and a confirmation nobody hears
+     * is worse than a loud one. */
+    {
+        uint8_t hp = 0x4f, sp = 0x4f;
+        if (log_to) {
+            tv_bridge_worker_settings_t st;
+            ctm_controller_get_settings(log_to, &st);
+            const unsigned h = st.headset_volume_percent, k = st.speaker_volume_percent;
+            /* ⛔⛔ A ZERO IS NOT A SETTING HERE, IT IS AN ABSENCE.
+             * The connect tone now runs BEFORE `active host=` -- before the
+             * host's audio settings have arrived -- so these read whatever the
+             * worker was created with. Configuring the pad to volume 0 makes a
+             * perfectly paced tone inaudible, which is indistinguishable from
+             * every other failure this hunt has produced.
+             * ⭐ A confirmation nobody can hear is worse than a loud one, so an
+             * absent or zero value means FULL rather than silent. */
+            if (h > 0 && h <= 100) hp = (uint8_t)(h > 0x4fu ? 0x4fu : h);
+            if (k > 0 && k <= 100) sp = (uint8_t)(k > 0x4fu ? 0x4fu : k);
+        }
+        cfg_hp = hp; cfg_sp = sp;
+        uint8_t cfg[DS4SIG_CFG_LEN];
+        ds4sig_build_configure(cfg, hp, sp);
+        struct timespec ca, cb;
+        clock_gettime(CLOCK_MONOTONIC, &ca);
+        if (write(fd, cfg, sizeof cfg) != (ssize_t)sizeof cfg) ++failed;
+        clock_gettime(CLOCK_MONOTONIC, &cb);
+        cfg_ms = (long)((cb.tv_sec - ca.tv_sec) * 1000L +
+                        (cb.tv_nsec - ca.tv_nsec) / 1000000L);
+    }
+
+    /* ⛔⛔ THE PACING CLOCK STARTS *AFTER* THE CONFIGURE WRITE, AND THAT IS
+     * NOT A DETAIL.
+     *
+     * ⚠️ It started before, and build 413 measured the consequence:
+     * `took 4068ms for 928ms of audio` while `writes took 81ms`. The configure
+     * write had blocked for seconds, every one of the 116 deadlines had already
+     * passed by the time the loop began, and ds4sig_wait_for -- which returns
+     * at once when late, by design -- slept for none of them. So the whole tone
+     * went out as a BURST in 81 ms.
+     * ⭐ A decoder starved by slow writes and one drowned by a burst sound the
+     * same from the outside: a click. Only the timings tell them apart. */
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
     for (int i = 0; i + 1 < n; i += DS4SIG_FRAMES_PER_REPORT) {
         ds4sig_build(rep, counter, frames[i], frames[i + 1]);
         counter = (uint16_t)(counter + DS4SIG_FRAMES_PER_REPORT);
+        struct timespec wa, wb;
+        clock_gettime(CLOCK_MONOTONIC, &wa);
         const ssize_t w = write(fd, rep, sizeof rep);
+        clock_gettime(CLOCK_MONOTONIC, &wb);
+        const long wms = (long)((wb.tv_sec - wa.tv_sec) * 1000L +
+                                (wb.tv_nsec - wa.tv_nsec) / 1000000L);
+        if (wms > worst_write_ms) worst_write_ms = wms;
+        total_write_ms += wms;
         if (w == (ssize_t)sizeof rep) sent++;
         else failed++;
         reports++;
         ds4sig_wait_for(&t0, reports);
     }
+
+    /* ⛔ THE DECODER IS WARM ONLY IF THE PRIME ACTUALLY WENT OUT, so the mark
+     * is here rather than beside the test. A tone whose writes failed leaves
+     * the key unset and the pad primes properly next time instead of arriving
+     * silent. 🔗 The DualSense's note beside btsig_mark_primed, which learned
+     * this the hard way. */
+    if (prime_frames > 0 && failed == 0) btsig_mark_primed(node);
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -177,8 +309,9 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     const char *what = (pattern == 1) ? "handback"
                      : (pattern == 2) ? "refusal" : "bridge";
     ctl_log(log_to, "ds4sig: %s, %d sent, %d failed, took %ldms for %ldms "
-                    "of audio (prime %d) -- node %s",
-            what, sent, failed, took_ms, audio_ms, DS4SIG_PRIME_FRAMES,
+                    "of audio (prime %d, configured); writes took %ldms, worst %ldms, configure %ldms (headphone=%u speaker=%u) -- node %s",
+            what, sent, failed, took_ms, audio_ms, prime_frames,
+            total_write_ms, worst_write_ms, cfg_ms, cfg_hp, cfg_sp,
             node ? node : "?");
 
     return (failed == 0 && sent > 0) ? 0 : -1;
@@ -208,6 +341,7 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
      * signal held the pad. Zeroed here and read by the caller's log line, so a
      * run says whether the drop fired rather than leaving it to be assumed. */
     ctm_controller_set_type_state(c, 3 /* DS4_SLOT_AUDIO_DROPPED */, 0);
+    ctm_controller_set_type_state(c, 4 /* DS4_SLOT_HOST_SEEN */, 0);
     return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path);
 }
 
