@@ -111,6 +111,7 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
  * each is only ever touched by one thread, so neither needs a lock. */
 #define DS4_SLOT_CHORD     0   /* the input thread's: when the chord began */
 #define DS4_SLOT_WITHHELD  1   /* the session thread's: host reports withheld in a row */
+#define DS4_SLOT_AUDIO     2   /* the last audio values SENT, so a resend only happens on a change */
 
 static uint64_t ds4_now_ms(void)
 {
@@ -177,6 +178,81 @@ static void ds4_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t
     }
 }
 
+/* --- the Bluetooth DS4's audio settings, SENT rather than waited for --------
+ *
+ * ⛔⛔ THE FAULT THIS EXISTS FOR (T-229): speaker_volume, headset_volume and
+ * audio_output reached the TV, the TV was willing, and the pad did nothing.
+ *
+ * ⭐ ds4_patch_output is a PATCH hook. It edits reports FLOWING FROM THE HOST
+ * and originates none. The volume bytes are written only inside
+ * `data[0] == 0x11`, the pad's effects report -- so unless the host happens to
+ * send rumble or a lightbar change, there is nothing to patch and the setting
+ * never leaves the TV. Measured 2026-09-20 on a bridged DS4: the section drew,
+ * the values travelled, and none of the three did anything. ⓘ The route byte
+ * has the same shape: patched onto host AUDIO frames, so with nothing playing
+ * there is nothing to route.
+ *
+ * ➡️ So the pad is told directly when a value changes.
+ *
+ * ⛔⛔ AND IT IS ONE REPORT ON A CHANGE, NEVER A STREAM. The listener's own map
+ * records a user test from 2026-07-25 where a continuous silence lane killed a
+ * DS4's audio entirely -- "ALL audio died ... the controller misbehaved",
+ * suspect "flooding 0x14s starves/roots the pad". ⚠️ Different report, same
+ * lesson: this must not become a pump. The slot below is what keeps it honest.
+ *
+ * ⭐ THE REPORT ASKS FOR AS LITTLE AS IT CAN. Byte 3 is the valid-flag byte:
+ * its LOW nibble is rumble, LED and flash, its high bits are the volumes
+ * (0x10/0x20 headphone L/R, 0x80 speaker -- the same 0xb0 the patch path sets).
+ * Sending 0xb0 with a zero low nibble says "change the volumes, leave the
+ * rumble and the light alone", so a report that arrives while a game is driving
+ * the lightbar cannot darken it.
+ *
+ * ⚠️ DERIVED, NOT MEASURED: bytes 1 and 2. The map states the AUDIO reports
+ * use "0x40|poll_rate (HID bit OFF -- no effects in audio reports; effects stay
+ * in 0x11)", so an effects report has that bit ON -- 0xC0 -- and 0xA0 follows
+ * it, matching DS4Windows. The length, 78, is the standard DS4 Bluetooth output
+ * report. ⛔ None of that has been confirmed against this pad; if it is wrong
+ * the pad should ignore the report, and the log line below is how that is
+ * told apart from it working. */
+static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
+{
+    if (!c || c->hid_fd < 0 || !s) return;
+
+    const uint8_t headset = ds4_volume_raw_byte(s->headset_volume_percent);
+    const uint8_t speaker = ds4_volume_raw_byte(s->speaker_volume_percent);
+    const uint8_t route   = ds4_route_for_mode(s->audio_mode);
+
+    /* Nothing new to say, so say nothing. Keeps a settings poll from becoming
+     * the stream the July test warns about. */
+    const uint64_t now = ((uint64_t)headset << 16) | ((uint64_t)speaker << 8) | route
+                       | 0x1000000ull;   /* a marker, so "never sent" is not 0 */
+    if (ctm_controller_type_state(c, DS4_SLOT_AUDIO) == now) return;
+
+    uint8_t rep[78];
+    memset(rep, 0, sizeof rep);
+    rep[0]  = 0x11;
+    rep[1]  = 0xc0;   /* HID bit on, poll rate 0 -- see the note above */
+    rep[2]  = 0xa0;
+    rep[3]  = 0xb0;   /* volumes valid; rumble/LED/flash NOT claimed */
+    rep[21] = headset;
+    rep[22] = headset;
+    rep[24] = speaker;
+    ctm_bt_sign_output(rep, sizeof rep);
+
+    const ssize_t n = write(c->hid_fd, rep, sizeof rep);
+    ctm_controller_set_type_state(c, DS4_SLOT_AUDIO, now);
+    ctl_log(c, "ds4 audio: told the pad headset=%u speaker=%u route=0x%02x, wrote %d of %zu",
+            headset, speaker, route, (int)n, sizeof rep);
+}
+
+/* set_settings: a live slider moved. ⓘ The FIRST set_settings in this tree --
+ * every other type leaves it NULL and reads its values inside patch_output,
+ * which is exactly why a pad the host is not talking to never heard them. */
+static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
+{
+    ds4_bt_send_audio(c, s);
+}
+
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .kind = "ds4",
     .needs_host_config = true,
@@ -192,7 +268,9 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_patch_output,
-    .set_settings = NULL,   /* live values read via get_settings in patch_output */
+    /* ⭐ T-229: the volumes and the route are SENT on a change, because
+     * patch_output alone only reaches a pad the host is already talking to. */
+    .set_settings = ds4_bt_set_settings,
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */
