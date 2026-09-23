@@ -299,9 +299,40 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
  *
  * ✅ THE TONE IS GATED, inside ds4sig_play_fd, by the same switch the
  * DualSense's uses. */
+/* ⛔⛔ WAIT BEFORE THE CONNECT TONE. THIS IS NOT POLITENESS, IT IS THE FIX.
+ *
+ * ⚠️ MEASURED 2026-09-22 on build 404. The bridge tone was *"just a blip"*
+ * while the handback tone was perfect -- and both play to a bridged pad, so
+ * the host's audio sharing the node is NOT the difference. The log gave it up
+ * in three lines:
+ *     50226.862 active host=... transport=TCP     <- the tone starts here
+ *     50226.880 ds4 audio: told the pad ...       <- 18 ms into the prime
+ *     50227.791 ds4sig: bridge, ... took 929ms
+ * The tone begins at the very instant the session goes active, INSIDE the
+ * window where the session, the host's audio endpoint and our own volume
+ * report are all still setting the pad up. The prime is thrown away and only a
+ * fragment survives. ⭐ The handback fires ten seconds later into a settled
+ * pad, and the refusal has no host at all -- which is why both were clean and
+ * this one was not.
+ *
+ * ⓘ 500 ms, chosen to clear the volume report at +18 ms with room to spare
+ * rather than to be exact. ⚠️ If a blip ever comes back, this is the first
+ * number to raise, and DS4SIG_PRIME_FRAMES is the second. */
+#define DS4_BT_CONNECT_SETTLE_MS  500
+
 static void *ds4_bt_connected_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    struct timespec settle = { DS4_BT_CONNECT_SETTLE_MS / 1000,
+                               (long)(DS4_BT_CONNECT_SETTLE_MS % 1000) * 1000000L };
+    nanosleep(&settle, NULL);
+    /* ⓘ A release during the wait is answered here rather than after another
+     * second of tone: plug-out is already waiting on this signal's claim. */
+    if (controller_signal_stopping(c)) {
+        ctl_log(c, "signal: connected -- not played, the pad was released while settling");
+        controller_signal_end(c, NULL);
+        return NULL;
+    }
     const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
     ctl_log(c, "signal: connected -- tone rc=%d", rc);
     controller_signal_end(c, NULL);
