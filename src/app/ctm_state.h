@@ -114,6 +114,12 @@ typedef struct {
 typedef struct {
     char key[96];
     char busid[32];
+    /* ⭐ The device node, kept so a RELEASE tone can be played after the
+     * session is gone. ⛔ It cannot be read from the controller at that point:
+     * the controller is destroyed first, and a tone played before that is
+     * played into a live session -- which on the rooted monitor blocks for
+     * five seconds a write and comes out as a click. 🔗 T-238. */
+    char node[64];
     int port;
     ctm_controller_t *controller;   /* owns the in-process bridging session */
     /* ⭐ Claimed by a path that is tearing it down, under g_sessions_mutex.
@@ -290,7 +296,8 @@ int session_index_for_key(const char *key);
 int next_bridge_port(void);
 int first_scan_index_for_item(const logical_device_t *item);
 void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len);
-bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port);
+bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port,
+                 const char *node);
 void stop_session(const char *key);
 void release_local_sessions_on_exit(void);
 /* TV pointer -> host mouse (synthetic; feeds webOS-smoothed pointer to the PC). */

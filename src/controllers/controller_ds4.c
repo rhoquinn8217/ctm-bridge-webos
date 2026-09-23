@@ -391,6 +391,12 @@ static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t wh
             (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
 }
 
+/* ⓘ Defined further down, beside the cabled pad's signal machinery they
+ * share. Declared here because the Bluetooth table comes first in this file
+ * and now uses them too. */
+static void ds4_signal_connected(ctm_controller_t *c);
+static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why);
+
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .kind = "ds4",
     .needs_host_config = true,
@@ -411,14 +417,20 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .set_settings = ds4_bt_set_settings,
     /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
      * light and the pulse want a 0x11 builder that does not exist yet. */
-    /* ⛔ NO .signal_connected. The handover tone is played in ui_bridge.c
-     * BEFORE the session opens, because a write to a bridged pad blocks about
-     * five seconds and the tone cannot survive it. Wiring it here as well
-     * would play a second, broken tone straight after the good one.
-     * ⚠️ This makes ctm_controller_will_signal_connect() answer NO for a
-     * Bluetooth DS4 again, so the TV plays its own fallback -- which is right,
-     * because the core no longer signals from inside the session. */
-    .signal_unplugging = ds4_bt_signal_unplugging,
+    /* ⭐⭐ LIGHT AND PULSE, BUT NOT THE TONE.
+     * The tone is played by ui_bridge.c outside the session, because a write
+     * to a bridged pad blocks for seconds. The light and the pulse are a
+     * handful of small reports, not a stream, so they are fine from in here --
+     * and they must be, because this is also what tells the TV to stand aside
+     * (ctm_controller_will_signal_connect reads this table). ⛔ Without it the
+     * TV fires its OWN pulse into our tone, which is the 2026-09-18 fault:
+     * "the TV pulsed a pad the core was about to sing to". */
+    .signal_connected = ds4_signal_connected,
+    .signal_unplugging = ds4_signal_unplugging,
+    /* ⛔ NO .signal_unplugging either. The handback is played in ui_bridge.c
+     * AFTER the session has gone, for the same reason the handover is played
+     * before it starts: a tone from inside a live session is starved. Wiring
+     * it here too would play a second, broken one first. 🔗 T-238. */
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */
@@ -504,12 +516,25 @@ static void ds4_sleep_until(const struct timespec *t0, long due_ms)
 /* One report of the TV's own, claiming only what `claims` names. ⓘ Through
  * ctm_controller_write_raw, so it takes the node's lock like the host's writes
  * and skips the patcher, which exists for the host's reports. */
-static int ds4_signal_write(ctm_controller_t *c, uint8_t claims, uint8_t motor,
+/* Which report shape this pad wants. ⓘ ctm_controller_bus answers "USB" or
+ * "BT"; the two output reports differ by more than a header. */
+static bool ds4_is_bt(const ctm_controller_t *c)
+{
+    const char *bus = ctm_controller_bus(c);
+    return bus != NULL && (bus[0] == 'B' || bus[0] == 'b');
+}
+
+static int ds4_signal_write(ctm_controller_t *c, bool bt, uint8_t claims, uint8_t motor,
                             uint8_t r, uint8_t g, uint8_t b)
 {
-    uint8_t rep[DS4_OUT_LEN];
-    if (ds4_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b) == 0) return -1;
-    return ctm_controller_write_raw(c, rep, sizeof(rep));
+    uint8_t rep[DS4_BT_OUT_LEN];          /* the larger of the two */
+    const size_t n = bt
+        ? ds4_bt_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b)
+        : ds4_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b);
+    if (n == 0) return -1;
+    /* ⛔ The signature, and the pad drops the report without it. */
+    if (bt) ctm_bt_sign_output(rep, n);
+    return ctm_controller_write_raw(c, rep, n);
 }
 
 /* Play one signal's breaths and pulse, on the calling thread.
@@ -528,8 +553,8 @@ static int ds4_signal_write(ctm_controller_t *c, uint8_t claims, uint8_t motor,
  * those 450 ms lost it until it next sent one. ➡️ Once the stop is out, later
  * steps claim the light only, and controller_signal_motors_done() tells the
  * patcher to pass the host's motors again. */
-static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, uint8_t drives,
-                            bool cancellable, ds4_signal_run_t *run)
+static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape_t *s,
+                            uint8_t drives, bool cancellable, ds4_signal_run_t *run)
 {
     memset(run, 0, sizeof(*run));
     const bool light = (drives & DS4_OUT_LIGHT) != 0;
@@ -551,7 +576,7 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
         if (level != last_level || (!motors_released && motor != last_motor)) {
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
                                              (motors_released ? 0 : DS4_OUT_MOTORS));
-            if (ds4_signal_write(c, claims, (uint8_t)motor,
+            if (ds4_signal_write(c, bt, claims, (uint8_t)motor,
                                  (uint8_t)((s->r * level) / 255),
                                  (uint8_t)((s->g * level) / 255),
                                  (uint8_t)((s->b * level) / 255)) != 0) {
@@ -572,7 +597,7 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
     if (!motors_released) {
         /* ⓘ Ended inside the pulse -- cut short, a failed write, or a rumble-only
          * signal, which stops stepping when its pulse is over. */
-        if (ds4_signal_write(c, DS4_OUT_MOTORS, 0, 0, 0, 0) == 0) ++run->sent;
+        if (ds4_signal_write(c, bt, DS4_OUT_MOTORS, 0, 0, 0, 0) == 0) ++run->sent;
         else ++run->failed;
         controller_signal_motors_done(c);
     }
@@ -601,9 +626,10 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
 static void *ds4_connected_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
     ds4_signal_run_t run;
-    ds4_signal_play(c, &k_ds4_connected, drives, true, &run);
+    ds4_signal_play(c, bt, &k_ds4_connected, drives, true, &run);
     ctl_log(c, "signal: connected -- green breath %s, pulse %s: %d report(s), %d failed, %ldms%s",
             (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
             run.sent, run.failed, run.took_ms, run.cut ? ", cut short by a release" : "");
@@ -612,7 +638,7 @@ static void *ds4_connected_thread(void *arg)
     for (int round = 1;; ++round) {
         if ((drives & DS4_OUT_LIGHT) && !controller_signal_stopping(c)) {
             const bool seen = (kept & DS4_KEPT_COLOUR) != 0;
-            const int rc = ds4_signal_write(c, DS4_OUT_LIGHT, 0,
+            const int rc = ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0,
                                             seen ? (uint8_t)(kept >> 16) : k_ds4_connected.r,
                                             seen ? (uint8_t)(kept >> 8) : k_ds4_connected.g,
                                             seen ? (uint8_t)kept : k_ds4_connected.b);
@@ -637,7 +663,7 @@ static void *ds4_connected_thread(void *arg)
  * carries the reports and must not sleep through a breath, and nobody waits for
  * a confirmation. ⛔ Unlike the DualSense's, it claims the controller first, so
  * plug-out cannot close the node under it -- see controller_signal_begin. */
-static void ds4_usb_signal_connected(ctm_controller_t *c)
+static void ds4_signal_connected(ctm_controller_t *c)
 {
     if (!ds4_signal_drives()) {
         ctl_log(c, "signal: connected -- light and rumble are switched off, nothing played");
@@ -665,7 +691,7 @@ static void ds4_usb_signal_connected(ctm_controller_t *c)
  * release. The host's claims stay withheld from here to the end of the session.
  * ⓘ Ends dark, as the DualSense's wired handback does: nothing is restored, and
  * whoever owns the light next writes over it. */
-static void ds4_usb_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
     const char *what;
     switch (why) {
@@ -673,15 +699,16 @@ static void ds4_usb_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t w
     case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
     default:                  what = "unplugging (requested)"; break;
     }
+    const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
     if (!drives) {
         ctl_log(c, "signal: %s -- light and rumble are switched off, nothing played", what);
         return;
     }
     ds4_signal_run_t run;
-    ds4_signal_play(c, &k_ds4_released, drives, false, &run);
+    ds4_signal_play(c, bt, &k_ds4_released, drives, false, &run);
     if ((drives & DS4_OUT_LIGHT) && !run.failed) {
-        if (ds4_signal_write(c, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
+        if (ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
         else ++run.failed;
     }
     ctl_log(c, "signal: %s -- yellow breaths %s, pulse %s: %d report(s), %d failed, %ldms",
@@ -800,6 +827,6 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_usb_patch_output,
-    .signal_connected = ds4_usb_signal_connected,
-    .signal_unplugging = ds4_usb_signal_unplugging,
+    .signal_connected = ds4_signal_connected,
+    .signal_unplugging = ds4_signal_unplugging,
 };

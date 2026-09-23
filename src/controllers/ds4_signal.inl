@@ -235,7 +235,16 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
      * LAST-HEARD TIMESTAMP rather than a flag -- short prime only if a tone
      * played in the last few seconds -- which needs state this file does not
      * keep yet. Correct and slow beats fast and silent. */
-    const int prime_frames = DS4SIG_PRIME_FRAMES * 3;
+    /* ⛔ BACK TO THE PER-PAD RULE, build 414's. Long for a pad this run has not
+     * primed, short afterwards. ⚠️ I replaced it with "always long" on 2026-09-22
+     * because good handbacks logged `prime 450` and silent ones `prime 150` --
+     * and rhoquinn8217's C3 showed that correlation was confounded: there the
+     * delivery is PERFECT (`writes took 0ms`) and the release still went from
+     * heard-regularly to hardly-ever. ➡️ The change did not buy what it claimed
+     * and it cost the release, so it goes back. */
+    const int primed = btsig_is_primed(node);
+    const int prime_frames = primed ? DS4SIG_PRIME_FRAMES
+                                    : (DS4SIG_PRIME_FRAMES * 3);
 
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
@@ -319,6 +328,9 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
         reports++;
         ds4sig_wait_for(&t0, reports);
     }
+
+    /* The decoder is warm only if the prime actually went out. */
+    if (prime_frames > 0 && failed == 0) btsig_mark_primed(node);
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);

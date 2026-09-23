@@ -400,7 +400,8 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
  * The caller tears the new controller down again. ⓘ A replaced controller is
  * torn down here, after its entry already holds the new one, so no other path
  * can reach it. */
-bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port)
+bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port,
+                 const char *node)
 {
     pthread_mutex_lock(&g_sessions_mutex);
     int index = session_index_locked(key);
@@ -412,6 +413,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
         ctm_controller_t *replaced = g_sessions[index].controller != controller
                                      ? g_sessions[index].controller : NULL;
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
+        snprintf(g_sessions[index].node, sizeof(g_sessions[index].node), "%s", node ? node : "");
         g_sessions[index].port = port;
         g_sessions[index].controller = controller;
         pthread_mutex_unlock(&g_sessions_mutex);
@@ -427,6 +429,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
     }
     snprintf(g_sessions[g_session_count].key, sizeof(g_sessions[0].key), "%s", key);
     snprintf(g_sessions[g_session_count].busid, sizeof(g_sessions[0].busid), "%s", busid ? busid : "");
+    snprintf(g_sessions[g_session_count].node, sizeof(g_sessions[0].node), "%s", node ? node : "");
     g_sessions[g_session_count].port = port;
     g_sessions[g_session_count].controller = controller;
     g_sessions[g_session_count].stopping = false;
@@ -471,6 +474,8 @@ void stop_session(const char *key)
     ctm_controller_t *controller = g_sessions[index].controller;
     char busid[sizeof(g_sessions[0].busid)];
     snprintf(busid, sizeof(busid), "%s", g_sessions[index].busid);
+    char node[sizeof(g_sessions[0].node)];
+    snprintf(node, sizeof(node), "%s", g_sessions[index].node);
     const int port = g_sessions[index].port;
     pthread_mutex_unlock(&g_sessions_mutex);
 
@@ -483,6 +488,22 @@ void stop_session(const char *key)
         char response[256];
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
+    }
+
+    /* ⭐⭐ THE DS4's HANDBACK TONE, PLAYED AFTER THE SESSION HAS GONE.
+     *
+     * The same lesson as the handover tone above, applied to the other end. A
+     * tone played from inside a session is starved: on the rooted monitor a
+     * write to a bridged pad blocks about five seconds. ⛔ signal_unplugging
+     * runs DURING teardown, with the session still up, which is why the
+     * release was the one rhoquinn8217 heard "sometimes" and then not at all.
+     * ✅ Here the controller is destroyed, BRIDGE_STOP has been sent and the
+     * link is the pad's own again.
+     * ⓘ The busid carries the kind -- "ctm-ds4-1" -- so no extra state is
+     * needed to know which pad this was. */
+    if (node[0] && strstr(busid, "-ds4-") != NULL) {
+        const int trc = ds4_signal_tone_node(node, 1 /* BTSIG_HANDED_BACK */);
+        log_append("ds4 handback tone after the session: rc=%d", trc);
     }
 
     pthread_mutex_lock(&g_sessions_mutex);
@@ -740,19 +761,17 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
 
     /* ⭐⭐ THE DS4's HANDOVER TONE, PLAYED BEFORE THE SESSION EXISTS.
      *
-     * ⛔ It cannot be played after. Measured across builds 412-417 on
-     * 2026-09-22: a write to a BRIDGED DS4 blocks about five seconds every
-     * time, so the frames arrive far too late and the decoder plays a click.
-     * Moving the tone to the session thread fixed the pacing and cost five
-     * seconds of input lag instead; halving the write rate changed nothing.
-     * ✅ The link is free right here, which is why the REFUSAL tone -- the one
-     * signal that has never had a session -- has been clean since its first
-     * attempt.
-     *
-     * ⓘ It costs about a second before the pad bridges, and it reads the
-     * right way round: the tone says "handing over", and then it does.
-     * ⚠️ Synchronous on purpose. On a thread it would overlap the session
-     * starting, which is the very thing that breaks it. */
+     * ✅ MEASURED on the rooted monitor: a write to a BRIDGED DS4 blocks about
+     * five seconds, so a tone played from inside the session is starved to a
+     * click. Played here, on a free link, it came out as two clean notes --
+     * 660 Hz at magnitude 3298 then 990 at 4758, matching the handback that
+     * was always good.
+     * ⓘ On the C3 writes take 9-21 ms and this makes no difference either
+     * way, so it costs nothing there and fixes the monitor.
+     * ⚠️ Synchronous on purpose: on a thread it would overlap the session
+     * starting, which is the very thing that breaks it. It costs about a
+     * second before the pad bridges, and it reads the right way round -- the
+     * tone says handing over, and then it does. */
     if (strcmp(kind, "ds4") == 0) {
         const int trc = ds4_signal_tone_node(cdev.path, 0 /* BTSIG_HANDING_OVER */);
         log_append("ds4 handover tone before the session: rc=%d", trc);
@@ -791,7 +810,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
      * recorded running with nothing able to release it. Now it is torn down
      * again: the table is full, or the key's previous session is still
      * stopping (see add_session). */
-    if (!add_session(session_key, busid, controller, port)) {
+    if (!add_session(session_key, busid, controller, port, cdev.path)) {
         log_append("controller for %s not recorded (table full, or its last session is "
                    "still stopping); undoing the plug", session_key);
         ctm_controller_plug_out(controller);
