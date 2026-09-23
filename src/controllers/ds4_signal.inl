@@ -402,16 +402,50 @@ int ds4_signal_tone_node(const char *node, int pattern)
     return rc;
 }
 
+/* Carries a node and a pattern to the light thread below. */
+typedef struct {
+    const char *node;
+    int pattern;
+    int rc;
+} ds4sig_light_job_t;
+
+static void *ds4sig_light_thread(void *arg)
+{
+    ds4sig_light_job_t *j = (ds4sig_light_job_t *) arg;
+    j->rc = ds4_signal_light_pulse_node(j->node, j->pattern);
+    return NULL;
+}
+
 int ds4_signal_refused_bt(const char *node)
 {
-    /* ⭐ ALL THREE, like the DualSense: red light, a felt pulse, and the
-     * sinking pair of notes. ⓘ The light goes FIRST because a refusal wants to
-     * be immediate and the light is instant, where the tone takes two seconds.
-     * They are separate reports on a DS4 -- the DualSense carries both in one --
-     * so sequential is the only option. */
-    const int lrc = ds4_signal_light_pulse_node(node, 2 /* BTSIG_REFUSED */);
+    /* ⭐ ALL THREE AT ONCE, like the DualSense: red light, a felt pulse and
+     * the sinking pair of notes, together rather than one after the other.
+     *
+     * ⛔ SEQUENTIAL WAS WRONG, and measuring said so. A DualSense carries
+     * the light and the audio in ONE report, so its three signals are
+     * simultaneous by construction. A DS4 needs two -- 0x11 for the light and
+     * the motors, 0x14 for the audio -- and running them in turn made a
+     * refusal 1.7 seconds long: 800ms of red, and only then the tone. Measured
+     * on the rooted monitor 2026-09-23, the DS4's own BRIDGE already overlaps
+     * them (a 701ms light inside a 929ms tone), so back-to-back was the odd one
+     * out rather than the rule.
+     *
+     * ⓘ A thread, and its own fd: two writers to one hidraw node, each
+     * write a whole report, which is what a bridge already does. ⚠ The
+     * interleaving is the exact case T-238 broke on -- the light report used to
+     * clear the pad's audio-valid bits and kill the tone -- so this is only
+     * safe because ds4_bt_build_output carries the volumes now. If a refusal
+     * ever goes silent again, look there first. */
+    ds4sig_light_job_t job = { node, 2 /* BTSIG_REFUSED */, -1 };
+    pthread_t th;
+    const bool threaded = (pthread_create(&th, NULL, ds4sig_light_thread, &job) == 0);
+    if (!threaded) {
+        /* ⓘ No thread: still light it, just before the tone as it was. */
+        job.rc = ds4_signal_light_pulse_node(node, 2);
+    }
     const int trc = ds4_signal_tone_node(node, 2);
-    ctl_log(NULL, "ds4sig: refusal light/pulse rc=%d, tone rc=%d -- node %s",
-            lrc, trc, node ? node : "?");
+    if (threaded) pthread_join(th, NULL);
+    ctl_log(NULL, "ds4sig: refusal light/pulse rc=%d (%s), tone rc=%d -- node %s",
+            job.rc, threaded ? "alongside" : "before", trc, node ? node : "?");
     return trc;
 }
