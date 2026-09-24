@@ -462,6 +462,8 @@ static void session_remove_stopped_locked(const char *key)
  * ➡️ Now the entry is CLAIMED under g_sessions_mutex before anything slow
  * happens. A path that finds it already claimed returns: the claimant finishes
  * the job, and removes the entry when it has. */
+#define CTM_MS(a, b) ((long)(((b).tv_sec - (a).tv_sec) * 1000L + ((b).tv_nsec - (a).tv_nsec) / 1000000L))
+
 void stop_session(const char *key)
 {
     pthread_mutex_lock(&g_sessions_mutex);
@@ -479,31 +481,63 @@ void stop_session(const char *key)
     const int port = g_sessions[index].port;
     pthread_mutex_unlock(&g_sessions_mutex);
 
+    struct timespec ta, tb, tc, td;
+    clock_gettime(CLOCK_MONOTONIC, &ta);
     if (controller) {
         ctm_controller_plug_out(controller);
         ctm_controller_destroy(controller);
     }
+    clock_gettime(CLOCK_MONOTONIC, &tb);
+
+    /* ⭐⭐ THE DS4's HANDBACK TONE, AND WHY IT MOVED AGAIN (2026-09-23).
+     *
+     * ⛔ It used to play AFTER BRIDGE_STOP. That is a round trip to the
+     * listener over the network, and the pad's link has nothing to do with it:
+     * the local session is already gone once plug_out and destroy have run. So
+     * waiting for the agent bought nothing and cost the whole delay -- the tone
+     * landed about 1.1 s after the light, and rhoquinn8217 asked for them
+     * together: *"try to get the tone to sound earlier ... so that the tone
+     * plays at the same time the light pattern starts"*.
+     *
+     * ➡️ It now goes out as soon as the controller is destroyed, before the
+     * agent is told. ⓘ A settle first, because the release tone went missing
+     * ENTIRELY in about a quarter of runs on an OLED83B4PUA -- the whole tone,
+     * not one note -- which reads as a link still busy rather than a raced
+     * write. ctm_handback_settle_ms() is settable from the control port so the
+     * right value can be found by measurement rather than by guess.
+     *
+     * ⓘ The light rides these same reports now (🔗 ds4_signal_tone_node), so
+     * the two start together by construction rather than by timing. */
+    long settle_ms = 0, tone_ms = 0, stop_ms = 0;
+    if (node[0] && strstr(busid, "-ds4-") != NULL) {
+        const int settle = ctm_handback_settle_ms();
+        if (settle > 0) {
+            struct timespec nap = { settle / 1000, (long)(settle % 1000) * 1000000L };
+            nanosleep(&nap, NULL);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &tc);
+        settle_ms = CTM_MS(tb, tc);
+        const int trc = ds4_signal_tone_node(node, 1 /* BTSIG_HANDED_BACK */);
+        clock_gettime(CLOCK_MONOTONIC, &td);
+        tone_ms = CTM_MS(tc, td);
+        log_append("ds4 handback tone before BRIDGE_STOP: rc=%d", trc);
+    } else {
+        tc = tb; td = tb;
+    }
+
     if (port > 0) {
         char cmd[160];
         char response[256];
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
     }
-
-    /* ⭐⭐ THE DS4's HANDBACK TONE, PLAYED AFTER THE SESSION HAS GONE.
-     *
-     * The same lesson as the handover tone above, applied to the other end. A
-     * tone played from inside a session is starved: on the rooted monitor a
-     * write to a bridged pad blocks about five seconds. ⛔ signal_unplugging
-     * runs DURING teardown, with the session still up, which is why the
-     * release was the one rhoquinn8217 heard "sometimes" and then not at all.
-     * ✅ Here the controller is destroyed, BRIDGE_STOP has been sent and the
-     * link is the pad's own again.
-     * ⓘ The busid carries the kind -- "ctm-ds4-1" -- so no extra state is
-     * needed to know which pad this was. */
-    if (node[0] && strstr(busid, "-ds4-") != NULL) {
-        const int trc = ds4_signal_tone_node(node, 1 /* BTSIG_HANDED_BACK */);
-        log_append("ds4 handback tone after the session: rc=%d", trc);
+    {
+        struct timespec te;
+        clock_gettime(CLOCK_MONOTONIC, &te);
+        stop_ms = CTM_MS(td, te);
+        ctm_gesture_log(NULL, "handback timing: teardown %ldms, settle %ldms, "
+                              "tone %ldms, BRIDGE_STOP %ldms -- %s",
+                        CTM_MS(ta, tb), settle_ms, tone_ms, stop_ms, busid);
     }
 
     pthread_mutex_lock(&g_sessions_mutex);

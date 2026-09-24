@@ -776,6 +776,25 @@ void ctm_input_set_held(int held)
 static volatile int g_sig_light = 1, g_sig_rumble = 1, g_sig_tone = 1;
 static volatile int g_mic_capture = 1;
 
+/* ⭐ HOW LONG TO LET A PAD'S LINK SETTLE AFTER A SESSION ENDS, before the
+ * handback tone goes out. ⚠️ Measured need: on an OLED83B4PUA the release tone
+ * went MISSING ENTIRELY in about a quarter of runs -- not one note lost, the
+ * whole thing -- which is the signature of a link still busy rather than of a
+ * write being raced. ⓘ Settable from the control port so a sweep does not need
+ * a build per value, which is what keeps a pad's battery and a room's noise
+ * pinned across the whole comparison. */
+static int g_handback_settle_ms = 0;
+
+void ctm_handback_settle_set_ms(int ms)
+{
+    g_handback_settle_ms = (ms < 0) ? 0 : (ms > 3000 ? 3000 : ms);
+}
+
+int ctm_handback_settle_ms(void)
+{
+    return g_handback_settle_ms;
+}
+
 void ctm_signals_set_enabled(int light, int rumble, int tone)
 {
     g_sig_light  = light  ? 1 : 0;

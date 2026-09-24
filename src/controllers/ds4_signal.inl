@@ -601,14 +601,17 @@ int ds4_signal_tone_node(const char *node, int pattern)
      * match (🔗 ds4_signal_connected). Leaving it would draw the pattern
      * twice from two writers, which is the fault, not a belt and braces. */
     if (!node || !node[0]) return -1;
-    /* ⛔ THE HANDBACK IS LEFT ALONE, and deliberately. Its light is drawn by
-     * ds4_signal_unplugging at the RELEASE REQUEST, about 1.1 s before this tone
-     * plays -- so the two never overlap, and the release measured 10 of 10 on
-     * the B4 while the bridge measured 8. ➡️ Only the case that is broken
-     * changes. ⓘ The cost is that a handback's light and tone still arrive
-     * apart; closing that means moving the light after teardown, which delays
-     * the visible answer to a release, and that is rhoquinn8217's call. */
-    const int lit = (pattern != 1 /* BTSIG_HANDED_BACK */);
+    /* ⭐⭐ THE HANDBACK CARRIES ITS LIGHT NOW TOO (2026-09-23).
+     * rhoquinn8217: *"try to get the tone to sound earlier if possible so that
+     * the tone plays at the same time the light pattern starts."*
+     * ➡️ They meet in the middle. The tone moved EARLIER -- ui_bridge.c plays it
+     * before BRIDGE_STOP rather than after, which is a network round trip the
+     * pad's link has nothing to do with -- and the light moved from the release
+     * REQUEST into these reports. ⓘ Simultaneous by construction, not by timing.
+     * ⚠️ The visible answer to a release therefore lands a little later than it
+     * used to; that was the trade rhoquinn8217 asked for. 🔗 ds4_signal_unplugging,
+     * which no longer draws it on Bluetooth. */
+    const int lit = 1;
     ds4sig_visual_t vis;
     memset(&vis, 0, sizeof vis);
     if (lit) {

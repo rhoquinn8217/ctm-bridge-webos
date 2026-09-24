@@ -818,6 +818,14 @@ static void ds4_signal_connected(ctm_controller_t *c)
  * whoever owns the light next writes over it. */
 static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
+    /* ⛔ NOT ON BLUETOOTH: THE HANDBACK TONE CARRIES THE LIGHT NOW (build 439).
+     * 🔗 ds4_signal_tone_node. Drawing it here as well means two writers on one
+     * hidraw node, and it would draw the yellow twice -- once at the request and
+     * again with the tone. A cable keeps this path. */
+    if (ds4_is_bt(c)) {
+        ctl_log(c, "signal: unplugging -- light and pulse ride the handback tone on Bluetooth, not drawn here");
+        return;
+    }
     const char *what;
     switch (why) {
     case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
