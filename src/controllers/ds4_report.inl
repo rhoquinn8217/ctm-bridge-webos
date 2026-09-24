@@ -87,6 +87,23 @@
 #define DS4_OUT_RED            6
 #define DS4_OUT_GREEN          7
 #define DS4_OUT_BLUE           8
+/* ⭐⭐ THE BLUETOOTH OUTPUT REPORT. Everything the cabled 0x05 carries, two
+ * bytes further along, behind a 0x11 header and with a Sony CRC on the end.
+ *
+ * ⓘ These offsets are not derived: ds4_bt_send_audio has been writing the
+ * volume bytes of this exact report since T-229, and the pad obeys it --
+ * heard 2026-09-22, silent at 20 and audible at 100.
+ * ⛔ Byte 1 is 0xC0: HID bit ON, because this IS an effects report. The pure
+ * audio reports (0x12/0x14/0x17) have it OFF. */
+#define DS4_BT_OUT_ID          0x11
+#define DS4_BT_OUT_LEN         78
+#define DS4_BT_OUT_FLAGS       3
+#define DS4_BT_OUT_WEAK        6
+#define DS4_BT_OUT_STRONG      7
+#define DS4_BT_OUT_RED         8
+#define DS4_BT_OUT_GREEN       9
+#define DS4_BT_OUT_BLUE        10
+
 #define DS4_OUT_MOTORS         0x01
 #define DS4_OUT_LIGHT          0x02
 #define DS4_OUT_BLINK          0x04
@@ -206,6 +223,52 @@ static size_t ds4_build_output(uint8_t *out, size_t cap, uint8_t flags,
         out[DS4_OUT_BLUE] = b;
     }
     return DS4_OUT_LEN;
+}
+
+/* The same report for a Bluetooth pad.
+ * ⚠⚠ IT IS NOT SIGNED HERE, AND IT MUST BE SIGNED. The pad drops any output
+ * report whose CRC does not match, silently -- a missing one looks exactly
+ * like a light that does not work. ctm_bt_sign_output lives in
+ * controller_common.c, which this file's unit test does not link, so the one
+ * caller signs instead. 🔗 ds4_signal_write. */
+static size_t ds4_bt_build_output(uint8_t *out, size_t cap, uint8_t flags,
+                                  uint8_t weak, uint8_t strong,
+                                  uint8_t r, uint8_t g, uint8_t b,
+                                  uint8_t headphone_vol, uint8_t speaker_vol)
+{
+    if (!out || cap < DS4_BT_OUT_LEN) return 0;
+    memset(out, 0, DS4_BT_OUT_LEN);
+    out[0] = DS4_BT_OUT_ID;
+    out[1] = 0xc0;                 /* HID bit on: an effects report */
+    out[2] = 0xa0;
+    /* ⛔⛔ THE VOLUME BITS ARE CARRIED, NOT LEFT CLEAR.
+     *
+     * Byte 3's HIGH bits are the volume-valid flags -- 0x10/0x20 headphone L/R,
+     * 0x80 speaker -- and ds4_patch_output says what they mean: "without them
+     * the pad ignores bytes 21/22/24". ⚠️ This report was sending them CLEAR
+     * with the volume bytes zeroed, which is not "leave the volumes alone" so
+     * much as an effects report that mentions no audio at all.
+     *
+     * ⭐ MEASURED 2026-09-23 on the C3: with the light and the pulse OFF the
+     * tone played in 5 of 5 runs; with them ON, in 5 of 10, and the RELEASE
+     * tone -- the one that follows two of these reports -- was the worst of
+     * all. The bridge tone, which plays BEFORE any of them, was the better one.
+     * ➡️ So the light carries the pad's audio settings with it and leaves
+     * them as it found them. */
+    out[DS4_BT_OUT_FLAGS] = (uint8_t)(flags | 0xb0u);
+    out[21] = headphone_vol;
+    out[22] = headphone_vol;
+    out[24] = speaker_vol;
+    if (flags & DS4_OUT_MOTORS) {
+        out[DS4_BT_OUT_WEAK] = weak;
+        out[DS4_BT_OUT_STRONG] = strong;
+    }
+    if (flags & DS4_OUT_LIGHT) {
+        out[DS4_BT_OUT_RED] = r;
+        out[DS4_BT_OUT_GREEN] = g;
+        out[DS4_BT_OUT_BLUE] = b;
+    }
+    return DS4_BT_OUT_LEN;
 }
 
 /* Is this the host's USB output report 0x05, whole? ⓘ Anything else the host

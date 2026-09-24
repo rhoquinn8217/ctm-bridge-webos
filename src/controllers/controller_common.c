@@ -776,6 +776,31 @@ void ctm_input_set_held(int held)
 static volatile int g_sig_light = 1, g_sig_rumble = 1, g_sig_tone = 1;
 static volatile int g_mic_capture = 1;
 
+/* ⭐⭐ THE MINIMUM GAP BETWEEN TWO TONES ON ONE PAD, in ms.
+ *
+ * ⚠️ Why it exists: once two tones can no longer overlap, the second one starts
+ * about 0.1 s after the first one's audio stopped, and about a fifth of signals
+ * fired a second apart still lost a note on an OLED83B4PUA -- with
+ * `sent=267 failed=0` every time, so the loss is inside the pad. The hypothesis
+ * this knob tests is that the decoder needs a moment after a stream ENDS before
+ * it will start another.
+ * ⓘ Settable from the control port (`set settle <ms>`) so the value can be
+ * swept without a build each time, which is what keeps a pad's battery and a
+ * room's noise pinned across the comparison. ⓘ It began as a post-teardown
+ * settle for the handback and was measured unnecessary there (15 of 15 at 0), so
+ * it moved to where the evidence pointed. */
+static int g_ds4_tone_gap_ms = 0;
+
+void ctm_tone_gap_set_ms(int ms)
+{
+    g_ds4_tone_gap_ms = (ms < 0) ? 0 : (ms > 3000 ? 3000 : ms);
+}
+
+int ctm_tone_gap_ms(void)
+{
+    return g_ds4_tone_gap_ms;
+}
+
 void ctm_signals_set_enabled(int light, int rumble, int tone)
 {
     g_sig_light  = light  ? 1 : 0;

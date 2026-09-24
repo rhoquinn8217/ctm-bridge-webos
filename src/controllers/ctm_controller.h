@@ -313,6 +313,38 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
 void ctm_mic_safety_disarm_all(void);
 
 int ctm_signal_refused_bt(const char *node);
+
+/* The same thing for a BLUETOOTH DS4, which encodes its audio as SBC rather
+ * than Opus and carries it in a 0x14 report rather than a 0x36. T-238.
+ * ⛔ Bluetooth only -- a cabled DS4 has no sound card on the pads here. */
+int ds4_signal_refused_bt(const char *node);
+
+/* ⭐ THE LIGHT SHAPE FOR A PATTERN, AND THE BREATH CURVE, ACROSS A TU BOUNDARY.
+ *
+ * ⓘ ds4_signal.inl compiles into controller_common.c while the shape table and
+ * the breath live in controller_ds4.c, so the combined 0x15 report -- which
+ * draws the light INTO the audio stream -- cannot reach them directly. These two
+ * are the whole interface it needs, so the shapes stay declared in one place.
+ * `pattern` is btsig_pattern_t: 0 handing over, 1 handed back, 2 refused. */
+void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
+                         int *breaths, int *solid, long *ms);
+int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
+
+/* The same two notes for a pad that IS bridged: 0 handing over, 1 handed back,
+ * 2 refused -- the values of btsig_pattern_t.
+ * ⚠️ The CALLER owns the claim and the thread: a tone takes about a second
+ * and the session thread carries the pad's reports.
+ * ⓘ The tone switch is checked inside, so no caller needs to. */
+int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
+
+/* The same two notes on a bare node, with no session behind it: 0 handing
+ * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about
+ * five seconds, so this is the only way a DS4 tone reliably plays. */
+int ds4_signal_tone_node(const char *node, int pattern);
+
+/* The light and the felt pulse on a bare node, for a signal with no session --
+ * a refusal. 0 handing over, 1 handed back, 2 refused. ⛔ Bluetooth only. */
+int ds4_signal_light_pulse_node(const char *node, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
@@ -381,6 +413,10 @@ void ctm_input_set_held(int held);
  *
  * ⓘ All default ON, so a core told nothing behaves as it always has. */
 void ctm_signals_set_enabled(int light, int rumble, int tone);
+
+/* The settle before a handback tone, in ms. 🔗 ctm_tone_gap_set_ms. */
+void ctm_tone_gap_set_ms(int ms);
+int  ctm_tone_gap_ms(void);
 /* Is the felt pulse allowed right now? For a type that confirms with a rumble
  * of its own rather than the DualSense signal. */
 int signals_rumble_on(void);

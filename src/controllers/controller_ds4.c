@@ -16,8 +16,10 @@
 #include "ds4_report.inl"
 
 #include <errno.h>
+#include <fcntl.h>    /* open, for the refusal's node-level signal */
 #include <pthread.h>
 #include <string.h>
+#include <unistd.h>   /* write and close, the same */
 #include <sys/ioctl.h>
 #include <time.h>
 
@@ -59,6 +61,17 @@ static uint8_t ds4_volume_raw_byte(unsigned int value)
  *   whatever was set last, so an explicit value every frame is the sane
  *   default the user asked for). Rumble/LED bytes untouched.
  * When: every outbound report, from the pump. Returns 0 (never drops). */
+/* ⓘ DIAGNOSTIC, added 2026-09-22. Counts host audio reports dropped while a
+ * signal plays, so the tone's own log line can say whether the drop fired at
+ * all. ⚠️ A count of ZERO during a manual bridge would mean host audio does
+ * not reach ds4_patch_output, and the competition is somewhere else. */
+#define DS4_SLOT_AUDIO_DROPPED 3
+/* ⓘ DIAGNOSTIC: host reports of ANY id seen while a signal holds the pad.
+ * `dropped=0` proved no AUDIO arrives; this says whether ANYTHING does -- a
+ * 0x11 claiming the volumes mid-tone would be just as disruptive and would
+ * never have shown up in that count. */
+#define DS4_SLOT_HOST_SEEN     4
+
 static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 {
     tv_bridge_worker_settings_t s;
@@ -68,9 +81,39 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
     size_t len = len_io ? *len_io : 0;
     if (!data || len < 10) return 0;
 
+    if (controller_signal_host_report(c, false, 0)) {
+        ctm_controller_set_type_state(c, DS4_SLOT_HOST_SEEN,
+            ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN) + 1);
+    }
+
     int patched = 0;
 
     if (data[0] == 0x12 || data[0] == 0x14 || data[0] == 0x17) {
+        /* ⛔⛔ WHILE OUR TONE PLAYS, THE HOST'S AUDIO IS DROPPED.
+         *
+         * ⚠️ THE FAULT THIS FIXES, heard 2026-09-22: rhoquinn8217 on build
+         * 403 -- *"bridge tone is short sometimes I only hear a crack"*. The
+         * REFUSAL tone was clean and the BRIDGE tone was not, and the one
+         * difference is the node. A refusal plays to a pad that is NOT
+         * bridged, so nothing else writes to it. A bridge and a handback play
+         * to a pad that IS, and the host's own audio arrives as these very
+         * reports -- so two streams of SBC frames interleave and the pad
+         * decodes a mixture of both. Our 928 ms of tone becomes a fraction of
+         * that, which is exactly what "short, sometimes a crack" sounds like.
+         *
+         * ⭐ So the signal gets the node to itself, the way the refusal always
+         * had it. The cost is that a game's audio is muted for about a second,
+         * which is the same trade the lightbar and the motors already make
+         * just below -- a confirmation signal owns what it drives while it
+         * plays.
+         *
+         * ⓘ Returning 1 means the patch CONSUMED the report: it is not
+         * written on. 🔗 apply_output_settings. */
+        if (controller_signal_host_report(c, false, 0)) {
+            ctm_controller_set_type_state(c, DS4_SLOT_AUDIO_DROPPED,
+                ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED) + 1);
+            return 1;
+        }
         uint8_t route = ds4_route_for_mode(settings->audio_mode);
         if (route != 0 && data[5] != route) {
             data[5] = route;
@@ -257,6 +300,105 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
     ds4_bt_send_audio(c, s);
 }
 
+/* --- the BLUETOOTH pad's own signals (T-238) -------------------------------
+ *
+ * ⛔⛔ UNTIL NOW A BLUETOOTH DS4 SIGNALLED NOTHING AT ALL. `signal_connected`
+ * sat on the CABLED ops table alone, and ctm_controller.h says why in words:
+ * *"for a Bluetooth Xbox pad or a Bluetooth DS4 the core has nothing to play,
+ * so NOBODY signals and the bridge is silent."* ⭐ Giving the Bluetooth table
+ * these two hooks also makes ctm_controller_will_signal_connect() answer yes
+ * for this pad, so the TV correctly stands aside -- that rule is COMPUTED from
+ * the ops table rather than copied, which is exactly why this works without
+ * touching the TV.
+ *
+ * ⓘ TONE ONLY, FOR NOW. The light and the pulse need a Bluetooth output
+ * report (0x11, 78 bytes, CRC-signed) and ds4_build_output makes the CABLED
+ * 0x05 -- so they are a separate piece of work, and they will use the gate
+ * ds4_signal_drives() already applies. ⚠️ Until then a Bluetooth bridge is
+ * heard and not seen.
+ *
+ * ✅ THE TONE IS GATED, inside ds4sig_play_fd, by the same switch the
+ * DualSense's uses. */
+/* ⛔⛔ BACK ON ITS OWN THREAD, AND THE REASON IS A REGRESSION I CAUSED.
+ *
+ * Running it on the session thread DID free the Bluetooth link -- measured,
+ * build 413: writes fell from 10257 ms to 81 ms, and the pacing went from
+ * `24169ms for 928ms of audio` to `929ms for 928ms`. ✅ That part worked.
+ * ⛔ But the configure write BLOCKS for about 4.2 s at bridge time (build 415:
+ * `configure 4152ms`), and on the session thread that delays the pad's input
+ * by five seconds at every bridge. ⚠️ A five-second wait before a controller
+ * responds is far worse than a confirmation tone that does not play.
+ *
+ * ⓘ SO THE TONE IS STILL IMPERFECT ON A BRIDGE, KNOWINGLY. 🔗 T-238 carries
+ * what was measured and what is left. The handback and the refusal are clean;
+ * the bridge is the one that is not. */
+#define DS4_BT_CONNECT_SETTLE_MS  500
+
+static void *ds4_bt_connected_thread(void *arg)
+{
+    ctm_controller_t *c = (ctm_controller_t *)arg;
+    struct timespec settle = { DS4_BT_CONNECT_SETTLE_MS / 1000,
+                               (long)(DS4_BT_CONNECT_SETTLE_MS % 1000) * 1000000L };
+    nanosleep(&settle, NULL);
+    if (controller_signal_stopping(c)) {
+        ctl_log(c, "signal: connected -- not played, the pad was released while settling");
+        controller_signal_end(c, NULL);
+        return NULL;
+    }
+    const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
+    ctl_log(c, "signal: connected -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
+            rc,
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
+    controller_signal_end(c, NULL);
+    return NULL;
+}
+
+/* ⚠️ ON ITS OWN THREAD: the tone takes about a second and the session thread
+ * carries the pad's reports. 🔗 The note beside feedback_play, which learned
+ * that the expensive way -- and which build 413 confirmed from the other
+ * direction. */
+static void ds4_bt_signal_connected(ctm_controller_t *c)
+{
+    if (!controller_signal_begin(c)) {
+        ctl_log(c, "signal: connected -- not played, a signal is still playing "
+                   "or the pad is being released");
+        return;
+    }
+    pthread_t sig;
+    const int rc = pthread_create(&sig, NULL, ds4_bt_connected_thread, c);
+    if (rc == 0) {
+        pthread_detach(sig);
+    } else {
+        ctl_log(c, "signal: connected -- could not start the signal thread rc=%d", rc);
+        controller_signal_end(c, NULL);
+    }
+}
+
+/* signal_unplugging: high then low, falling, coming home.
+ * ⓘ Synchronous, like the cabled one, and for the same reason: it is not cut
+ * short by the release it announces, because it IS the release. */
+static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+{
+    const char *what;
+    switch (why) {
+    case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
+    case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
+    default:                  what = "unplugging (requested)"; break;
+    }
+    const int rc = ds4_signal_tone_bt(c, 1 /* BTSIG_HANDED_BACK */);
+    ctl_log(c, "signal: %s -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
+            what, rc,
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
+            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
+}
+
+/* ⓘ Defined further down, beside the cabled pad's signal machinery they
+ * share. Declared here because the Bluetooth table comes first in this file
+ * and now uses them too. */
+static void ds4_signal_connected(ctm_controller_t *c);
+static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why);
+
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .kind = "ds4",
     .needs_host_config = true,
@@ -275,6 +417,22 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     /* ⭐ T-229: the volumes and the route are SENT on a change, because
      * patch_output alone only reaches a pad the host is already talking to. */
     .set_settings = ds4_bt_set_settings,
+    /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
+     * light and the pulse want a 0x11 builder that does not exist yet. */
+    /* ⭐⭐ LIGHT AND PULSE, BUT NOT THE TONE.
+     * The tone is played by ui_bridge.c outside the session, because a write
+     * to a bridged pad blocks for seconds. The light and the pulse are a
+     * handful of small reports, not a stream, so they are fine from in here --
+     * and they must be, because this is also what tells the TV to stand aside
+     * (ctm_controller_will_signal_connect reads this table). ⛔ Without it the
+     * TV fires its OWN pulse into our tone, which is the 2026-09-18 fault:
+     * "the TV pulsed a pad the core was about to sing to". */
+    .signal_connected = ds4_signal_connected,
+    .signal_unplugging = ds4_signal_unplugging,
+    /* ⛔ NO .signal_unplugging either. The handback is played in ui_bridge.c
+     * AFTER the session has gone, for the same reason the handover is played
+     * before it starts: a tone from inside a live session is starved. Wiring
+     * it here too would play a second, broken one first. 🔗 T-238. */
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */
@@ -309,7 +467,7 @@ static bool ds4_usb_matches(const ctm_controller_dev_t *dev)
 #define DS4_PULSE_MS        250
 /* ⓘ Both motors at half: the app's own success pulse is 0x7FFF of 0xFFFF, and
  * SDL hands a DS4 the top byte of that. */
-#define DS4_PULSE_LEVEL     0x7f
+#define DS4_PULSE_LEVEL     0xc0   /* 🔗 DS4SIG_VIS_PULSE_LVL: was 0x7f, exactly half */
 #define DS4_CONNECTED_MS    700
 #define DS4_RELEASED_MS     800
 /* Kept beside the host's colour, above its 24 bits: "the host has set one",
@@ -320,6 +478,12 @@ typedef struct {
     uint8_t r, g, b;
     int breaths;
     long ms;
+    /* ⭐ HOLD AT FULL INSTEAD OF BREATHING, which is what the DualSense does for
+     * a handover. 🔗 btsig_level: *"Handing over: SOLID, not pulsing. The app's
+     * pre-plug pulse has already swelled the light up to full by the time this
+     * runs, so pulsing again animates the same event twice."* The same
+     * reasoning applies here, so the same shape is used. */
+    bool solid;
 } ds4_signal_shape_t;
 
 typedef struct {
@@ -329,8 +493,17 @@ typedef struct {
     long took_ms;
 } ds4_signal_run_t;
 
-static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS };
-static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, 2, DS4_RELEASED_MS };
+/* ⭐⭐ THE SAME THREE PATTERNS THE DUALSENSE PAINTS, so one pad does not mean
+ * something different from the other (rhoquinn8217, 2026-09-23).
+ * 🔗 btsig_level and the colour lines beside it:
+ *   handing over  green, SOLID       -- R=0x00 G=0xff
+ *   handed back   yellow, 3 flashes  -- R=0xff G=0xff
+ *   refused       red, 3 flashes     -- R=0xff G=0x00
+ * ⓘ The colours already matched; the counts did not, and a refusal had no
+ * shape here at all. */
+static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS, true };
+static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, 3, DS4_RELEASED_MS, false };
+static const ds4_signal_shape_t k_ds4_refused   = { 0xff, 0x00, 0x00, 3, DS4_RELEASED_MS, false };
 
 /* What a signal may claim right now, as output valid flags. */
 static uint8_t ds4_signal_drives(void)
@@ -360,12 +533,36 @@ static void ds4_sleep_until(const struct timespec *t0, long due_ms)
 /* One report of the TV's own, claiming only what `claims` names. ⓘ Through
  * ctm_controller_write_raw, so it takes the node's lock like the host's writes
  * and skips the patcher, which exists for the host's reports. */
-static int ds4_signal_write(ctm_controller_t *c, uint8_t claims, uint8_t motor,
+/* Which report shape this pad wants. ⓘ ctm_controller_bus answers "USB" or
+ * "BT"; the two output reports differ by more than a header. */
+static bool ds4_is_bt(const ctm_controller_t *c)
+{
+    const char *bus = ctm_controller_bus(c);
+    return bus != NULL && (bus[0] == 'B' || bus[0] == 'b');
+}
+
+static int ds4_signal_write(ctm_controller_t *c, bool bt, uint8_t claims, uint8_t motor,
                             uint8_t r, uint8_t g, uint8_t b)
 {
-    uint8_t rep[DS4_OUT_LEN];
-    if (ds4_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b) == 0) return -1;
-    return ctm_controller_write_raw(c, rep, sizeof(rep));
+    uint8_t rep[DS4_BT_OUT_LEN];          /* the larger of the two */
+    /* The pad's own volumes travel with every light report. 🔗 the note in
+     * ds4_bt_build_output: sending the audio bits clear appears to drop the
+     * pad's audio setup, which is what killed the tone that followed. */
+    uint8_t hp = 0x4f, sp = 0x4f;
+    if (bt) {
+        tv_bridge_worker_settings_t st;
+        ctm_controller_get_settings(c, &st);
+        const unsigned h = st.headset_volume_percent, k = st.speaker_volume_percent;
+        if (h > 0 && h <= 100) hp = ds4_volume_raw_byte(h);
+        if (k > 0 && k <= 100) sp = ds4_volume_raw_byte(k);
+    }
+    const size_t n = bt
+        ? ds4_bt_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b, hp, sp)
+        : ds4_build_output(rep, sizeof(rep), claims, motor, motor, r, g, b);
+    if (n == 0) return -1;
+    /* ⛔ The signature, and the pad drops the report without it. */
+    if (bt) ctm_bt_sign_output(rep, n);
+    return ctm_controller_write_raw(c, rep, n);
 }
 
 /* Play one signal's breaths and pulse, on the calling thread.
@@ -384,8 +581,8 @@ static int ds4_signal_write(ctm_controller_t *c, uint8_t claims, uint8_t motor,
  * those 450 ms lost it until it next sent one. ➡️ Once the stop is out, later
  * steps claim the light only, and controller_signal_motors_done() tells the
  * patcher to pass the host's motors again. */
-static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, uint8_t drives,
-                            bool cancellable, ds4_signal_run_t *run)
+static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape_t *s,
+                            uint8_t drives, bool cancellable, ds4_signal_run_t *run)
 {
     memset(run, 0, sizeof(*run));
     const bool light = (drives & DS4_OUT_LIGHT) != 0;
@@ -402,12 +599,14 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
             run->cut = 1;
             break;
         }
+        /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
+         * buzzes is for a pad with no lightbar and no speaker. */
         const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
-        const int level = light ? ds4_breath_level(at, s->ms, s->breaths) : 0;
+        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
         if (level != last_level || (!motors_released && motor != last_motor)) {
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
                                              (motors_released ? 0 : DS4_OUT_MOTORS));
-            if (ds4_signal_write(c, claims, (uint8_t)motor,
+            if (ds4_signal_write(c, bt, claims, (uint8_t)motor,
                                  (uint8_t)((s->r * level) / 255),
                                  (uint8_t)((s->g * level) / 255),
                                  (uint8_t)((s->b * level) / 255)) != 0) {
@@ -428,11 +627,101 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
     if (!motors_released) {
         /* ⓘ Ended inside the pulse -- cut short, a failed write, or a rumble-only
          * signal, which stops stepping when its pulse is over. */
-        if (ds4_signal_write(c, DS4_OUT_MOTORS, 0, 0, 0, 0) == 0) ++run->sent;
+        if (ds4_signal_write(c, bt, DS4_OUT_MOTORS, 0, 0, 0, 0) == 0) ++run->sent;
         else ++run->failed;
         controller_signal_motors_done(c);
     }
     run->took_ms = ds4_elapsed_ms(&t0);
+}
+
+/* 🔗 Declared in ctm_controller.h: the shape table and the breath, reached
+ * from ds4_signal.inl's combined 0x15 report in the other translation unit. */
+void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
+                         int *breaths, int *solid, long *ms)
+{
+    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
+                                : (pattern == 1) ? &k_ds4_released
+                                                 : &k_ds4_connected;
+    if (r) *r = s->r;
+    if (g) *g = s->g;
+    if (b) *b = s->b;
+    if (breaths) *breaths = s->breaths;
+    if (solid) *solid = s->solid ? 1 : 0;
+    if (ms) *ms = s->ms;
+}
+
+int ds4_signal_breath(long at_ms, long total_ms, int breaths)
+{
+    return ds4_breath_level(at_ms, total_ms, breaths);
+}
+
+/* ⭐⭐ THE LIGHT AND THE PULSE ON A BARE NODE, with no session behind them.
+ *
+ * ⛔ A REFUSAL HAS NO CONTROLLER. A plug that failed leaves no object and no
+ * open device, which is why the refusal signal was tone-only while a bridge and
+ * a handback had light and rumble. rhoquinn8217, 2026-09-23: all three, on all
+ * three events, like the ds5.
+ *
+ * ⓘ A trimmed copy of ds4_signal_play's loop rather than a shared one: that
+ * version needs a controller for its cancel check and its mutex, and neither
+ * exists here. The shape, the breath and the pulse are the same.
+ * ⚠️ Bluetooth only -- a cabled refusal has no node of ours to write to. */
+int ds4_signal_light_pulse_node(const char *node, int pattern)
+{
+    const uint8_t drives = ds4_signal_drives();
+    if (!drives || node == NULL || !node[0]) return -1;
+    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
+                                : (pattern == 1) ? &k_ds4_released
+                                                 : &k_ds4_connected;
+    const int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+
+    const bool light = (drives & DS4_OUT_LIGHT) != 0;
+    const bool rumble = (drives & DS4_OUT_MOTORS) != 0;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int last_level = -1, last_motor = -1, sent = 0, failed = 0;
+
+    for (;;) {
+        const long at = ds4_elapsed_ms(&t0);
+        if (at >= s->ms || (!light && at >= DS4_PULSE_MS)) break;
+        /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
+         * buzzes is for a pad with no lightbar and no speaker. */
+        const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
+        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
+        if (level != last_level || motor != last_motor) {
+            uint8_t rep[DS4_BT_OUT_LEN];
+            const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
+                                             (rumble ? DS4_OUT_MOTORS : 0));
+            /* ⓘ Full volumes: there is no session to read them from, and a
+             * confirmation nobody can hear is worse than a loud one. 🔗 the note
+             * in ds4_bt_build_output on why the audio bits travel at all. */
+            const size_t n = ds4_bt_build_output(rep, sizeof rep, claims, (uint8_t)motor,
+                                                 (uint8_t)motor,
+                                                 (uint8_t)((s->r * level) / 255),
+                                                 (uint8_t)((s->g * level) / 255),
+                                                 (uint8_t)((s->b * level) / 255),
+                                                 0x4f, 0x4f);
+            if (n == 0) { ++failed; break; }
+            ctm_bt_sign_output(rep, n);
+            if (write(fd, rep, n) != (ssize_t)n) { ++failed; break; }
+            ++sent;
+            last_level = level;
+            last_motor = motor;
+        }
+        struct timespec nap = { 0, 10 * 1000000L };
+        nanosleep(&nap, NULL);
+    }
+    /* ⛔ THE PULSE ALWAYS ENDS WITH A STOP, however the pattern ended -- a
+     * DS4's motors keep running until a report tells them otherwise. And the
+     * light goes dark, because nothing owns it after a refusal. */
+    uint8_t stop[DS4_BT_OUT_LEN];
+    const size_t sn = ds4_bt_build_output(stop, sizeof stop,
+                                          (uint8_t)(DS4_OUT_MOTORS | DS4_OUT_LIGHT),
+                                          0, 0, 0, 0, 0, 0x4f, 0x4f);
+    if (sn) { ctm_bt_sign_output(stop, sn); if (write(fd, stop, sn) == (ssize_t)sn) ++sent; }
+    close(fd);
+    return failed == 0 ? 0 : -1;
 }
 
 /* The connected signal's thread.
@@ -457,9 +746,10 @@ static void ds4_signal_play(ctm_controller_t *c, const ds4_signal_shape_t *s, ui
 static void *ds4_connected_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
+    const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
     ds4_signal_run_t run;
-    ds4_signal_play(c, &k_ds4_connected, drives, true, &run);
+    ds4_signal_play(c, bt, &k_ds4_connected, drives, true, &run);
     ctl_log(c, "signal: connected -- green breath %s, pulse %s: %d report(s), %d failed, %ldms%s",
             (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
             run.sent, run.failed, run.took_ms, run.cut ? ", cut short by a release" : "");
@@ -468,7 +758,7 @@ static void *ds4_connected_thread(void *arg)
     for (int round = 1;; ++round) {
         if ((drives & DS4_OUT_LIGHT) && !controller_signal_stopping(c)) {
             const bool seen = (kept & DS4_KEPT_COLOUR) != 0;
-            const int rc = ds4_signal_write(c, DS4_OUT_LIGHT, 0,
+            const int rc = ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0,
                                             seen ? (uint8_t)(kept >> 16) : k_ds4_connected.r,
                                             seen ? (uint8_t)(kept >> 8) : k_ds4_connected.g,
                                             seen ? (uint8_t)kept : k_ds4_connected.b);
@@ -493,8 +783,17 @@ static void *ds4_connected_thread(void *arg)
  * carries the reports and must not sleep through a breath, and nobody waits for
  * a confirmation. ⛔ Unlike the DualSense's, it claims the controller first, so
  * plug-out cannot close the node under it -- see controller_signal_begin. */
-static void ds4_usb_signal_connected(ctm_controller_t *c)
+static void ds4_signal_connected(ctm_controller_t *c)
 {
+    /* ⛔ NOT ON BLUETOOTH: THE TONE CARRIES THE LIGHT NOW (build 438).
+     * 🔗 ds4_signal_tone_node. Drawing it from here as well means two writers
+     * on one hidraw node, which measured 2 of 10 bridges losing their second
+     * note on an OLED83B4PUA. A cable keeps this path: there the tone goes to a
+     * sound card and the light has to come from somewhere. */
+    if (ds4_is_bt(c)) {
+        ctl_log(c, "signal: connected -- light and pulse ride the tone on Bluetooth, not drawn here");
+        return;
+    }
     if (!ds4_signal_drives()) {
         ctl_log(c, "signal: connected -- light and rumble are switched off, nothing played");
         return;
@@ -521,23 +820,32 @@ static void ds4_usb_signal_connected(ctm_controller_t *c)
  * release. The host's claims stay withheld from here to the end of the session.
  * ⓘ Ends dark, as the DualSense's wired handback does: nothing is restored, and
  * whoever owns the light next writes over it. */
-static void ds4_usb_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
+    /* ⛔ NOT ON BLUETOOTH: THE HANDBACK TONE CARRIES THE LIGHT NOW (build 439).
+     * 🔗 ds4_signal_tone_node. Drawing it here as well means two writers on one
+     * hidraw node, and it would draw the yellow twice -- once at the request and
+     * again with the tone. A cable keeps this path. */
+    if (ds4_is_bt(c)) {
+        ctl_log(c, "signal: unplugging -- light and pulse ride the handback tone on Bluetooth, not drawn here");
+        return;
+    }
     const char *what;
     switch (why) {
     case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
     case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
     default:                  what = "unplugging (requested)"; break;
     }
+    const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
     if (!drives) {
         ctl_log(c, "signal: %s -- light and rumble are switched off, nothing played", what);
         return;
     }
     ds4_signal_run_t run;
-    ds4_signal_play(c, &k_ds4_released, drives, false, &run);
+    ds4_signal_play(c, bt, &k_ds4_released, drives, false, &run);
     if ((drives & DS4_OUT_LIGHT) && !run.failed) {
-        if (ds4_signal_write(c, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
+        if (ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
         else ++run.failed;
     }
     ctl_log(c, "signal: %s -- yellow breaths %s, pulse %s: %d report(s), %d failed, %ldms",
@@ -656,6 +964,6 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_usb_patch_output,
-    .signal_connected = ds4_usb_signal_connected,
-    .signal_unplugging = ds4_usb_signal_unplugging,
+    .signal_connected = ds4_signal_connected,
+    .signal_unplugging = ds4_signal_unplugging,
 };
