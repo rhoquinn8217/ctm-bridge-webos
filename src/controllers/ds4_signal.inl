@@ -279,8 +279,21 @@ typedef struct {
     int      rumble;
 } ds4sig_visual_t;
 
+/* ⭐ THE PULSE FOLLOWS THE LIGHT, AND IT IS NOT AT HALF STRENGTH ANY MORE.
+ *
+ * ⛔ It was one 250 ms pulse at 0x7f -- exactly half of what the motors take --
+ * whatever the light was doing. So a refusal flashed red THREE times and buzzed
+ * ONCE, and rhoquinn8217 asked the obvious question: *"Wasn't refusal 3
+ * rumbles?"* It was not, and it should have been: the rumble is the same message
+ * as the light for someone not looking at the pad.
+ * ➡️ A breathing pattern now pulses once per flash, in step with it, and a
+ * SOLID one keeps the single lead-in pulse -- 700 ms of continuous motor for a
+ * handover would be a lot more than a confirmation needs.
+ * ⓘ 0xc0 rather than 0xff: rhoquinn8217 asked for *"a little stronger"*, and
+ * a DS4's motors at full for a quarter of a second rattle rather than confirm.
+ * 🔗 DS4_PULSE_LEVEL next door, raised with it so a cable feels the same. */
 #define DS4SIG_VIS_PULSE_MS   250
-#define DS4SIG_VIS_PULSE_LVL  0x7f
+#define DS4SIG_VIS_PULSE_LVL  0xc0
 
 /* ⭐⭐ THE CONFIGURE REPORT, AND IT IS THE PIECE THAT WAS MISSING.
  *
@@ -503,12 +516,17 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
                     lr = (uint8_t)((vis->r * level) / 255);
                     lg = (uint8_t)((vis->g * level) / 255);
                     lb = (uint8_t)((vis->b * level) / 255);
-                    if (vis->rumble && at < DS4SIG_VIS_PULSE_MS) {
-                        claims |= 0x01u;        /* DS4_OUT_MOTORS */
-                        motor = DS4SIG_VIS_PULSE_LVL;
-                    } else if (vis->rumble) {
-                        claims |= 0x01u;        /* claim it to send the STOP */
-                        motor = 0;
+                    if (vis->rumble) {
+                        claims |= 0x01u;        /* DS4_OUT_MOTORS, always, so a stop lands */
+                        /* ⭐ One pulse per flash, gated on the light being bright
+                         * rather than tracking the breath: a motor driven up and
+                         * down a ramp feels mushy, a square pulse feels like a
+                         * pulse. A solid light gets the single lead-in instead. */
+                        if (vis->solid) {
+                            motor = (at < DS4SIG_VIS_PULSE_MS) ? DS4SIG_VIS_PULSE_LVL : 0;
+                        } else {
+                            motor = (level > 128) ? DS4SIG_VIS_PULSE_LVL : 0;
+                        }
                     }
                 }
             }
