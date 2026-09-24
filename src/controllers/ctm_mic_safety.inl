@@ -2,12 +2,28 @@
  *
  * FORK-ONLY. Two call sites: one at startup, one on the input relay.
  *
+ * ⛔ BLUETOOTH ONLY, AND DELIBERATELY. Both halves speak Bluetooth: the watcher
+ * fires on input report 0x31, and the disarm sends 0x32 with a Bluetooth CRC.
+ * ⭐ That is not an omission. Over Bluetooth the microphone audio rides the HID
+ * INPUT REPORT, which is what makes it look like buttons; on a cable it goes over
+ * the separate USB audio interface, where no HID reader ever sees it. So a wired
+ * pad has nothing to misparse and nothing to guard against.
+ * ⓘ Measured 2026-09-23 (T-213), since a count could not settle it: the disarm
+ * write is ACCEPTED by hidraw on a wired DualSense and does not mute it -- 95.1%
+ * non-zero microphone samples before the sweep, 92.8% after. Harmless, and not
+ * worth a USB report of its own until someone shows a cabled pad can stream
+ * unbidden. 🔗 `test-log.md` 2026-09-23, build 445.
+ *
  * ⛔⛔ WHAT THIS PROTECTS AGAINST, and why it is not paranoia.
  *
  * A Bluetooth DualSense can be told to stream microphone audio. When it is, it
  * sends AUDIO-ONLY reports -- same report id, same length as pad state, with
- * one flag bit to tell them apart. Nothing reads that bit. Not SDL, not the
- * Linux kernel, not this app before today.
+ * one flag bit to tell them apart, and almost nothing reads that bit.
+ * ⚠️ **OUR SDL IS PATCHED AND READS IT NOW.** That is a later change than this
+ * file, and it does NOT retire the guard: the kernel's HID driver is not ours to
+ * fix, and webOS itself still misreads the audio. 🔗 `transport-feature-matrix.md`,
+ * microphone capture: *"our SDL is patched, the kernel's driver is not ours to
+ * fix"*. ➡️ So the offender changed and the remedy did not.
  *
  * So every reader parses encoded sound as sticks and buttons. Measured
  * 2026-08-13: the mouse crossed a desktop continuously, and on this TV the app
@@ -15,9 +31,12 @@
  * powered off. ⭐ That is upstream's stated reason for never implementing
  * microphone support, reproduced on demand.
  *
- * ⚠️ AND WE ARE NOT IN SDL'S PATH. SDL opens the controller itself and gets its
- * own copy of every report. We cannot filter what it reads. The only thing we
- * can do is make sure the controller is not streaming in the first place.
+ * ⚠️ AND WE ARE NOT IN ANY READER'S PATH. Every reader opens the controller
+ * itself and gets its own copy of every report, so we cannot filter what any of
+ * them sees. The only thing we can do is make sure the controller is not
+ * streaming in the first place. ⓘ This was written about SDL and still holds for
+ * the kernel and for webOS, which is the point: patching one reader fixes one
+ * reader, and the pad is the only place that fixes all of them.
  *
  * ⛔⛔⛔ THERE IS DELIBERATELY NO CODE HERE THAT TURNS THE MICROPHONE ON.
  *
