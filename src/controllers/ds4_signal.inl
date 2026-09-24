@@ -279,19 +279,28 @@ typedef struct {
     int      rumble;
 } ds4sig_visual_t;
 
-/* ⭐ THE PULSE FOLLOWS THE LIGHT, AND IT IS NOT AT HALF STRENGTH ANY MORE.
+/* ⭐⭐ ONE PULSE, ON EVERY SIGNAL, AND NOT AT HALF STRENGTH.
  *
- * ⛔ It was one 250 ms pulse at 0x7f -- exactly half of what the motors take --
- * whatever the light was doing. So a refusal flashed red THREE times and buzzed
- * ONCE, and rhoquinn8217 asked the obvious question: *"Wasn't refusal 3
- * rumbles?"* It was not, and it should have been: the rumble is the same message
- * as the light for someone not looking at the pad.
- * ➡️ A breathing pattern now pulses once per flash, in step with it, and a
- * SOLID one keeps the single lead-in pulse -- 700 ms of continuous motor for a
- * handover would be a lot more than a confirmation needs.
- * ⓘ 0xc0 rather than 0xff: rhoquinn8217 asked for *"a little stronger"*, and
- * a DS4's motors at full for a quarter of a second rattle rather than confirm.
- * 🔗 DS4_PULSE_LEVEL next door, raised with it so a cable feels the same. */
+ * ⛔⛔ A COUNT OF BUZZES IS NOT THIS PAD'S JOB. Three pulses for a refusal was
+ * tried on 2026-09-23 and taken straight back out. rhoquinn8217, clearing up
+ * what the generic path's three buzzes are for: *"I don't want 3 buzzes for
+ * refusal. I was confirming that non DS5 and non DS4 don't have 3 because they
+ * don't have lightbar or audio feedback."*
+ *
+ * ➡️ So the rule is about CHANNELS, not about the event. An Xbox pad or a
+ * generic HID device has neither a lightbar we drive nor a speaker we can reach,
+ * so the only way it can say "wrong" rather than "done" is to keep buzzing --
+ * hence BUZZ_BURSTS 3 in the app, at 400 ms on and 300 ms off. A DualSense and a
+ * Bluetooth DS4 already say it twice over, in red and in two sinking notes, so a
+ * third telling adds nothing and muddies the tone it plays over.
+ * ⓘ Their own rule, 2026-09-15: *"a 1 buzz means ok and we will keep for
+ * bridge and release"* -- and on a pad with a lightbar, a refusal too.
+ *
+ * ⭐ The LEVEL is the part that was wrong and stays fixed: 0xc0 rather than
+ * 0x7f, which was exactly half of what the motors take and is why all three
+ * signals felt weak. Not 0xff -- *"a little stronger"* was the ask, and a DS4's
+ * motors at full for a quarter of a second rattle rather than confirm.
+ * 🔗 DS4_PULSE_LEVEL next door, the same on a cable. */
 #define DS4SIG_VIS_PULSE_MS   250
 #define DS4SIG_VIS_PULSE_LVL  0xc0
 
@@ -518,15 +527,7 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
                     lb = (uint8_t)((vis->b * level) / 255);
                     if (vis->rumble) {
                         claims |= 0x01u;        /* DS4_OUT_MOTORS, always, so a stop lands */
-                        /* ⭐ One pulse per flash, gated on the light being bright
-                         * rather than tracking the breath: a motor driven up and
-                         * down a ramp feels mushy, a square pulse feels like a
-                         * pulse. A solid light gets the single lead-in instead. */
-                        if (vis->solid) {
-                            motor = (at < DS4SIG_VIS_PULSE_MS) ? DS4SIG_VIS_PULSE_LVL : 0;
-                        } else {
-                            motor = (level > 128) ? DS4SIG_VIS_PULSE_LVL : 0;
-                        }
+                        motor = (at < DS4SIG_VIS_PULSE_MS) ? DS4SIG_VIS_PULSE_LVL : 0;
                     }
                 }
             }

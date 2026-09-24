@@ -467,7 +467,7 @@ static bool ds4_usb_matches(const ctm_controller_dev_t *dev)
 #define DS4_PULSE_MS        250
 /* ⓘ Both motors at half: the app's own success pulse is 0x7FFF of 0xFFFF, and
  * SDL hands a DS4 the top byte of that. */
-#define DS4_PULSE_LEVEL     0xc0   /* 🔗 DS4SIG_VIS_PULSE_LVL: was 0x7f, half strength */
+#define DS4_PULSE_LEVEL     0xc0   /* 🔗 DS4SIG_VIS_PULSE_LVL: was 0x7f, exactly half */
 #define DS4_CONNECTED_MS    700
 #define DS4_RELEASED_MS     800
 /* Kept beside the host's colour, above its 24 bits: "the host has set one",
@@ -599,11 +599,9 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
             run->cut = 1;
             break;
         }
-        /* 🔗 DS4SIG_VIS_PULSE_LVL: one pulse per flash, a single lead-in when solid. */
-        const int motor = !rumble ? 0
-                        : (s->solid ? ((at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0)
-                                    : ((ds4_breath_level(at, s->ms, s->breaths) > 128)
-                                       ? DS4_PULSE_LEVEL : 0));
+        /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
+         * buzzes is for a pad with no lightbar and no speaker. */
+        const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
         const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
         if (level != last_level || (!motors_released && motor != last_motor)) {
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
@@ -687,11 +685,9 @@ int ds4_signal_light_pulse_node(const char *node, int pattern)
     for (;;) {
         const long at = ds4_elapsed_ms(&t0);
         if (at >= s->ms || (!light && at >= DS4_PULSE_MS)) break;
-        /* 🔗 DS4SIG_VIS_PULSE_LVL: one pulse per flash, a single lead-in when solid. */
-        const int motor = !rumble ? 0
-                        : (s->solid ? ((at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0)
-                                    : ((ds4_breath_level(at, s->ms, s->breaths) > 128)
-                                       ? DS4_PULSE_LEVEL : 0));
+        /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
+         * buzzes is for a pad with no lightbar and no speaker. */
+        const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
         const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
         if (level != last_level || motor != last_motor) {
             uint8_t rep[DS4_BT_OUT_LEN];
