@@ -632,6 +632,27 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
     run->took_ms = ds4_elapsed_ms(&t0);
 }
 
+/* 🔗 Declared in ctm_controller.h: the shape table and the breath, reached
+ * from ds4_signal.inl's combined 0x15 report in the other translation unit. */
+void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
+                         int *breaths, int *solid, long *ms)
+{
+    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
+                                : (pattern == 1) ? &k_ds4_released
+                                                 : &k_ds4_connected;
+    if (r) *r = s->r;
+    if (g) *g = s->g;
+    if (b) *b = s->b;
+    if (breaths) *breaths = s->breaths;
+    if (solid) *solid = s->solid ? 1 : 0;
+    if (ms) *ms = s->ms;
+}
+
+int ds4_signal_breath(long at_ms, long total_ms, int breaths)
+{
+    return ds4_breath_level(at_ms, total_ms, breaths);
+}
+
 /* ⭐⭐ THE LIGHT AND THE PULSE ON A BARE NODE, with no session behind them.
  *
  * ⛔ A REFUSAL HAS NO CONTROLLER. A plug that failed leaves no object and no

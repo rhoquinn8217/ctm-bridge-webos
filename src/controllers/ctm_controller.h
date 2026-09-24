@@ -319,6 +319,17 @@ int ctm_signal_refused_bt(const char *node);
  * ⛔ Bluetooth only -- a cabled DS4 has no sound card on the pads here. */
 int ds4_signal_refused_bt(const char *node);
 
+/* ⭐ THE LIGHT SHAPE FOR A PATTERN, AND THE BREATH CURVE, ACROSS A TU BOUNDARY.
+ *
+ * ⓘ ds4_signal.inl compiles into controller_common.c while the shape table and
+ * the breath live in controller_ds4.c, so the combined 0x15 report -- which
+ * draws the light INTO the audio stream -- cannot reach them directly. These two
+ * are the whole interface it needs, so the shapes stay declared in one place.
+ * `pattern` is btsig_pattern_t: 0 handing over, 1 handed back, 2 refused. */
+void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
+                         int *breaths, int *solid, long *ms);
+int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
+
 /* The same two notes for a pad that IS bridged: 0 handing over, 1 handed back,
  * 2 refused -- the values of btsig_pattern_t.
  * ⚠️ The CALLER owns the claim and the thread: a tone takes about a second

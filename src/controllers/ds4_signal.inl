@@ -207,6 +207,81 @@ static void ds4sig_build(uint8_t *out, uint16_t counter,
     ctm_bt_sign_output(out, DS4SIG_REPORT_LEN);
 }
 
+/* ⭐⭐ THE COMBINED REPORT: STATE AND AUDIO IN ONE WRITE (0x15).
+ *
+ * ⛔ WHY, and it is the fault this whole ticket kept circling. We were using
+ * TWO reports -- 0x11 for the light, the motors and the volumes, 0x14 for the
+ * audio -- and every way of arranging them was wrong. Sequential makes a
+ * refusal 1.7 s long. Concurrent, on a second fd, ate the first note two thirds
+ * of the time on an OLED83B4PUA. Neither is fixable by timing, because the
+ * problem is that there are two writers at all.
+ *
+ * ⭐ 0x15 has both: `EnableHID` AND `EnableAudio` set, carrying the same
+ * state block as 0x11 followed by an audio block. So the lightbar, the motors,
+ * the volumes and the SBC frames go out in ONE report, the way a DualSense's
+ * do, which is why the DualSense path here has always been the reliable one.
+ *
+ * ⓘ Sourced from SensePost's dual-pod-shock, a working DS4 audio streamer
+ * (github.com/sensepost/dual-pod-shock), corroborated by the DS4-BT structure
+ * tables. ⚠️ The state block MIRRORS 0x11 -- flags at 3, motors at 6 and 7,
+ * RGB at 8 to 10, volumes at 21, 22 and 24 -- so those offsets are written as
+ * literals here rather than reusing ds4_report.inl's names, which belong to
+ * another translation unit.
+ *
+ * ⭐ AND THE VOLUMES RIDE EVERY REPORT. The old design configured the pad
+ * ONCE and then streamed for up to two seconds. Nothing re-established the
+ * audio-valid bits if the pad let them lapse -- and this ticket's very first
+ * fault was a light report CLEARING those bits. Asserting them every 8 ms costs
+ * nothing and removes the whole class.
+ *
+ * ⓘ 249 bytes are free from the payload offset, so two 109-byte frames fit
+ * with room to spare: the same two per report as 0x14, no throughput change. */
+#define DS4SIG_COMBO_ID       0x15
+#define DS4SIG_COMBO_LEN      334
+#define DS4SIG_COMBO_COUNTER  78
+#define DS4SIG_COMBO_ROUTE    80
+#define DS4SIG_COMBO_PAYLOAD  81
+
+static void ds4sig_build_combined(uint8_t *out, uint16_t counter,
+                                  const uint8_t *const *f,
+                                  uint8_t claims, uint8_t motor,
+                                  uint8_t r, uint8_t g, uint8_t b,
+                                  uint8_t hp, uint8_t sp)
+{
+    memset(out, 0, DS4SIG_COMBO_LEN);
+    out[0] = DS4SIG_COMBO_ID;
+    out[1] = 0xc0;                 /* HID bit ON: this report carries state too */
+    out[2] = 0xa0;
+    out[3] = (uint8_t)(claims | 0xb0u);   /* volume-valid bits, always */
+    out[21] = hp;
+    out[22] = hp;
+    out[24] = sp;
+    if (claims & 0x01u) { out[6] = motor; out[7] = motor; }   /* DS4_OUT_MOTORS */
+    if (claims & 0x02u) { out[8] = r; out[9] = g; out[10] = b; } /* DS4_OUT_LIGHT */
+    out[DS4SIG_COMBO_COUNTER]     = (uint8_t)(counter & 0xff);
+    out[DS4SIG_COMBO_COUNTER + 1] = (uint8_t)(counter >> 8);
+    out[DS4SIG_COMBO_ROUTE]       = DS4SIG_ROUTE;
+    for (int i = 0; i < DS4SIG_FRAMES_PER_REPORT; ++i) {
+        memcpy(out + DS4SIG_COMBO_PAYLOAD + (size_t)i * DS4SIG_FRAME_BYTES,
+               f[i], DS4SIG_FRAME_BYTES);
+    }
+    ctm_bt_sign_output(out, DS4SIG_COMBO_LEN);
+}
+
+/* What to draw into the audio stream while it plays. ⓘ `on` false means the
+ * plain 0x14 audio-only report, exactly as before. */
+typedef struct {
+    int      on;
+    uint8_t  r, g, b;
+    int      breaths;
+    int      solid;
+    long     ms;        /* how long the light lasts, from the first TONE report */
+    int      rumble;
+} ds4sig_visual_t;
+
+#define DS4SIG_VIS_PULSE_MS   250
+#define DS4SIG_VIS_PULSE_LVL  0x7f
+
 /* ⭐⭐ THE CONFIGURE REPORT, AND IT IS THE PIECE THAT WAS MISSING.
  *
  * rhoquinn8217, 2026-09-22: *"are you trying the primer method we did for
@@ -267,7 +342,8 @@ static void ds4sig_notes_for(int pattern,
  * rather than corrupt anything -- but "should" is doing work in that sentence
  * and nobody has listened to it yet. ⓘ The connect tone fires the instant a
  * bridge forms, which is the quietest moment available. */
-static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const char *node)
+static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const char *node,
+                          const ds4sig_visual_t *vis)
 {
     if (fd < 0) return -1;
 
@@ -321,7 +397,14 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     for (int i = 0; i < DS4SIG_GAP_FRAMES;   i++) frames[n++] = g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = second[i];
 
-    uint8_t rep[DS4SIG_REPORT_LEN];
+    /* ⓘ One buffer for either report: 0x15 is the larger of the two. */
+    uint8_t rep[DS4SIG_COMBO_LEN];
+    const int combo = (vis != NULL && vis->on) ? 1 : 0;
+    const size_t rep_len = combo ? (size_t)DS4SIG_COMBO_LEN : (size_t)DS4SIG_REPORT_LEN;
+    /* ⭐ The light starts when the NOTES do, not during the prime: the prime is
+     * silence, and a red flash over silence would arrive before the sound. */
+    const int prime_reports = prime_frames / DS4SIG_FRAMES_PER_REPORT;
+    int vis_done = 0;
     uint16_t counter = 0;
     int sent = 0, failed = 0, reports = 0;
     /* ⛔ TIMED, because `took 23953ms for 928ms of audio` on a bridged pad says
@@ -378,20 +461,64 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     for (int i = 0; i + DS4SIG_FRAMES_PER_REPORT <= n; i += DS4SIG_FRAMES_PER_REPORT) {
-        ds4sig_build(rep, counter, &frames[i]);
+        if (combo) {
+            /* Where the light is in its pattern, measured from the first tone
+             * report rather than from the start of the prime. */
+            const long at = (long)(reports - prime_reports) * (DS4SIG_PACE_US / 1000);
+            uint8_t claims = 0;
+            uint8_t motor = 0, lr = 0, lg = 0, lb = 0;
+            if (reports >= prime_reports && !vis_done) {
+                if (at >= vis->ms) {
+                    vis_done = 1;               /* one last dark report below */
+                } else {
+                    const int level = vis->solid ? 255
+                                                 : ds4_signal_breath(at, vis->ms, vis->breaths);
+                    claims = 0x02u;             /* DS4_OUT_LIGHT */
+                    lr = (uint8_t)((vis->r * level) / 255);
+                    lg = (uint8_t)((vis->g * level) / 255);
+                    lb = (uint8_t)((vis->b * level) / 255);
+                    if (vis->rumble && at < DS4SIG_VIS_PULSE_MS) {
+                        claims |= 0x01u;        /* DS4_OUT_MOTORS */
+                        motor = DS4SIG_VIS_PULSE_LVL;
+                    } else if (vis->rumble) {
+                        claims |= 0x01u;        /* claim it to send the STOP */
+                        motor = 0;
+                    }
+                }
+            }
+            ds4sig_build_combined(rep, counter, &frames[i], claims, motor,
+                                  lr, lg, lb, cfg_hp ? (uint8_t)cfg_hp : 0x4f,
+                                  cfg_sp ? (uint8_t)cfg_sp : 0x4f);
+        } else {
+            ds4sig_build(rep, counter, &frames[i]);
+        }
         counter = (uint16_t)(counter + DS4SIG_FRAMES_PER_REPORT);
         struct timespec wa, wb;
         clock_gettime(CLOCK_MONOTONIC, &wa);
-        const ssize_t w = write(fd, rep, sizeof rep);
+        const ssize_t w = write(fd, rep, rep_len);
         clock_gettime(CLOCK_MONOTONIC, &wb);
         const long wms = (long)((wb.tv_sec - wa.tv_sec) * 1000L +
                                 (wb.tv_nsec - wa.tv_nsec) / 1000000L);
         if (wms > worst_write_ms) worst_write_ms = wms;
         total_write_ms += wms;
-        if (w == (ssize_t)sizeof rep) sent++;
+        if (w == (ssize_t)rep_len) sent++;
         else failed++;
         reports++;
         ds4sig_wait_for(&t0, reports);
+    }
+
+    /* ⛔ THE PULSE AND THE LIGHT ALWAYS END WITH A STOP, however the stream
+     * ended -- a DS4's motors keep running until a report says otherwise, and
+     * nothing owns the lightbar after a refusal. ⓘ One more report of silence
+     * costs 8 ms and cannot leave a pad buzzing in the dark. */
+    if (combo) {
+        const uint8_t *quiet[DS4SIG_FRAMES_PER_REPORT];
+        for (int q = 0; q < DS4SIG_FRAMES_PER_REPORT; ++q) quiet[q] = g_ds4sig_silence;
+        ds4sig_build_combined(rep, counter, quiet,
+                              (uint8_t)(0x01u | 0x02u), 0, 0, 0, 0,
+                              cfg_hp ? (uint8_t)cfg_hp : 0x4f,
+                              cfg_sp ? (uint8_t)cfg_sp : 0x4f);
+        if (write(fd, rep, rep_len) == (ssize_t)rep_len) sent++; else failed++;
     }
 
     /* The decoder is warm only if the prime actually went out. */
@@ -442,7 +569,7 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
      * run says whether the drop fired rather than leaving it to be assumed. */
     ctm_controller_set_type_state(c, 3 /* DS4_SLOT_AUDIO_DROPPED */, 0);
     ctm_controller_set_type_state(c, 4 /* DS4_SLOT_HOST_SEEN */, 0);
-    return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path);
+    return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path, NULL);
 }
 
 /* ⭐⭐ A TONE ON A NODE THAT NO SESSION OWNS -- and after tonight this is the
@@ -462,49 +589,40 @@ int ds4_signal_tone_node(const char *node, int pattern)
     if (!node || !node[0]) return -1;
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    int rc = ds4sig_play_fd(fd, pattern, NULL, node);
+    int rc = ds4sig_play_fd(fd, pattern, NULL, node, NULL);
     close(fd);
     return rc;
 }
 
 int ds4_signal_refused_bt(const char *node)
 {
-    /* ⭐⭐ THE LIGHT FINISHES BEFORE THE TONE STARTS. IT IS NOT A STYLE
-     * CHOICE -- A SECOND WRITER COSTS NOTES.
+    /* ⭐⭐ ALL THREE IN ONE STREAM. The light, the pulse and the sinking pair
+     * of notes now ride the SAME reports (0x15), so they are simultaneous by
+     * construction and there is no second writer to race.
      *
-     * ⛔ Playing them together was tried on 2026-09-23 and REVERTED the same
-     * day. The light ran on its own thread with its own fd, so two writers hit
-     * one hidraw node with nothing ordering them. On the rooted monitor that
-     * measured 5 of 5 and looked finished. On an LG OLED83B4PUA it ate the
-     * refusal's first note two thirds of the time, and rhoquinn8217 heard it
-     * before any instrument was pointed at it.
+     * ⛔ Both earlier arrangements are recorded because both were wrong.
+     * Sequential (light finishes, then the tone) made a refusal 1.7 s long.
+     * Concurrent on its own thread and fd ate the first note two thirds of the
+     * time on an OLED83B4PUA, measured over 20 runs. ➡️ Neither is a timing
+     * problem: two writers to one hidraw node is the problem.
      *
-     * ⚠️ MEASURED ON THE B4, build 434, 20 runs, the first note's magnitude:
-     *
-     *     light off, rumble off   5 of 5 strong
-     *     light off, rumble on    4 of 5
-     *     light on,  rumble off   2 of 5
-     *     light on,  rumble on    1 of 5, then 2 of 5
-     *
-     * ⭐ The LIGHT is the cause and the rumble is not, which is what makes
-     * this a write-ordering fault rather than a power or a link-budget one. The
-     * core reported `116 sent, 0 failed` in every single run, so every frame
-     * left on time: the report that cuts in is what loses the note, not a frame
-     * we failed to send.
-     *
-     * ⓘ WHY A BRIDGE AND A RELEASE SURVIVE THE SAME OVERLAP. Their light
-     * goes through ds4_signal_play, on the controller's own serialised write
-     * path. There is one writer there, taking turns. Only a refusal has no
-     * controller (🔗 ds4_signal_light_pulse_node), which is what tempted a
-     * second fd in the first place.
-     *
-     * ➡️ So: the light and the pulse play FIRST and are finished -- stop
-     * write sent, fd closed -- before a single audio frame goes out. A refusal
-     * is about 1.7 s long because of it. That is the price, and a signal heard
-     * late beats a signal not heard. */
-    const int lrc = ds4_signal_light_pulse_node(node, 2 /* BTSIG_REFUSED */);
-    const int trc = ds4_signal_tone_node(node, 2);
-    ctl_log(NULL, "ds4sig: refusal light/pulse rc=%d (before), tone rc=%d -- node %s",
-            lrc, trc, node ? node : "?");
-    return trc;
+     * ⓘ A refusal has no controller, so the shape comes across the TU
+     * boundary from ds4_signal_shape_of. 🔗 ds4sig_build_combined for the
+     * layout and where it is sourced from. */
+    ds4sig_visual_t vis;
+    memset(&vis, 0, sizeof vis);
+    vis.on = 1;
+    vis.rumble = 1;
+    int solid = 0;
+    ds4_signal_shape_of(2 /* BTSIG_REFUSED */, &vis.r, &vis.g, &vis.b,
+                        &vis.breaths, &solid, &vis.ms);
+    vis.solid = solid;
+
+    if (!node || !node[0]) return -1;
+    const int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    const int rc = ds4sig_play_fd(fd, 2 /* BTSIG_REFUSED */, NULL, node, &vis);
+    close(fd);
+    ctl_log(NULL, "ds4sig: refusal all-in-one rc=%d -- node %s", rc, node ? node : "?");
+    return rc;
 }
