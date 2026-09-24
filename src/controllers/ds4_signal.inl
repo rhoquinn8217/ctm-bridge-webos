@@ -383,9 +383,35 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
      * delivery is PERFECT (`writes took 0ms`) and the release still went from
      * heard-regularly to hardly-ever. ➡️ The change did not buy what it claimed
      * and it cost the release, so it goes back. */
-    const int warm = ds4sig_is_warm(node) ? 1 : 0;
-    const int prime_frames = warm ? DS4SIG_PRIME_FRAMES
-                                  : (DS4SIG_PRIME_FRAMES * 3);
+    /* ⛔⛔ ALWAYS THE LONG PRIME. THE SHORT ONE IS THE LAST FAULT (2026-09-23).
+     *
+     * ⚠️ Yes, this file records "always long" being tried on 2026-09-22 and
+     * reverted. That reading was confounded: it predated the 0x15 combined
+     * report, so a second writer was eating notes at the same time, and it was
+     * judged without measuring each note. Both of those are fixed now, and the
+     * evidence this time is a rate rather than an impression:
+     *
+     *     signals ~30s apart, prime 450   release 15/15, bridge 13/15
+     *     signals ~7s apart,  prime 450   10 of 10
+     *     signals ~1-2s apart, prime 150  a silent handback and a bridge
+     *                                     that lost its second note, in 3 tries
+     *
+     * ⭐ rhoquinn8217's own ten-signal run is what found it. Their two
+     * silences came in a sequence fired 5 to 6 seconds apart, which is exactly
+     * where ds4sig_is_warm handed out the short prime -- and their ears caught a
+     * silent RELEASE that a 15-run harness at 30-second spacing had scored 15/15,
+     * because that spacing never took the short path at all.
+     *
+     * ⓘ The warm table stays, and is still marked, because it costs nothing
+     * and it is the honest record of when this pad last played. It just no
+     * longer decides the prime. ➡️ Every tone is 2.1 s now instead of 0.93 s.
+     * Correct and slow beats fast and silent, which this file said from the
+     * start. 🔗 DS4SIG_WARM_MS if a short path is ever wanted back: the one
+     * condition it measured well in was a REFUSAL 4 s after another refusal
+     * (5 of 5, 1% spread), so the gate would need to be far tighter than 5 s and
+     * to know which signal it is. */
+    const int prime_frames = DS4SIG_PRIME_FRAMES * 3;
+    (void) ds4sig_is_warm;
 
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
@@ -584,6 +610,17 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
  *
  * ➡️ So a bridge tone is played HERE, before the session opens, rather than
  * from inside a session that makes it impossible. */
+/* ⛔ ONE TONE AT A TIME. ds4_signal_tone_node opens the node and streams for
+ * two seconds with no claim on the controller, so nothing stopped two of them
+ * overlapping -- an auto-bridge firing into a handback, or a person bridging and
+ * releasing faster than a tone lasts. Two audio streams interleaved on one
+ * hidraw node is the same fault as a light report cutting in, and it produced a
+ * silent handback in 1 of 3 forced attempts on 2026-09-23.
+ * ⓘ A plain mutex rather than a try-lock: a confirmation that waits its turn
+ * is still a confirmation, and both tones are wanted. ⚠️ Held across the
+ * whole play, so it must never be taken by anything that can block on the pad. */
+static pthread_mutex_t g_ds4sig_tone_lock = PTHREAD_MUTEX_INITIALIZER;
+
 int ds4_signal_tone_node(const char *node, int pattern)
 {
     /* ⭐⭐ THE LIGHT AND THE PULSE TRAVEL WITH THE TONE, on every pattern.
@@ -621,10 +658,12 @@ int ds4_signal_tone_node(const char *node, int pattern)
         ds4_signal_shape_of(pattern, &vis.r, &vis.g, &vis.b, &vis.breaths, &solid, &vis.ms);
         vis.solid = solid;
     }
+    pthread_mutex_lock(&g_ds4sig_tone_lock);
     int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0) { pthread_mutex_unlock(&g_ds4sig_tone_lock); return -1; }
     int rc = ds4sig_play_fd(fd, pattern, NULL, node, lit ? &vis : NULL);
     close(fd);
+    pthread_mutex_unlock(&g_ds4sig_tone_lock);
     return rc;
 }
 
@@ -653,10 +692,12 @@ int ds4_signal_refused_bt(const char *node)
     vis.solid = solid;
 
     if (!node || !node[0]) return -1;
+    pthread_mutex_lock(&g_ds4sig_tone_lock);   /* 🔗 one tone at a time */
     const int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0) { pthread_mutex_unlock(&g_ds4sig_tone_lock); return -1; }
     const int rc = ds4sig_play_fd(fd, 2 /* BTSIG_REFUSED */, NULL, node, &vis);
     close(fd);
+    pthread_mutex_unlock(&g_ds4sig_tone_lock);
     ctl_log(NULL, "ds4sig: refusal all-in-one rc=%d -- node %s", rc, node ? node : "?");
     return rc;
 }
