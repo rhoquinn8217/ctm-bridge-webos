@@ -90,16 +90,47 @@ static uint32_t micsafe_crc32(const uint8_t *p, size_t n)
     return crc ^ 0xffffffffu;
 }
 
-/* Tell one controller to stop streaming microphone audio.
+/* A DualSense or a DualSense Edge, the only pads this report means anything to.
+ * ⓘ Through a DS5 dongle the node still carries the pad's own ids. */
+static bool micsafe_is_dualsense(unsigned vid, unsigned pid)
+{
+    return vid == 0x054c && (pid == 0x0ce6 || pid == 0x0df2);
+}
+
+#define MICSAFE_SENT      0
+#define MICSAFE_FAILED   -1
+#define MICSAFE_SKIPPED   1
+
+/* Tell one controller to stop streaming microphone audio. Returns MICSAFE_SENT,
+ * MICSAFE_SKIPPED for a node that is not a DualSense, or MICSAFE_FAILED.
  *
  * Takes a device node rather than anything session-shaped: this runs before
  * SDL exists at startup, and from the input path when a session may be in an
- * unknown state. */
+ * unknown state.
+ *
+ * ⛔⛔ DUALSENSE NODES ONLY (rhoquinn8217, 2026-09-16). This is a DualSense
+ * Bluetooth output report, and the startup sweep used to write it to every
+ * node it could open: on the rooted LG monitor that was a keyboard dongle's two
+ * nodes, two Xbox pads, a GameSir and a Pro Controller, with no DualSense among
+ * them. ➡️ The ids come from HIDIOCGRAWINFO, which asks the kernel and sends
+ * nothing to the device, so checking costs none of the intrusion the write
+ * itself was chosen to avoid. */
 static int micsafe_disarm_node(const char *node)
 {
-    if (!node || !node[0]) return -1;
+    if (!node || !node[0]) return MICSAFE_FAILED;
     int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0) return MICSAFE_FAILED;
+
+    struct hidraw_devinfo info;
+    memset(&info, 0, sizeof(info));
+    if (ioctl(fd, HIDIOCGRAWINFO, &info) < 0) {
+        close(fd);
+        return MICSAFE_FAILED;
+    }
+    if (!micsafe_is_dualsense((unsigned short)info.vendor, (unsigned short)info.product)) {
+        close(fd);
+        return MICSAFE_SKIPPED;
+    }
 
     uint8_t pkt[MICSAFE_PKT_LEN];
     memset(pkt, 0, sizeof(pkt));
@@ -120,7 +151,7 @@ static int micsafe_disarm_node(const char *node)
 
     ssize_t rc = write(fd, pkt, sizeof(pkt));
     close(fd);
-    return (rc == (ssize_t)sizeof(pkt)) ? 0 : -1;
+    return (rc == (ssize_t)sizeof(pkt)) ? MICSAFE_SENT : MICSAFE_FAILED;
 }
 
 /* ⭐⭐ SILENCE EVERY CONTROLLER BEFORE SDL OPENS ANY OF THEM.
@@ -133,19 +164,22 @@ static int micsafe_disarm_node(const char *node)
  * ⚠️ MUST RUN BEFORE SDL_Init's controller subsystem. Called from one place at
  * startup; moving that call later would quietly remove the protection.
  *
- * Cheap and blind by design: it writes to every hidraw node it can open. A
- * node that is not a DualSense ignores a report it does not recognise, and
- * asking politely first would mean opening devices to interrogate them, which
- * is more intrusive than the write itself. */
+ * Cheap by design: it opens every hidraw node and writes to each DualSense
+ * among them. ⛔ It used to write to every node, on the reasoning that asking
+ * first meant interrogating devices; the kernel's ids ask nothing of the device
+ * (see micsafe_disarm_node). */
 void ctm_mic_safety_disarm_all_reason(const char *why)
 {
-    int silenced = 0;
+    int silenced = 0, skipped = 0;
     for (int i = 0; i < 16; ++i) {
         char node[32];
         snprintf(node, sizeof(node), "/dev/hidraw%d", i);
-        if (micsafe_disarm_node(node) == 0) ++silenced;
+        const int rc = micsafe_disarm_node(node);
+        if (rc == MICSAFE_SENT) ++silenced;
+        else if (rc == MICSAFE_SKIPPED) ++skipped;
     }
-    micsafe_log("sent microphone-off to %d device(s) -- %s", silenced, why);
+    micsafe_log("sent microphone-off to %d DualSense(s), skipped %d other device(s) -- %s",
+                silenced, skipped, why);
 }
 
 /* The startup call. Named separately so the log says which of the two
