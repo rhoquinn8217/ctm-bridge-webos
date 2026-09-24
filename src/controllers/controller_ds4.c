@@ -781,6 +781,15 @@ static void *ds4_connected_thread(void *arg)
  * plug-out cannot close the node under it -- see controller_signal_begin. */
 static void ds4_signal_connected(ctm_controller_t *c)
 {
+    /* ⛔ NOT ON BLUETOOTH: THE TONE CARRIES THE LIGHT NOW (build 438).
+     * 🔗 ds4_signal_tone_node. Drawing it from here as well means two writers
+     * on one hidraw node, which measured 2 of 10 bridges losing their second
+     * note on an OLED83B4PUA. A cable keeps this path: there the tone goes to a
+     * sound card and the light has to come from somewhere. */
+    if (ds4_is_bt(c)) {
+        ctl_log(c, "signal: connected -- light and pulse ride the tone on Bluetooth, not drawn here");
+        return;
+    }
     if (!ds4_signal_drives()) {
         ctl_log(c, "signal: connected -- light and rumble are switched off, nothing played");
         return;

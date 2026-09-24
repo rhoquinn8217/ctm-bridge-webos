@@ -586,10 +586,41 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
  * from inside a session that makes it impossible. */
 int ds4_signal_tone_node(const char *node, int pattern)
 {
+    /* ⭐⭐ THE LIGHT AND THE PULSE TRAVEL WITH THE TONE, on every pattern.
+     *
+     * ⚠️ MEASURED ON AN OLED83B4PUA, build 437, ten runs in a verified-quiet
+     * room: the RELEASE was clean 10 of 10 and the BRIDGE lost its second note
+     * 2 of 10. rhoquinn8217 called where to look -- *"test bridge tones while
+     * the controller is bridging because that's when a lot of things are
+     * happening"* -- and it is the same two-writer fault as the refusal: the
+     * tone goes out as 0x14 from ui_bridge.c while the controller writes its
+     * 700ms green as 0x11 from another thread.
+     * ➡️ One report carries both now, so there is nothing to race.
+     *
+     * ⛔ The controller's own light is SUPPRESSED for a Bluetooth DS4 to
+     * match (🔗 ds4_signal_connected). Leaving it would draw the pattern
+     * twice from two writers, which is the fault, not a belt and braces. */
     if (!node || !node[0]) return -1;
+    /* ⛔ THE HANDBACK IS LEFT ALONE, and deliberately. Its light is drawn by
+     * ds4_signal_unplugging at the RELEASE REQUEST, about 1.1 s before this tone
+     * plays -- so the two never overlap, and the release measured 10 of 10 on
+     * the B4 while the bridge measured 8. ➡️ Only the case that is broken
+     * changes. ⓘ The cost is that a handback's light and tone still arrive
+     * apart; closing that means moving the light after teardown, which delays
+     * the visible answer to a release, and that is rhoquinn8217's call. */
+    const int lit = (pattern != 1 /* BTSIG_HANDED_BACK */);
+    ds4sig_visual_t vis;
+    memset(&vis, 0, sizeof vis);
+    if (lit) {
+        vis.on = 1;
+        vis.rumble = 1;
+        int solid = 0;
+        ds4_signal_shape_of(pattern, &vis.r, &vis.g, &vis.b, &vis.breaths, &solid, &vis.ms);
+        vis.solid = solid;
+    }
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    int rc = ds4sig_play_fd(fd, pattern, NULL, node, NULL);
+    int rc = ds4sig_play_fd(fd, pattern, NULL, node, lit ? &vis : NULL);
     close(fd);
     return rc;
 }
