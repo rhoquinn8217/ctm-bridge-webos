@@ -620,6 +620,39 @@ int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
  * is still a confirmation, and both tones are wanted. ⚠️ Held across the
  * whole play, so it must never be taken by anything that can block on the pad. */
 static pthread_mutex_t g_ds4sig_tone_lock = PTHREAD_MUTEX_INITIALIZER;
+static long long g_ds4sig_last_end_ms;
+
+/* ⭐⭐ TAKE A TURN, AND WAIT A MOMENT IF THE LAST TONE ONLY JUST STOPPED.
+ *
+ * ⚠️ Once the mutex stopped two tones overlapping, the second one began about
+ * 0.1 s after the first one's audio ended -- and about a fifth of signals fired
+ * a second apart still lost a note on an OLED83B4PUA, every one of them with
+ * `sent=267 failed=0`. So the frames all went out on time and the loss is inside
+ * the pad. ➡️ The hypothesis: its decoder needs a moment after a stream ENDS
+ * before it will start another, the same way it needs a prime when cold.
+ * ⓘ ctm_tone_gap_ms() is 0 by default, so this does nothing until it is set
+ * from the control port. That is deliberate: the baseline has to stay comparable
+ * while the value is swept. */
+static void ds4sig_tone_begin(void)
+{
+    pthread_mutex_lock(&g_ds4sig_tone_lock);
+    const int gap = ctm_tone_gap_ms();
+    if (gap > 0 && g_ds4sig_last_end_ms > 0) {
+        const long long since = ds4sig_now_ms() - g_ds4sig_last_end_ms;
+        if (since >= 0 && since < (long long)gap) {
+            const long wait = (long)((long long)gap - since);
+            struct timespec nap = { wait / 1000, (wait % 1000) * 1000000L };
+            nanosleep(&nap, NULL);
+        }
+    }
+}
+
+static void ds4sig_tone_end(void)
+{
+    g_ds4sig_last_end_ms = ds4sig_now_ms();
+    pthread_mutex_unlock(&g_ds4sig_tone_lock);
+}
+
 
 int ds4_signal_tone_node(const char *node, int pattern)
 {
@@ -658,12 +691,12 @@ int ds4_signal_tone_node(const char *node, int pattern)
         ds4_signal_shape_of(pattern, &vis.r, &vis.g, &vis.b, &vis.breaths, &solid, &vis.ms);
         vis.solid = solid;
     }
-    pthread_mutex_lock(&g_ds4sig_tone_lock);
+    ds4sig_tone_begin();
     int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) { pthread_mutex_unlock(&g_ds4sig_tone_lock); return -1; }
+    if (fd < 0) { ds4sig_tone_end(); return -1; }
     int rc = ds4sig_play_fd(fd, pattern, NULL, node, lit ? &vis : NULL);
     close(fd);
-    pthread_mutex_unlock(&g_ds4sig_tone_lock);
+    ds4sig_tone_end();
     return rc;
 }
 
@@ -692,12 +725,12 @@ int ds4_signal_refused_bt(const char *node)
     vis.solid = solid;
 
     if (!node || !node[0]) return -1;
-    pthread_mutex_lock(&g_ds4sig_tone_lock);   /* 🔗 one tone at a time */
+    ds4sig_tone_begin();   /* 🔗 one tone at a time, and not too soon after the last */
     const int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) { pthread_mutex_unlock(&g_ds4sig_tone_lock); return -1; }
+    if (fd < 0) { ds4sig_tone_end(); return -1; }
     const int rc = ds4sig_play_fd(fd, 2 /* BTSIG_REFUSED */, NULL, node, &vis);
     close(fd);
-    pthread_mutex_unlock(&g_ds4sig_tone_lock);
+    ds4sig_tone_end();
     ctl_log(NULL, "ds4sig: refusal all-in-one rc=%d -- node %s", rc, node ? node : "?");
     return rc;
 }

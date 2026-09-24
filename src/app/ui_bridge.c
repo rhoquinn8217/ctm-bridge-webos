@@ -500,21 +500,20 @@ void stop_session(const char *key)
      * plays at the same time the light pattern starts"*.
      *
      * ➡️ It now goes out as soon as the controller is destroyed, before the
-     * agent is told. ⓘ A settle first, because the release tone went missing
+     * agent is told. ⓘ The release tone used to go missing entirely
      * ENTIRELY in about a quarter of runs on an OLED83B4PUA -- the whole tone,
      * not one note -- which reads as a link still busy rather than a raced
-     * write. ctm_handback_settle_ms() is settable from the control port so the
+     * write. ctm_tone_gap_ms() is settable from the control port so the
      * right value can be found by measurement rather than by guess.
      *
      * ⓘ The light rides these same reports now (🔗 ds4_signal_tone_node), so
      * the two start together by construction rather than by timing. */
     long settle_ms = 0, tone_ms = 0, stop_ms = 0;
     if (node[0] && strstr(busid, "-ds4-") != NULL) {
-        const int settle = ctm_handback_settle_ms();
-        if (settle > 0) {
-            struct timespec nap = { settle / 1000, (long)(settle % 1000) * 1000000L };
-            nanosleep(&nap, NULL);
-        }
+        /* ⓘ No settle at this point any more: it measured unnecessary here
+         * (15 of 15 with it at 0, once the tone moved before BRIDGE_STOP). The
+         * knob moved into the tone player as a minimum gap BETWEEN tones, which
+         * is where the failures that are left actually are. 🔗 ctm_tone_gap_ms. */
         clock_gettime(CLOCK_MONOTONIC, &tc);
         settle_ms = CTM_MS(tb, tc);
         const int trc = ds4_signal_tone_node(node, 1 /* BTSIG_HANDED_BACK */);

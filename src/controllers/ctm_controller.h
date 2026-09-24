@@ -414,9 +414,9 @@ void ctm_input_set_held(int held);
  * ⓘ All default ON, so a core told nothing behaves as it always has. */
 void ctm_signals_set_enabled(int light, int rumble, int tone);
 
-/* The settle before a handback tone, in ms. 🔗 ctm_handback_settle_set_ms. */
-void ctm_handback_settle_set_ms(int ms);
-int  ctm_handback_settle_ms(void);
+/* The settle before a handback tone, in ms. 🔗 ctm_tone_gap_set_ms. */
+void ctm_tone_gap_set_ms(int ms);
+int  ctm_tone_gap_ms(void);
 /* Is the felt pulse allowed right now? For a type that confirms with a rumble
  * of its own rather than the DualSense signal. */
 int signals_rumble_on(void);
