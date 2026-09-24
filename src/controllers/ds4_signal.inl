@@ -101,6 +101,71 @@
  * note says means headphones-stereo -- silent with no headset plugged. */
 #define DS4SIG_ROUTE         0x02
 
+/* ⭐⭐ WARM, NOT "PRIMED ONCE". A DS4's decoder COOLS.
+ *
+ * ⛔ The old rule was a permanent flag: long prime the first time a node is
+ * seen, short prime forever after. That is wrong about the hardware, and this
+ * file already said so before it was measured -- *"Primed once is not a
+ * property that LASTS on a DS4."*
+ *
+ * ⚠️ MEASURED ON AN LG OLED83B4PUA, build 435, 2026-09-23. The same pad,
+ * the same short prime (150) and `116 sent, 0 failed` EVERY time. What changed
+ * was only how long the pad had been silent beforehand:
+ *
+ *     idle ~2s    495 Hz peak ~2850, spread 1%,  both notes 5 of 5
+ *     idle ~15s   495 Hz peak ~2700,             both notes 5 of 5
+ *     idle ~30s   495 Hz peak ~1500,             both notes 9 of 10
+ *
+ * ⭐ So a cold decoder does not simply drop a note -- it plays it at about
+ * HALF level, and sometimes not at all. Reliability tracks time since the last
+ * tone and nothing else we control.
+ *
+ * ➡️ Hence a TIMESTAMP rather than a flag: the short prime only when this
+ * pad played a tone within DS4SIG_WARM_MS, the long one otherwise. A person
+ * bridging and releasing in one gesture pays the short lead-in; a refusal out
+ * of the blue pays the long one, which is when it is needed.
+ * ⓘ Torn reads are possible without a lock and are harmless: a miss picks
+ * the LONG prime, which is the safe way to be wrong. */
+#define DS4SIG_WARM_MS   5000
+#define DS4SIG_WARM_MAX  8
+
+static struct { char key[40]; long long at_ms; } g_ds4sig_warm[DS4SIG_WARM_MAX];
+static int g_ds4sig_warm_n;
+
+static long long ds4sig_now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000LL + (long long)(t.tv_nsec / 1000000L);
+}
+
+static bool ds4sig_is_warm(const char *key)
+{
+    if (!key || !key[0]) return false;   /* unknown: prime long */
+    const long long now = ds4sig_now_ms();
+    for (int i = 0; i < g_ds4sig_warm_n; ++i) {
+        if (strcmp(g_ds4sig_warm[i].key, key) == 0) {
+            return (now - g_ds4sig_warm[i].at_ms) <= DS4SIG_WARM_MS;
+        }
+    }
+    return false;
+}
+
+static void ds4sig_mark_warm(const char *key)
+{
+    if (!key || !key[0]) return;
+    const long long now = ds4sig_now_ms();
+    for (int i = 0; i < g_ds4sig_warm_n; ++i) {
+        if (strcmp(g_ds4sig_warm[i].key, key) == 0) { g_ds4sig_warm[i].at_ms = now; return; }
+    }
+    if (g_ds4sig_warm_n < DS4SIG_WARM_MAX) {
+        snprintf(g_ds4sig_warm[g_ds4sig_warm_n].key,
+                 sizeof g_ds4sig_warm[0].key, "%s", key);
+        g_ds4sig_warm[g_ds4sig_warm_n].at_ms = now;
+        ++g_ds4sig_warm_n;
+    }
+}
+
 /* The DualSense's pacer, at this pad's rate. Absolute deadlines rather than a
  * sleep per report, for the reason written out beside btsig_wait_for: a
  * fixed sleep accumulates the write time and the decoder runs dry, which is
@@ -242,9 +307,9 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
      * delivery is PERFECT (`writes took 0ms`) and the release still went from
      * heard-regularly to hardly-ever. ➡️ The change did not buy what it claimed
      * and it cost the release, so it goes back. */
-    const int primed = btsig_is_primed(node);
-    const int prime_frames = primed ? DS4SIG_PRIME_FRAMES
-                                    : (DS4SIG_PRIME_FRAMES * 3);
+    const int warm = ds4sig_is_warm(node) ? 1 : 0;
+    const int prime_frames = warm ? DS4SIG_PRIME_FRAMES
+                                  : (DS4SIG_PRIME_FRAMES * 3);
 
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
@@ -330,7 +395,7 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     }
 
     /* The decoder is warm only if the prime actually went out. */
-    if (prime_frames > 0 && failed == 0) btsig_mark_primed(node);
+    if (prime_frames > 0 && failed == 0) ds4sig_mark_warm(node);
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
