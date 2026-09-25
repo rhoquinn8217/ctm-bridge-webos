@@ -1,119 +1,73 @@
 # CTM Bridge Test
 
-> **This is the one bridge project for the TV side** — both the standalone
-> webOS app *and* the embeddable core: the
-> [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
-> [moonlight-tv](https://github.com/CTM-Bridge/moonlight-tv) forks compile
-> their `ctmbridge` lib straight from these sources. To build either fork,
-> clone this repo **as a sibling directory** (the forks' CMake default), or
-> point `-DCTM_BRIDGE_DIR=<path>` at it.
+> **A fork of [CTM Bridge](https://github.com/CTM-Bridge/ctm-bridge-webos) by
+> Ciprian Teodor Misaila.**
+>
+> What CTM Bridge is, how the television and the Windows host divide the work,
+> the TCP protocol between them and the design philosophy behind it are all his.
+> They are documented in
+> [the upstream README](https://github.com/CTM-Bridge/ctm-bridge-webos#readme)
+> and this page does not repeat them. Read that first.
 
-Native webOS POC app for the CTM TCP bridge.
+## What this fork is for
 
-The package also installs `ctm_usbipd_webos`, a separate pure USB/IP exporter
-for devices physically plugged into the TV. It does not use the CTM TCP bridge.
+This fork exists to serve one thing: the
+[aurora-tv fork](https://github.com/rhoquinn8217/aurora-tv) beside it. That app
+compiles its `ctmbridge` library straight from these sources rather than linking a
+prebuilt one, so the two move together and a change here reaches the app on its
+next build.
 
-Philosophy:
+To build the app, clone this repo **as a sibling directory** — that is where its
+CMake looks — or point `-DCTM_BRIDGE_DIR=<path>` at wherever you put it.
 
-- webOS owns only the physical HID point: hidraw open/read/write, raw feature get/set execution requested by Windows, and local output pacing.
-- Windows CTM owns the map runtime and all USB-to-BT report translation.
-- The TCP protocol carries complete raw HID reports plus small metadata.
-- The app grabs matching `/dev/input/event*` nodes with `EVIOCGRAB` so the DS5 does not also drive webOS UI controls such as volume.
-- Controller input runs on its own hidraw reader thread with a 1 ms poll cadence and drains available reports. For the current latency test, exact duplicate reports are counted but still sent to Windows; output/audio pacing and feature requests stay on the main bridge loop.
+The standalone webOS app in this repo is `ctm_bridge_lvgl_ui`, installed as
+**CTM Device Bridge**. It carries a DualSense or DualSense Edge from the
+television to a Windows host.
 
-Default runtime:
+## Build
 
-```sh
-ctm_bridge_test
-```
+The `ctmbridge` core is **not built on its own**: whatever embeds it compiles
+these sources, so building the core means building the app that carries it.
+➡️ **See the [aurora-tv fork's build instructions](https://github.com/rhoquinn8217/aurora-tv#build)**,
+which cover the Docker build and the sibling checkout this repo has to sit in.
 
-Built-in defaults are `host=192.168.0.200`, `port=48055`, Sony vendor `vid=0x054c`, known Sony controller products, `bt_address=a0:fa:9c:26:ac:d4`, and `any_hid=0` for the current POC network. Stale config `any_hid` is ignored, LG vendor `0x005d` is rejected, Luna `device/getStatus` is used for DualSense addresses, and Bluetooth `stopSniff` is sent before/after opening the controller. A small SDL status UI shows connection state, controller path, evdev grab count, 5-second input profiler rates, feature failures, output failures, and paced queue depth.
+### The standalone app
 
-Config can also be supplied through:
+⚠️ **Last verified July 2026.** The app's own sources have moved on since —
+`CMakeLists.txt` and the UI both changed in September — while these scripts have
+not, so treat them as a starting point rather than a guarantee. The core is built
+through the aurora-tv fork above, which is the path in daily use.
 
-```text
-CTM_BRIDGE_HOST
-CTM_BRIDGE_PORT
-CTM_BRIDGE_HID
-CTM_BRIDGE_BT_ADDRESS
-CTM_BRIDGE_ANY_HID
-```
-
-or `/tmp/ctm-bridge-test.conf` / app-directory `test.conf`:
-
-```ini
-host=192.168.1.23
-port=48055
-path=/dev/hidraw2
-bt_address=a0:fa:9c:26:ac:d4
-vid=0x054c
-pid=0x0ce6
-any_hid=0
-```
-
-Build:
+`ctm_bridge_lvgl_ui` is packaged with the webOS SDK scripts here:
 
 ```sh
 scripts/build_ipk_macos.sh
 ```
 
-Windows 11 build:
-
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_ipk_windows.ps1
 ```
 
-Preferred Windows-hosted build through WSL:
+The Windows script installs missing `cmake`/`ninja` with Chocolatey unless
+`-NoInstallPrereqs` is passed, and auto-detects a Beanviser-bundled
+`ares-package.cmd` when Beanviser sits beside this project. Pass `-AresPackage`
+and `-ToolchainFile` if the SDK/NDK is somewhere unusual, or
+`-WebOsSdkInstaller` to let the script run an installer and re-detect.
 
-```powershell
-wsl -- bash -lc "cd '/mnt/d/Work/CMU/ctm-bridge-test-webos' && WORK_DIR=/tmp/ctm-bridge-test-webos-build SDK=\$HOME/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot bash ./scripts/build_ipk_macos.sh"
-```
-
-The Windows script auto-installs missing `cmake`/`ninja` with Chocolatey when needed. Use `-NoInstallPrereqs` to disable that behavior.
-It also auto-detects the Beanviser-bundled `ares-package.cmd` when Beanviser is next to this project in the workspace.
-
-If the webOS SDK/NDK is not in a standard location, pass paths explicitly:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_ipk_windows.ps1 `
-  -AresPackage "C:\webOS_TV_SDK\CLI\bin\ares-package.cmd" `
-  -ToolchainFile "C:\webos-sdk\arm-webos-linux-gnueabi_sdk-buildroot\share\buildroot\toolchainfile.cmake"
-```
-
-If you have a local webOS SDK installer, the script can run it and re-detect the CLI/toolchain:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_ipk_windows.ps1 `
-  -WebOsSdkInstaller "C:\path\to\webOS_TV_SDK_Installer.exe"
-```
-
-Required macOS/Linux host tools: `cmake`, `cpack`, `ares-package`, `rsync`, `pkg-config`, SDL2, SDL2_ttf, and the webOS SDK toolchain.
-
-Required Windows host tools: `cmake`, `cpack`, `ninja`, `ares-package`, SDL2/SDL2_ttf for the target toolchain, and the webOS native SDK/NDK toolchain.
-Beanviser includes the webOS Ares packaging CLI, but not the native SDK/NDK compiler toolchain.
-
-Pure USB/IP exporter:
-
-```sh
-/media/developer/apps/usr/palm/applications/com.local.ctmbridge/bin/ctm_usbipd_webos --list
-/media/developer/apps/usr/palm/applications/com.local.ctmbridge/bin/ctm_usbipd_webos --port 3240
-```
-
-From Windows, attach a listed TV bus id:
-
-```powershell
-& "C:\Program Files\USBip\usbip.exe" list -r <tv-ip>
-& "C:\Program Files\USBip\usbip.exe" attach -r <tv-ip> -b <busid>
-```
+Host tools: `cmake`, `cpack`, `ares-package`, SDL2, SDL2_ttf and the webOS
+SDK/NDK toolchain, plus `rsync` and `pkg-config` on macOS and Linux and `ninja`
+on Windows. Beanviser ships the Ares packaging CLI but not the compiler
+toolchain.
 
 ## License
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0-or-later).
 Copyright (C) 2026 Ciprian Teodor Misaila.
 
-Not a license term, just a friendly ask: if you integrate CTM Bridge into your
-own app or fork, please overlay the CTM Bridge badge on your app's icon — the
-way the [aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
+Not a license term, just a friendly ask from upstream: if you integrate CTM
+Bridge into your own app or fork, please overlay the CTM Bridge badge on your
+app's icon — the way the
+[aurora-tv](https://github.com/CTM-Bridge/aurora-tv) and
 [moonlight-tv](https://github.com/CTM-Bridge/moonlight-tv) forks do:
 
 <a href="https://github.com/CTM-Bridge/ctm-bridge-webos/blob/main/icon_extra_large.png"><img src="https://raw.githubusercontent.com/CTM-Bridge/ctm-bridge-webos/main/icon_extra_large.png" width="96" alt="CTM Bridge badge"></a>&nbsp;&nbsp;→&nbsp;&nbsp;<img src="https://raw.githubusercontent.com/CTM-Bridge/aurora-tv/main/deploy/webos/icon.png" width="96" alt="Aurora icon with the badge">&nbsp;<img src="https://raw.githubusercontent.com/CTM-Bridge/moonlight-tv/main/deploy/webos/icon.png" width="96" alt="Moonlight TV icon with the badge">
