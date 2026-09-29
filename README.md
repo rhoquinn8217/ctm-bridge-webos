@@ -12,7 +12,7 @@
 ## What this fork is for
 
 This fork exists to serve one thing: the
-[aurora-tv fork](https://github.com/rhoquinn8217/aurora-tv) beside it. That app
+[rhoquinn8217/aurora-tv](https://github.com/rhoquinn8217/aurora-tv) beside it. That app
 compiles its `ctmbridge` library straight from these sources rather than linking a
 prebuilt one, so the two move together and a change here reaches the app on its
 next build.
@@ -28,7 +28,7 @@ television to a Windows host.
 
 The `ctmbridge` core is **not built on its own**: whatever embeds it compiles
 these sources, so building the core means building the app that carries it.
-➡️ **See the [aurora-tv fork's build instructions](https://github.com/rhoquinn8217/aurora-tv#build)**,
+➡️ **See the [rhoquinn8217/aurora-tv's build instructions](https://github.com/rhoquinn8217/aurora-tv#build)**,
 which cover the Docker build and the sibling checkout this repo has to sit in.
 
 ### The standalone app
@@ -36,7 +36,7 @@ which cover the Docker build and the sibling checkout this repo has to sit in.
 ⚠️ **Last verified July 2026.** The app's own sources have moved on since —
 `CMakeLists.txt` and the UI both changed in September — while these scripts have
 not, so treat them as a starting point rather than a guarantee. The core is built
-through the aurora-tv fork above, which is the path in daily use.
+through rhoquinn8217/aurora-tv above, which is the path in daily use.
 
 `ctm_bridge_lvgl_ui` is packaged with the webOS SDK scripts here:
 
