@@ -72,16 +72,16 @@ int main(void)
     ok(l.keys_count == 6, "six keys");
     ok(l.report_len == 8, "an eight-byte report");
 
-    uint8_t r[8] = {0x01 | 0x04 | 0x02, 0, 0x12, 0, 0, 0, 0, 0};   /* LCtrl LAlt LShift + o */
-    ok(kbd_overlay_chord_down(&l, r, sizeof(r)), "left Ctrl, Alt and Shift with O");
-    uint8_t right[8] = {0x10 | 0x40 | 0x20, 0, 0, 0, 0x12, 0, 0, 0};
-    ok(kbd_overlay_chord_down(&l, right, sizeof(right)), "right Ctrl, Alt and Shift, O in a later slot");
-    uint8_t no_alt[8] = {0x01 | 0x02, 0, 0x12, 0, 0, 0, 0, 0};
+    uint8_t r[8] = {0x01 | 0x04 | 0x02, 0, 0x16, 0, 0, 0, 0, 0};   /* LCtrl LAlt LShift + s */
+    ok(kbd_overlay_chord_down(&l, r, sizeof(r)), "left Ctrl, Alt and Shift with S");
+    uint8_t right[8] = {0x10 | 0x40 | 0x20, 0, 0, 0, 0x16, 0, 0, 0};
+    ok(kbd_overlay_chord_down(&l, right, sizeof(right)), "right Ctrl, Alt and Shift, S in a later slot");
+    uint8_t no_alt[8] = {0x01 | 0x02, 0, 0x16, 0, 0, 0, 0, 0};
     ok(!kbd_overlay_chord_down(&l, no_alt, sizeof(no_alt)), "not without Alt");
-    uint8_t just_o[8] = {0, 0, 0x12, 0, 0, 0, 0, 0};
-    ok(!kbd_overlay_chord_down(&l, just_o, sizeof(just_o)), "not O alone");
-    uint8_t other[8] = {0x07, 0, 0x16, 0, 0, 0, 0, 0};   /* s, which Moonlight uses */
-    ok(!kbd_overlay_chord_down(&l, other, sizeof(other)), "not another letter");
+    uint8_t just_s[8] = {0, 0, 0x16, 0, 0, 0, 0, 0};
+    ok(!kbd_overlay_chord_down(&l, just_s, sizeof(just_s)), "not S alone");
+    uint8_t other[8] = {0x07, 0, 0x12, 0, 0, 0, 0, 0};   /* o, which was the shortcut until 2026-10-01 */
+    ok(!kbd_overlay_chord_down(&l, other, sizeof(other)), "not O any more, nor any other letter");
     ok(!kbd_overlay_chord_down(&l, r, 2), "not a report too short for the keys");
 
     uint8_t rel[8];
@@ -96,9 +96,9 @@ int main(void)
     ok(l.mod_offset == 1, "modifiers after the id byte");
     ok(l.keys_offset == 3, "keys after the id and the reserved byte");
     ok(l.report_len == 9, "a nine-byte report, id counted");
-    uint8_t r2[9] = {0x02, 0x07, 0, 0x12, 0, 0, 0, 0, 0};
+    uint8_t r2[9] = {0x02, 0x07, 0, 0x16, 0, 0, 0, 0, 0};
     ok(kbd_overlay_chord_down(&l, r2, sizeof(r2)), "the shortcut in report 2");
-    uint8_t r1[9] = {0x01, 0x07, 0, 0x12, 0, 0, 0, 0, 0};
+    uint8_t r1[9] = {0x01, 0x07, 0, 0x16, 0, 0, 0, 0, 0};
     ok(!kbd_overlay_chord_down(&l, r1, sizeof(r1)), "not in the consumer report 1");
     kbd_released_report(&l, r2, sizeof(r2));
     ok(r2[0] == 0x02 && r2[1] == 0 && r2[3] == 0, "released: the id kept, the rest cleared");
@@ -106,7 +106,7 @@ int main(void)
     printf("=== a mouse ===\n");
     ok(!kbd_layout_from_descriptor(k_mouse, sizeof(k_mouse), &l), "no keyboard");
     ok(!l.present, "nothing present");
-    uint8_t m[3] = {0x07, 0x12, 0x12};
+    uint8_t m[3] = {0x07, 0x16, 0x16};
     ok(!kbd_overlay_chord_down(&l, m, sizeof(m)), "never a shortcut");
 
     printf("=== nothing ===\n");

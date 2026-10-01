@@ -2535,7 +2535,7 @@ static void *input_thread_main(void *arg)
                     exit(1);
                 }
                 /* ⭐⭐ A BRIDGED KEYBOARD: THE OVERLAY'S SHORTCUT, AND THE TV'S TURN.
-                 * rhoquinn8217, 2026-09-13: Ctrl+Alt+Shift+O opens the streaming
+                 * rhoquinn8217, 2026-09-13: Ctrl+Alt+Shift+S opens the streaming
                  * overlay bridged or not. The grab keeps these keys from the
                  * app, so the shortcut is found here; the report that completes
                  * it goes to the host with nothing pressed, and so does every

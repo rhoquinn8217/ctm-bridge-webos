@@ -1,5 +1,11 @@
-/* The streaming overlay's keyboard shortcut, Ctrl+Alt+Shift+O, found in a
+/* The streaming overlay's keyboard shortcut, Ctrl+Alt+Shift+S, found in a
  * bridged keyboard's own reports.
+ *
+ * ⓘ S, and only S, since 2026-10-01. It is Moonlight's stats shortcut,
+ * which has always opened the overlay in the app. O was added beside it on
+ * 2026-09-13 in the belief that there was none, and was the one found here
+ * until rhoquinn8217 took it out again: "I added O because I thought we
+ * didn't have one. We can remove it."
  *
  * ⭐ WHY IT IS HERE AND NOT IN THE APP (rhoquinn8217, 2026-09-13): the shortcut
  * works bridged or not. A keyboard the TV reads reaches Aurora's own shortcut
@@ -33,7 +39,7 @@ typedef struct {
     uint16_t report_len;   /* the whole input report, the id byte counted */
 } kbd_layout_t;
 
-#define KBD_USAGE_O 0x12   /* keyboard usage page: "o" and "O" */
+#define KBD_USAGE_S 0x16   /* keyboard usage page: "s" and "S" */
 
 /* Where the keyboard's modifier bits and key array are, from its report
  * descriptor. Returns true and fills `out` when both were found in one report.
@@ -137,7 +143,7 @@ static inline bool kbd_layout_from_descriptor(const uint8_t *d, size_t n, kbd_la
     return true;
 }
 
-/* Is Ctrl+Alt+Shift+O down in this report? Either Ctrl, either Alt, either
+/* Is Ctrl+Alt+Shift+S down in this report? Either Ctrl, either Alt, either
  * Shift. ⓘ False for a report of another id or too short to hold the fields. */
 static inline bool kbd_overlay_chord_down(const kbd_layout_t *l, const uint8_t *r, size_t n)
 {
@@ -150,7 +156,7 @@ static inline bool kbd_overlay_chord_down(const kbd_layout_t *l, const uint8_t *
     const bool alt = (mods & 0x44) != 0;
     if (!(ctrl && shift && alt)) return false;
     for (uint8_t k = 0; k < l->keys_count; ++k) {
-        if (r[l->keys_offset + k] == KBD_USAGE_O) return true;
+        if (r[l->keys_offset + k] == KBD_USAGE_S) return true;
     }
     return false;
 }
