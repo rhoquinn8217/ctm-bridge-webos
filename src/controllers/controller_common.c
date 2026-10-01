@@ -313,6 +313,9 @@ struct ctm_controller {
     volatile int st_connected;
     /* ⭐ T-127: the reconnect loop gave up. Set once, read by the UI tick. */
     volatile int st_host_gone;
+    /* ⭐ The device itself went away mid-session. Set once, read by the UI
+     * tick, which releases the session: see device_gone in ctm_controller.h. */
+    volatile int st_device_gone;
     volatile int st_transport_enet;
     volatile unsigned long st_reports_in;
     volatile unsigned long st_reports_out;
@@ -2479,7 +2482,36 @@ static void *input_thread_main(void *arg)
             continue;
         }
         if (pfds[1].revents & POLLIN) break;
-        if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+        if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            /* ⭐⭐ THE DEVICE HAS GONE, AND THE SESSION ENDS WITH IT.
+             *
+             * ⛔ THE FAULT (rhoquinn8217 on the C3, 2026-10-01: "the keyboard
+             * has just connected mid stream and it is un responsive"): a
+             * bridged Bluetooth keyboard went to sleep. This thread saw its
+             * node hang up and simply returned; the session carried on with
+             * nothing to read, its link to the host up and its handles on
+             * the keyboard's input nodes still open.
+             *
+             * ⛔⛔ AND AN OPEN HANDLE ON A DEVICE THAT HAS GONE POISONS ITS
+             * NODE. A C3 keeps /dev/input/event0..31 as permanent files, and
+             * the kernel leaves such a file tied to the device it last
+             * opened until every handle on it is closed. The keyboard came
+             * back under the same number and NOTHING could open it: not the
+             * TV's own keyboard reader, and not a new session of ours, which
+             * logged `evdev: 0 node(s) grabbed`. Ending the stream closed
+             * the handles and the node worked at once.
+             *
+             * ➡️ So: say so, stop, and raise the flag. The session loop sees
+             * `stop` within 50 ms and lets go of the input nodes; the app's
+             * tick sees the flag and releases the session, which closes the
+             * device's own node as well. */
+            ctl_log(c, "device gone: its node hung up -- ending the session");
+            pthread_mutex_lock(&c->status_mutex);
+            c->st_device_gone = 1;
+            pthread_mutex_unlock(&c->status_mutex);
+            c->stop = 1;
+            break;
+        }
         if (!(pfds[0].revents & POLLIN)) continue;
         for (;;) {
             uint8_t buf[MAX_REPORT];
@@ -3555,6 +3587,7 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     pthread_mutex_lock(&c->status_mutex);
     out->connected = c->st_connected ? true : false;
     out->host_gone = c->st_host_gone ? true : false;
+    out->device_gone = c->st_device_gone ? true : false;
     out->transport_enet = c->st_transport_enet ? true : false;
     snprintf(out->last_event, sizeof(out->last_event), "%s", c->st_last_event);
     pthread_mutex_unlock(&c->status_mutex);
