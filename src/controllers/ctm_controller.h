@@ -465,6 +465,12 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c);
  * report along. */
 int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t len);
 
+/* Ask the host to open its settings window on this device. When: a person
+ * asks for it from the TV, for a device that is bridged. Returns 0 when the
+ * request was sent and -1 when there is no connection to send it on. ⓘ Any
+ * thread: the transport guards its own send. */
+int ctm_controller_open_config(ctm_controller_t *c);
+
 /* ⭐⭐ A TYPE'S CONFIRMATION SIGNAL ON A THREAD OF ITS OWN, and what keeps that
  * thread from outliving the node it writes to.
  *

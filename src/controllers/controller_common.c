@@ -2044,6 +2044,24 @@ int ctm_controller_write_raw(ctm_controller_t *c, const uint8_t *data, size_t le
     return n == (ssize_t)len ? 0 : -1;
 }
 
+/* Ask the host to open its settings window on this device: one message with
+ * no payload, on the session's own connection (ctm_bridge_protocol.h). When:
+ * the TV's button for it. ⓘ Not while the session is between connections:
+ * there is nothing to send on, and a request delivered late would open a
+ * window nobody was waiting for. */
+int ctm_controller_open_config(ctm_controller_t *c)
+{
+    if (!c) return -1;
+    pthread_mutex_lock(&c->status_mutex);
+    const int connected = c->st_connected;
+    pthread_mutex_unlock(&c->status_mutex);
+    if (!connected) return -1;
+    const int rc = c_send(c, CTMB_MSG_OPEN_CONFIG, CTMB_FLAG_OK, 0, NULL, 0);
+    ctl_log(c, "settings window: the host was asked to open it on this device%s",
+            rc == 0 ? "" : " -- the request could not be sent");
+    return rc;
+}
+
 /* --- a type's signal thread, and plug-out's wait for it --------------------
  *
  * ⛔⛔ WHY ANY OF THIS EXISTS. The DualSense's connected signal is handed the

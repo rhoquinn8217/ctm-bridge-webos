@@ -38,7 +38,22 @@ enum ctmb_message_type {
      *
      * An older listener ignores unknown message types silently, so the worst
      * case against one is a tone that does not sound. */
-    CTMB_MSG_AUDIO_HOLD = 13
+    CTMB_MSG_AUDIO_HOLD = 13,
+
+    /* aurora-tv -> CTM-USBIP: "open your settings window on this device".
+     * No payload: the connection is the device's own, so the listener
+     * already knows which one is meant.
+     *
+     * WHY IT IS A MESSAGE AND NOT THE CONTROLLER'S CHORD. The listener
+     * opens that window by itself when a device is bridged, whatever the
+     * device is, and a person can ask for it again with a chord on the
+     * touchpad. A chord needs a touchpad, so it cannot serve an Xbox pad, a
+     * keyboard or a mouse. This asks for the same opening directly, for
+     * anything that is bridged.
+     *
+     * An older listener ignores unknown message types silently, so the
+     * worst case against one is a button that does nothing. */
+    CTMB_MSG_OPEN_CONFIG = 14
 };
 
 #pragma pack(push, 1)
