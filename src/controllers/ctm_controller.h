@@ -223,6 +223,19 @@ typedef struct {
      *
      * ➡️ So this is a FLAG, and the app's existing status tick acts on it. */
     bool host_gone;
+
+    /* ⭐⭐ THE DEVICE IS GONE AND THE SESSION HAS STOPPED. 2026-10-01.
+     *
+     * Its node hung up: a Bluetooth keyboard asleep, a cable pulled. The
+     * session ends itself and lets go of the input nodes it held, because a
+     * handle left open on a vanished device stops anything opening the
+     * device that takes its number next (controller_common.c, the input
+     * thread).
+     *
+     * ➡️ Like `host_gone` it is a FLAG for the app's tick, which releases the
+     * session through its own path. ⓘ Unlike a host outage there is nothing
+     * to put back when the stream reconnects: the device is not there. */
+    bool device_gone;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
@@ -524,7 +537,7 @@ typedef void (*ctm_controller_unplug_cb)(ctm_controller_t *c);
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
 
 /* ⭐ Told when a bridged keyboard presses the streaming overlay's shortcut,
- * Ctrl+Alt+Shift+O, which its own grab keeps from the app. When: the keyboard's
+ * Ctrl+Alt+Shift+S, which its own grab keeps from the app. When: the keyboard's
  * input thread, so the app hands the work to its main thread. */
 typedef void (*overlay_request_cb)(void);
 void controller_set_overlay_cb(overlay_request_cb cb);
