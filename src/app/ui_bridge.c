@@ -556,7 +556,8 @@ void stop_session(const char *key)
 bool ctm_tv_pointer_plug(void)
 {
     if (g_tv_pointer_active) return true;
-    if (!agent_is_known()) {
+    /* The address, not the remembered answer: see plug_in_scan_index(). */
+    if (!g_agent_host[0]) {
         log_append("TV pointer: Windows agent not found");
         return false;
     }
@@ -741,7 +742,15 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     if (!item || scan_index < 0 || scan_index >= g_scan.count) {
         return false;
     }
-    if (!agent_is_known()) {
+    /* ⭐⭐ THE ADDRESS DECIDES, NOT THE REMEMBERED ANSWER (2026-10-04). The probe
+     * asks every ten seconds and remembers; a listener that has just started
+     * reads as offline until the next probe, and every bridge in between was
+     * refused without being tried -- "Windows agent not found" while the
+     * listener sat there answering. So refuse only when no address is known,
+     * try otherwise, and let the reply decide: a command that gets through
+     * sets the flag back itself (send_agent_command), and one that fails asks
+     * the probe to look again at once, below. */
+    if (!g_agent_host[0]) {
         log_append("Windows agent not found");
         return false;
     }
@@ -789,6 +798,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
     if (send_agent_command(cmd, response, sizeof(response)) != 0) {
         log_append("agent bridge start failed: %s", response);
+        ctm_agent_probe_soon();
         return false;
     }
 
