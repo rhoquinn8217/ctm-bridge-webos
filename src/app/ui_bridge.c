@@ -295,7 +295,10 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         close(fd);
         g_agent_online = false;
         g_agent_probed = true;
-        return -1;
+        /* -2, not -1: the listener was not REACHED, which one lost packet can
+         * cause, so a caller may try again; -1 is every other failure. Callers
+         * that only ask "did it work" compare with 0 and are unaffected. */
+        return -2;
     }
 
     char line[512];
@@ -750,6 +753,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
      * try otherwise, and let the reply decide: a command that gets through
      * sets the flag back itself (send_agent_command), and one that fails asks
      * the probe to look again at once, below. */
+    g_last_plug_unreachable = false;
     if (!g_agent_host[0]) {
         log_append("Windows agent not found");
         return false;
@@ -796,8 +800,10 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     char busid[32];
     make_bridge_busid(item, busid, sizeof(busid));
     snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
-    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
-        log_append("agent bridge start failed: %s", response);
+    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    if (start_rc != 0) {
+        log_append("agent bridge start failed: %s", start_rc == -2 ? "listener not reached" : response);
+        g_last_plug_unreachable = start_rc == -2;
         ctm_agent_probe_soon();
         return false;
     }

@@ -39,6 +39,7 @@ bool g_agent_online;
  * this the panel reports OFFLINE before a single probe has completed -- which is
  * usually right and is still a claim we have not earned. */
 bool g_agent_probed;
+bool g_last_plug_unreachable;
 bool g_running = true;
 pthread_t g_stop_sniff_thread;
 bool g_stop_sniff_thread_started;
