@@ -38,11 +38,15 @@ bridge controllers.
 The core is **not built on its own**: whatever embeds it compiles these sources,
 so building the core means building the app that carries it.
 
+rhoquinn8217/aurora-tv holds this repository as a **submodule**, at
+`third_party/ctm-bridge-webos`, and compiles its `ctmbridge` library straight
+from these sources rather than linking a prebuilt one. Each aurora-tv commit
+records the exact commit of the core it was built with.
+
 See [rhoquinn8217/aurora-tv's build
-instructions](https://github.com/rhoquinn8217/aurora-tv#build), which cover the
-Docker build and the sibling checkout this repository has to sit in. Clone it as a
-**sibling directory**, which is where that CMake looks, or point
-`-DCTM_BRIDGE_DIR=<path>` at wherever you put it.
+instructions](https://github.com/rhoquinn8217/aurora-tv#build) for the Docker
+build. A clone made with `--recursive` has the core; in any other checkout,
+`git submodule update --init --recursive` fetches it.
 
 The core carries its own test suite, run by `tests/run-tests.sh`.
 
