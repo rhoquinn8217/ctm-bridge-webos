@@ -273,6 +273,11 @@ int send_agent_command(const char *command, char *response, size_t response_len)
      * broadcast discovery away. agent_is_known() is right for the UI and the
      * plug paths, which want "known AND answering"; this one wants "do we know
      * where to ask". */
+    /* ⓘ Empty on every path, so a caller that prints the reply after a failure
+     * before the read prints nothing rather than whatever was on its stack. */
+    if (response && response_len > 0) {
+        response[0] = '\0';
+    }
     if (!g_agent_host[0]) {
         return -1;
     }
@@ -756,6 +761,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     g_last_plug_unreachable = false;
     if (!g_agent_host[0]) {
         log_append("Windows agent not found");
+        ctm_gesture_log(NULL, "bridge refused for %s: no listener address yet, "
+                        "which only a stream sets", item->name);
         return false;
     }
 
@@ -803,6 +810,16 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     const int start_rc = send_agent_command(cmd, response, sizeof(response));
     if (start_rc != 0) {
         log_append("agent bridge start failed: %s", start_rc == -2 ? "listener not reached" : response);
+        /* ⭐ IN THE LOG THAT CAN BE READ (code review, 2026-10-05). log_append
+         * reaches only an on-screen console nobody has open, while the control
+         * port tells people the reason is in ctm-gesture.log -- so a refusal
+         * such as the listener's "ERR bad bridge args" was in no file at all. */
+        char why[160];
+        snprintf(why, sizeof(why), "%s",
+                 start_rc == -2 ? "listener not reached"
+                                : (response[0] ? response : "no answer in time"));
+        why[strcspn(why, "\r\n")] = '\0';
+        ctm_gesture_log(NULL, "bridge refused for %s (kind %s): %s", item->name, kind, why);
         g_last_plug_unreachable = start_rc == -2;
         ctm_agent_probe_soon();
         return false;
@@ -829,6 +846,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     ctm_controller_t *controller = ctm_controller_create(&cdev);
     if (!controller) {
         log_append("controller create failed");
+        ctm_gesture_log(NULL, "bridge failed for %s: no controller could be made for it",
+                        item->name);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
@@ -850,6 +869,7 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     }
     if (ctm_controller_plug_in(controller, g_agent_host, port) != 0) {
         log_append("controller plug-in failed");
+        ctm_gesture_log(NULL, "bridge failed for %s: its session did not start", item->name);
         ctm_controller_destroy(controller);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
@@ -862,6 +882,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     if (!add_session(session_key, busid, controller, port, cdev.path)) {
         log_append("controller for %s not recorded (table full, or its last session is "
                    "still stopping); undoing the plug", session_key);
+        ctm_gesture_log(NULL, "bridge undone for %s: it could not be recorded (table full, "
+                        "or its last session still stopping)", item->name);
         ctm_controller_plug_out(controller);
         ctm_controller_destroy(controller);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
