@@ -188,6 +188,12 @@ extern bool g_agent_online;
 
 /* True once a probe or a command has actually reached a verdict. */
 extern bool g_agent_probed;
+/* ⓘ Whether the last plug failed because the listener could not be REACHED
+ * (its connect failed), as against refused or answered wrongly. One lost
+ * packet on a busy Wi-Fi link at a stream's start is enough to fail a connect,
+ * so the app tries once more a moment later; a refusal is final. Set by
+ * plug_in_scan_index(). */
+extern bool g_last_plug_unreachable;
 
 /* ⭐ Ask the agent probe to run now instead of waiting out its interval.
  *
