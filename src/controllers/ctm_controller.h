@@ -553,7 +553,11 @@ void controller_set_overlay_cb(overlay_request_cb cb);
  * Deliberately per-controller: a file-level variable here would be shared by
  * every controller's thread, which is the fault that took four sessions to
  * find in the capture path. */
-#define CTM_TYPE_STATE_SLOTS 3
+/* ⓘ FIVE, because the DS4 uses five (code review, 2026-10-05): its two
+ * diagnostic counters sit in slots 3 and 4, and with three slots every read of
+ * them came back 0 and every write was dropped, so the counts that two of its
+ * recorded conclusions rest on could never have counted. */
+#define CTM_TYPE_STATE_SLOTS 5
 uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot);
 void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v);
 
