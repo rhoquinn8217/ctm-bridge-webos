@@ -187,16 +187,6 @@ ctm_monitor_t *ctm_monitor_start(ctm_monitor_cb cb, void *ud)
     return m;
 }
 
-int ctm_monitor_list(ctm_monitor_t *m, ctm_controller_dev_t *out, int max)
-{
-    if (!m || !out || max <= 0) return 0;
-    pthread_mutex_lock(&m->lock);
-    int n = m->count < max ? m->count : max;
-    memcpy(out, m->list, (size_t)n * sizeof(out[0]));
-    pthread_mutex_unlock(&m->lock);
-    return n;
-}
-
 void ctm_monitor_stop(ctm_monitor_t *m)
 {
     if (!m) return;

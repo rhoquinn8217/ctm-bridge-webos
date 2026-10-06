@@ -172,11 +172,6 @@ int read_text_file(const char *path, char *out, size_t out_len)
     return 0;
 }
 
-void join_path(char *out, size_t out_len, const char *a, const char *b)
-{
-    snprintf(out, out_len, "%s/%s", a, b);
-}
-
 bool starts_with(const char *text, const char *prefix)
 {
     return strncmp(text, prefix, strlen(prefix)) == 0;

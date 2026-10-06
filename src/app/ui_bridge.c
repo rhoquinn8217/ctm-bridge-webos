@@ -753,22 +753,9 @@ const char *bridge_kind_for_item(const logical_device_t *item)
     return "hid";
 }
 
-/* Session key for ONE specific hidraw node of a logical device, so each
- * interface can be plugged/unplugged independently. When: per-node plug + its
- * button state. */
-void node_session_key(const logical_device_t *item, int scan_index, char *out, size_t out_len)
-{
-    const char *tag = "node";
-    if (scan_index >= 0 && scan_index < g_scan.count && g_scan.devices[scan_index].hidraw[0]) {
-        tag = g_scan.devices[scan_index].hidraw;
-    }
-    snprintf(out, out_len, "%s#%s", item ? item->key : "", tag);
-}
-
 /* Core plug: start the host bridge, build a controller from one chosen scan
- * node, plug it in, and register the session under session_key. Shared by the
- * whole-device plug (plug_in_item) and the per-interface plug (plug_in_node).
- * When: any Plug button. */
+ * node, plug it in, and register the session under session_key. Used by the
+ * whole-device plug (plug_in_item). When: any Plug button. */
 /* Serialize the cached puck enumeration (g_puck_enum) into a CTMB_MSG_ENUM
  * payload: [ctmb_enum_info_t][descriptors blob][ per iface: ctmb_enum_iface_t +
  * report_desc ]. Caller frees. NULL if no valid enumeration. */
@@ -994,19 +981,6 @@ bool plug_in_item(logical_device_t *item)
         return false;
     }
     return plug_in_scan_index(item, scan_index, item->key);
-}
-
-/* Plug ONE chosen hidraw interface (keyed per node, independent of the whole-
- * device plug). When: a sub-row Plug button — pick exactly which interface of a
- * composite device to bridge. */
-bool plug_in_node(logical_device_t *item, int scan_index)
-{
-    if (!item || scan_index < 0 || scan_index >= g_scan.count) {
-        return false;
-    }
-    char key[96];
-    node_session_key(item, scan_index, key, sizeof(key));
-    return plug_in_scan_index(item, scan_index, key);
 }
 
 /* The unplug gesture's worker and the plug-by-node entry point live in their

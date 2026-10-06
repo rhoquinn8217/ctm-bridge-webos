@@ -245,7 +245,6 @@ FILE *ctm_log_open(const char *name, const char *mode);
 void log_append(const char *fmt, ...);
 int count_dir_entries(const char *path);
 int read_text_file(const char *path, char *out, size_t out_len);
-void join_path(char *out, size_t out_len, const char *a, const char *b);
 bool starts_with(const char *text, const char *prefix);
 char ascii_lower(char c);
 bool contains_ci(const char *text, const char *needle);
@@ -269,7 +268,6 @@ bool is_gulikit_named_device(const char *name);
 bool is_xpad_input_only_candidate(const char *bus, const char *vid, const char *pid,
                                   const char *name, const char *usb_busid,
                                   const char *driver);
-void steam_root_from_phys(const char *phys, char *out, size_t out_len);
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len);
 void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len);
 /* Is this device bridged right now? Answered from the session table -- there
@@ -329,7 +327,5 @@ const char *item_type_label(const logical_device_t *item);
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */
 void ctm_autoplug_tick(void);
-bool plug_in_node(logical_device_t *item, int scan_index);   /* bridge ONE chosen hidraw */
-void node_session_key(const logical_device_t *item, int scan_index, char *out, size_t out_len);
 
 #endif /* CTM_STATE_H */

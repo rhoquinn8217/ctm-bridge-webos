@@ -102,7 +102,6 @@ static struct {
     uint8_t last_buttons;
     /* pressed keyboard usages (report ID 2, 6KRO array) */
     uint8_t keys[HM_KB_MAX_KEYS];
-    void (*log_sink)(const char *line);
 } g_hm = { .state_mutex = PTHREAD_MUTEX_INITIALIZER };
 
 static void hm_log(const char *fmt, ...)
@@ -112,13 +111,7 @@ static void hm_log(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
-    if (g_hm.log_sink) g_hm.log_sink(line);
-    else fprintf(stderr, "hostmouse: %s\n", line);
-}
-
-void ctm_hostmouse_set_logger(void (*sink)(const char *line))
-{
-    g_hm.log_sink = sink;
+    fprintf(stderr, "hostmouse: %s\n", line);
 }
 
 static int hm_send_hello(void)
@@ -232,16 +225,6 @@ void ctm_hostmouse_unplug(void)
     }
     g_hm.active = 0;
     hm_log("unplugged");
-}
-
-bool ctm_hostmouse_active(void)
-{
-    return g_hm.active != 0;
-}
-
-bool ctm_hostmouse_connected(void)
-{
-    return g_hm.connected != 0;
 }
 
 void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_delta)
