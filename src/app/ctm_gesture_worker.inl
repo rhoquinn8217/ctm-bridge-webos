@@ -205,21 +205,31 @@ static void *agent_probe_thread(void *arg)
 {
     (void)arg;
     ctm_gesture_log(NULL, "agent probe thread started");
+    bool said = false;          /* has a reading been logged yet */
+    bool last_online = false;   /* the reading logged last */
     for (;;) {
         if (g_agent_host[0]) {
             char probe[256];
-            /* Logged afterwards only when it was slow: this runs every few
-             * seconds, and a line each time would bury the gesture lines this
-             * file exists for. */
+            /* ⭐ LOGGED WHEN THE ANSWER CHANGES, and when an ONLINE listener
+             * was slow to give it (code review, 2026-10-05). This logged every
+             * slow probe, and while the listener is down every probe is slow
+             * (a second each, every ten), so its lines pushed the bridge
+             * history out of the 800-line log. Online and slow is rare and
+             * worth a line; offline and slow is the same news again. */
             uint64_t t0 = probe_now_us();
             g_agent_online =
                 send_agent_command("STATUS", probe, sizeof(probe)) == 0;
             g_agent_probed = true;
             uint64_t took_ms = (probe_now_us() - t0) / 1000;
-            if (took_ms > 250) {
-                ctm_gesture_log(NULL, "agent probe took %llums (%s)",
-                                (unsigned long long)took_ms,
-                                g_agent_online ? "online" : "OFFLINE");
+            if (!said || g_agent_online != last_online) {
+                ctm_gesture_log(NULL, "agent probe: listener %s (took %llums)",
+                                g_agent_online ? "online" : "OFFLINE",
+                                (unsigned long long)took_ms);
+                said = true;
+                last_online = g_agent_online;
+            } else if (g_agent_online && took_ms > 250) {
+                ctm_gesture_log(NULL, "agent probe took %llums (online)",
+                                (unsigned long long)took_ms);
             }
         }
         /* ⓘ Slept in short steps so a request can be answered promptly without
