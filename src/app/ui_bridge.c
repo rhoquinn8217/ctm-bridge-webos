@@ -611,6 +611,12 @@ bool ctm_tv_pointer_plug(void)
     if (start_rc != 0) {
         log_append("TV pointer: agent bridge start failed: %s", response);
         g_last_plug_unreachable = start_rc == -2;
+        /* ⓘ No answer is not no session, as for a pad (plug_in_scan_index):
+         * the listener may have started it, so it is told to stop. */
+        if (start_rc == -1 && !response[0]) {
+            snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_tv_pointer_busid);
+            (void)send_agent_command(cmd, response, sizeof(response));
+        }
         return false;
     }
     if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
