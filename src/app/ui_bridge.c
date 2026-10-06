@@ -237,11 +237,10 @@ void *stop_sniff_worker(void *arg)
     return NULL;
 }
 
-/* Set the agent endpoint directly, skipping discovery. When: a host app that
- * already knows where the agent is (e.g. moonlight, which is streaming from
- * that same machine) can say so instead of relying on a broadcast probe, which
- * cannot leave the local network. Passing NULL or "" clears it and restores
- * discovery. */
+/* Set the agent endpoint: the PC the stream comes from, by its address or its
+ * name. Passing NULL or "" clears it, and nothing can bridge until it is set
+ * again: there is no discovery any more (the broadcast went 2026-09-15, see
+ * below; code review, 2026-10-05: this still promised it). */
 /* ⭐ A PC added by name is looked up to its IPv4 address as the stream starts
  * (code review, 2026-10-05): agent_address.inl says why, and what is kept. */
 void ctm_bridge_set_agent_host(const char *host, int port)
