@@ -336,37 +336,8 @@ static void btsig_wait_for(const struct timespec *t0, int n)
  * for that: four controllers, either way round. ⛔ A FULL TABLE MEANS EVERY
  * TONE TAKES THE LONG PRIME, which is why it is not sized to the fleet exactly. */
 #define BTSIG_PRIMED_MAX 12
-static char g_btsig_primed[BTSIG_PRIMED_MAX][64];
+static char g_btsig_primed[BTSIG_PRIMED_MAX][40];
 static int  g_btsig_primed_n;
-/* ⓘ Where the next key goes once the table is full: the oldest is replaced.
- * With a key per connection (below) the table fills as pads come and go, and
- * a full table that never took a new key would hand every later pad the short
- * prime it may need the long one for. */
-static int  g_btsig_primed_next;
-
-/* ⭐⭐ THE KEY IS ONE CONNECTION OF A PAD, NOT THE PAD (rooted monitor,
- * 2026-10-05). A MAC outlives the pad's power: a DualSense Edge switched off
- * while bridged and back on kept its mark, took the short prime into a decoder
- * that had gone cold, and its next bridge had no tone. A pad that sleeps
- * between two streams of one app run would be the same. Every Bluetooth
- * connection makes a new HID device, numbered by the kernel
- * (0005:054C:0DF2.000B), so that number goes into the key, and a pad that has
- * been off is primed afresh. Without the number the key is the caller's
- * alone, as before. */
-static void btsig_connection_key(const char *who, const char *node, char *out, size_t len)
-{
-    snprintf(out, len, "%s", who ? who : "");
-    const char *base = node ? strrchr(node, '/') : NULL;
-    if (!out[0] || !base || !base[1]) return;
-    char link[96];
-    char target[256];
-    snprintf(link, sizeof link, "/sys/class/hidraw/%s/device", base + 1);
-    const ssize_t n = readlink(link, target, sizeof target - 1);
-    if (n <= 0) return;
-    target[n] = '\0';
-    const char *instance = strrchr(target, '/');
-    snprintf(out, len, "%s@%s", who, instance ? instance + 1 : target);
-}
 
 /* ASKING AND MARKING ARE TWO STEPS, AND THEY USED TO BE ONE.
  *
@@ -398,10 +369,7 @@ static void btsig_mark_primed(const char *key)
     if (g_btsig_primed_n < BTSIG_PRIMED_MAX) {
         snprintf(g_btsig_primed[g_btsig_primed_n], sizeof(g_btsig_primed[0]), "%s", key);
         ++g_btsig_primed_n;
-        return;
     }
-    snprintf(g_btsig_primed[g_btsig_primed_next], sizeof(g_btsig_primed[0]), "%s", key);
-    g_btsig_primed_next = (g_btsig_primed_next + 1) % BTSIG_PRIMED_MAX;
 }
 
 static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_to,
@@ -821,9 +789,7 @@ static int btsig_wake_speaker(ctm_controller_t *c)
 static int btsig_play(ctm_controller_t *c, btsig_pattern_t pattern)
 {
     if (!c) return -1;
-    char key[64];
-    btsig_connection_key(c->dev.mac, c->dev.path, key, sizeof key);
-    return btsig_play_fd(c->hid_fd, pattern, c, key);
+    return btsig_play_fd(c->hid_fd, pattern, c, c->dev.mac);
 }
 
 /* A REFUSAL, WHICH HAS NO SESSION TO PLAY THROUGH.
@@ -842,9 +808,7 @@ int ctm_signal_refused_bt(const char *node)
     if (!node || !node[0]) return -1;
     int fd = open(node, O_RDWR | O_CLOEXEC);
     if (fd < 0) return -1;
-    char key[64];
-    btsig_connection_key(node, node, key, sizeof key);
-    int rc = btsig_play_fd(fd, BTSIG_REFUSED, NULL, key);
+    int rc = btsig_play_fd(fd, BTSIG_REFUSED, NULL, node);
     close(fd);
     return rc;
 }
