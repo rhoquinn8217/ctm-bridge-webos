@@ -493,6 +493,9 @@ static void cardmatch_identify(ctm_controller_t *c)
      * `matched_card` is already set above, so the ordinary opener picks the
      * right card by itself -- and it is the ordinary opener deliberately, so
      * the settings report that follows a fresh handle stays in one place. */
+    /* ⓘ The speaker's handle is changed under its own lock: see
+     * write_iso_audio(). */
+    pthread_mutex_lock(&c->alsa_mutex);
     if (c->alsa_fd < 0) {
         ctm_controller_open_alsa_playback(c);
         ctl_log(c, "cardmatch: speaker opened on card=%d (fd=%d)",
@@ -532,4 +535,5 @@ static void cardmatch_identify(ctm_controller_t *c)
             ctm_controller_send_speaker_init(c);
         }
     }
+    pthread_mutex_unlock(&c->alsa_mutex);
 }

@@ -289,10 +289,10 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
                 first[i * FEEDBACK_CHANNELS + 2] = 0;
                 first[i * FEEDBACK_CHANNELS + 3] = 0;
             }
-            write_iso_audio(c, (const uint8_t *)first, (uint32_t)bytes);
+            write_iso_audio_waiting(c, (const uint8_t *)first, (uint32_t)bytes);
             free(first);
         } else {
-            write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
+            write_iso_audio_waiting(c, (const uint8_t *)buf, (uint32_t)bytes);
         }
         const long first_ms = (long)frames * 1000L / FEEDBACK_RATE + 40 + FEEDBACK_REPEAT_GAP_MS;
         struct timespec fts = {(time_t)(first_ms / 1000),
@@ -300,7 +300,7 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         nanosleep(&fts, NULL);
         c->card_fresh = 0;
     }
-    write_iso_audio(c, (const uint8_t *)buf, (uint32_t)bytes);
+    write_iso_audio_waiting(c, (const uint8_t *)buf, (uint32_t)bytes);
     free(buf);
 
     /* WAIT FOR IT TO ACTUALLY COME OUT.
