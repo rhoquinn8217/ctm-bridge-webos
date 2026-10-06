@@ -302,6 +302,9 @@ typedef struct {
  * motors at full for a quarter of a second rattle rather than confirm.
  * 🔗 DS4_PULSE_LEVEL next door, the same on a cable. */
 #define DS4SIG_VIS_PULSE_MS   250
+/* The most silence a signal carries after its notes, so its light can finish:
+ * 800 ms, which covers the longest pattern (DS4_RELEASED_MS). */
+#define DS4SIG_TAIL_MAX_FRAMES 200
 #define DS4SIG_VIS_PULSE_LVL  0xc0
 
 /* ⭐⭐ THE CONFIGURE REPORT, AND IT IS THE PIECE THAT WAS MISSING.
@@ -449,15 +452,32 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     const int prime_frames = tone ? DS4SIG_PRIME_FRAMES * 3 : 0;
     (void) ds4sig_is_warm;
 
+    /* ⭐⭐ THE STREAM LASTS AS LONG AS THE LIGHT (rooted monitor, 2026-10-05).
+     * The light and the pulse ride these reports, and the stream used to end
+     * with the second note: 328 ms to draw a pattern of 700 or 800. A release
+     * showed one yellow flash and the start of a second, not three, then went
+     * dark, and a refusal the same in red. rhoquinn8217: *"It should just be 3
+     * yellow flashes."* ➡️ Silence after the notes carries the rest of the
+     * pattern; the notes themselves are unchanged. */
+    const int note_frames = DS4SIG_TONE_FRAMES + DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES;
+    const long frame_ms = (DS4SIG_PACE_US / 1000) / DS4SIG_FRAMES_PER_REPORT;
+    int tail_frames = 0;
+    if (show && vis->ms > (long)note_frames * frame_ms) {
+        tail_frames = (int)((vis->ms - (long)note_frames * frame_ms + frame_ms - 1) / frame_ms);
+        tail_frames += tail_frames % DS4SIG_FRAMES_PER_REPORT;   /* whole reports */
+        if (tail_frames > DS4SIG_TAIL_MAX_FRAMES) tail_frames = DS4SIG_TAIL_MAX_FRAMES;
+    }
+
     /* The gap is silence rather than nothing, because the decoder wants a
      * stream rather than a pause. */
     const uint8_t *frames[(DS4SIG_PRIME_FRAMES * 3) + DS4SIG_TONE_FRAMES +
-                          DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES];
+                          DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES + DS4SIG_TAIL_MAX_FRAMES];
     int n = 0;
     for (int i = 0; i < prime_frames; i++) frames[n++] = g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = tone ? first[i] : g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_GAP_FRAMES;   i++) frames[n++] = g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = tone ? second[i] : g_ds4sig_silence;
+    for (int i = 0; i < tail_frames; i++) frames[n++] = g_ds4sig_silence;
 
     /* ⓘ One buffer for either report: 0x15 is the larger of the two. */
     uint8_t rep[DS4SIG_COMBO_LEN];
