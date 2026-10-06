@@ -8,6 +8,7 @@
 #include "ctm_bridge_protocol.h"
 #include "ctm_hostmouse.h"
 #include "agent_address.inl"
+#include "agent_endpoint.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -245,6 +246,9 @@ void *stop_sniff_worker(void *arg)
  * (code review, 2026-10-05): agent_address.inl says why, and what is kept. */
 void ctm_bridge_set_agent_host(const char *host, int port)
 {
+    char old_host[sizeof(g_agent_host)];
+    snprintf(old_host, sizeof(old_host), "%s", g_agent_host);
+    const int old_port = g_agent_port;
     if (host && host[0]) {
         char address[sizeof(g_agent_host)];
         const char *why = "";
@@ -260,7 +264,19 @@ void ctm_bridge_set_agent_host(const char *host, int port)
         g_agent_host[0] = '\0';
     }
     g_agent_port = port > 0 ? port : CTM_AGENT_PORT;
-    g_agent_online = g_agent_host[0] != '\0';
+    /* ⭐ What is known follows the address (code review, 2026-10-05):
+     * agent_endpoint.inl has the rule. A new address reads unknown until it
+     * answers; the same one keeps its last reading. Either way the probe is
+     * asked to look now, so the reading is fresh as the stream starts rather
+     * than up to ten seconds later. */
+    bool online = g_agent_online;
+    bool probed = g_agent_probed;
+    agent_endpoint_set(old_host, old_port, g_agent_host, g_agent_port, &online, &probed);
+    g_agent_online = online;
+    g_agent_probed = probed;
+    if (g_agent_host[0]) {
+        ctm_agent_probe_soon();
+    }
 }
 
 /* Do we know where the agent is, and was it answering when the worker last

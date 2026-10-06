@@ -35,9 +35,11 @@ int g_settings_count;
 char g_agent_host[64];
 int g_agent_port = CTM_AGENT_PORT;
 bool g_agent_online;
-/* ⭐ Has anything actually asked yet? ⛔ g_agent_online starts false, so without
- * this the panel reports OFFLINE before a single probe has completed -- which is
- * usually right and is still a claim we have not earned. */
+/* ⭐ Has anything actually asked THIS address yet? ⛔ g_agent_online starts false,
+ * so without this the panel reports OFFLINE before a single probe has completed
+ * -- which is usually right and is still a claim we have not earned.
+ * ⓘ Cleared when the address changes (agent_endpoint.inl, code review,
+ * 2026-10-05): it used to stay set from the first address ever probed. */
 bool g_agent_probed;
 bool g_last_plug_unreachable;
 bool g_running = true;
