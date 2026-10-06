@@ -287,7 +287,14 @@ static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settin
      * report along, it checks the fd, and it takes hid_mutex -- which a bare
      * write would not, racing every other writer on this pad. */
     const int rc = ctm_controller_write_raw(c, rep, sizeof rep);
-    ctm_controller_set_type_state(c, DS4_SLOT_AUDIO, now);
+    /* ⛔ MARKED AS SAID ONLY WHEN IT WAS SAID (code review, 2026-10-05). The
+     * first call comes before the plug, with no node open, and marking it
+     * anyway meant those values counted as sent and were never tried again.
+     * ⓘ Now the next settings that reach this pad try again. Sending once the
+     * node opens was not added: a write to this pad at bridge time is
+     * recorded below as blocking for seconds. The route and the volume scale
+     * are still open, with the rest of the DS4's audio. */
+    if (rc == 0) ctm_controller_set_type_state(c, DS4_SLOT_AUDIO, now);
     ctl_log(c, "ds4 audio: told the pad headset=%u speaker=%u route=0x%02x, rc=%d",
             headset, speaker, route, rc);
 }

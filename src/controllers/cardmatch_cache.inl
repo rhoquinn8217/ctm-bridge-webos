@@ -49,9 +49,17 @@
  * played through. Without the file, every controller looked fresh after a
  * restart and the first bridge played its tone twice, audibly (measured on
  * C1, 2026-09-08). With it, a missing note means nothing has matched this
- * card since its cable went in. A TV reboot clears /tmp and re-enumerates
- * every card, so that case stays right too. A loaded note is checked against
- * the card's identity like any other before it is believed.
+ * card since its cable went in. A loaded note is checked against the card's
+ * identity like any other before it is believed.
+ *
+ * ⛔⛔ AND THE FILE IS MARKED WITH THE BOOT THAT WROTE IT (code review,
+ * 2026-10-05). This used to say a TV reboot cleared the notes, because they
+ * lived in /tmp. They moved to the app's own logs folder, which a reboot keeps,
+ * and a cold boot with the same ports enumerates the same cards under the same
+ * bus and device numbers, so a note from before the power-off passed its check.
+ * The controller then read as already played-through, the double play was
+ * skipped, and the first bridge tone went into the dead first stream. ➡️ Notes
+ * written under another boot id are not loaded.
  *
  * Its own file so tests/test_cardmatch_cache.c can drive it against a scratch
  * directory: the paths below are macros for exactly that reason. */
@@ -64,6 +72,28 @@
  * ctm_log_path(). The tests still override this macro with their own path. */
 #define CARDMATCH_NOTES_PATH ctm_log_path("cardmatch-notes.txt")
 #endif
+
+#ifndef CARDMATCH_BOOT_ID_PATH
+#define CARDMATCH_BOOT_ID_PATH "/proc/sys/kernel/random/boot_id"
+#endif
+
+/* This boot's id, the kernel's own: it changes at every boot and at nothing
+ * else. Returns 1 and fills `out`, or 0 with `out` empty when it cannot be
+ * read, in which case the notes are kept and loaded as they always were. */
+static int cardmatch_read_boot_id(char *out, size_t out_len)
+{
+    out[0] = '\0';
+    FILE *f = fopen(CARDMATCH_BOOT_ID_PATH, "r");
+    if (!f) return 0;
+    char line[64];
+    int got = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    if (!got) return 0;
+    line[strcspn(line, "\r\n")] = '\0';
+    if (!line[0]) return 0;
+    snprintf(out, out_len, "%s", line);
+    return 1;
+}
 
 #define CARDMATCH_CACHE_MAX   4
 #define CARDMATCH_USBBUS_LEN  16
@@ -81,6 +111,10 @@ static void cardmatch_cache_save(void)
 {
     FILE *f = fopen(CARDMATCH_NOTES_PATH, "w");
     if (!f) return;
+    /* ⓘ First line. An older build reading this skips it, since it does not
+     * parse as a note. */
+    char boot[64];
+    if (cardmatch_read_boot_id(boot, sizeof(boot))) fprintf(f, "boot %s\n", boot);
     for (int i = 0; i < g_cardmatch_cached; ++i) {
         fprintf(f, "%s %d %s\n", g_cardmatch_cache[i].node,
                 g_cardmatch_cache[i].card, g_cardmatch_cache[i].usbbus);
@@ -97,6 +131,20 @@ static void cardmatch_cache_load(void)
     FILE *f = fopen(CARDMATCH_NOTES_PATH, "r");
     if (!f) return;
     char line[192];
+    /* ⭐ Only notes this boot wrote. A file with no boot line came from a build
+     * that did not mark it, so it cannot be dated and is not believed either:
+     * the cost is one probe per controller, once. */
+    char boot_now[64];
+    if (cardmatch_read_boot_id(boot_now, sizeof(boot_now))) {
+        char boot_then[64] = "";
+        if (!fgets(line, sizeof(line), f) || sscanf(line, "boot %63s", boot_then) != 1 ||
+            strcmp(boot_then, boot_now) != 0) {
+            fclose(f);
+            alsa_log("[cardmatch]", "notes left by an earlier boot (%s), not loaded",
+                     boot_then[0] ? boot_then : "unmarked");
+            return;
+        }
+    }
     int loaded = 0;
     while (g_cardmatch_cached < CARDMATCH_CACHE_MAX && fgets(line, sizeof(line), f)) {
         char node[64], usbbus[CARDMATCH_USBBUS_LEN];

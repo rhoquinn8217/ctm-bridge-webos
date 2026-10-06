@@ -81,23 +81,49 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
     return settings;
 }
 
+/* The device a record's defaults are for, so a record can tell when its node
+ * has passed to another one. */
+static void record_identity(const logical_device_t *item, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%s:%s|%s|%s", item->vid, item->pid, item->mac, item->serial);
+}
+
+/* Fills a record with the defaults for `item`, the device it is now for. */
+static void record_reset(ui_device_settings_t *record, const logical_device_t *item)
+{
+    snprintf(record->key, sizeof(record->key), "%s", item->key);
+    record->settings = default_settings_for_item(item);
+    record->headset_volume_percent = record->settings.headset_volume_percent;
+    record->speaker_volume_percent = record->settings.speaker_volume_percent;
+    record_identity(item, record->made_for, sizeof(record->made_for));
+}
+
 ui_device_settings_t *ui_record_for_item(const logical_device_t *item)
 {
     if (!item) return NULL;
     for (int i = 0; i < g_settings_count; ++i) {
         if (strcmp(g_settings[i].key, item->key) == 0) {
+            /* ⛔⛔ THE SAME NODE IS NOT THE SAME DEVICE (code review,
+             * 2026-10-05). A hidraw device's key is its node, records are never
+             * removed, and Linux hands a freed node to the next device: a
+             * Bluetooth DualSense taking a Bluetooth DS4's old hidraw number was
+             * bridged with the DS4's defaults -- speaker 0x3b, under the
+             * DualSense's audibility floor, and haptics gain 0. ➡️ A record made
+             * for another device starts over with this one's defaults. */
+            char now[sizeof(g_settings[0].made_for)];
+            record_identity(item, now, sizeof(now));
+            if (strcmp(g_settings[i].made_for, now) != 0) {
+                ctm_gesture_log(NULL, "settings for %s were made for %s; starting over for %s",
+                                item->key, g_settings[i].made_for, now);
+                record_reset(&g_settings[i], item);
+            }
             return &g_settings[i];
         }
     }
     if (g_settings_count >= MAX_DEVICES) {
         return NULL;
     }
-    snprintf(g_settings[g_settings_count].key, sizeof(g_settings[0].key), "%s", item->key);
-    g_settings[g_settings_count].settings = default_settings_for_item(item);
-    g_settings[g_settings_count].headset_volume_percent =
-        g_settings[g_settings_count].settings.headset_volume_percent;
-    g_settings[g_settings_count].speaker_volume_percent =
-        g_settings[g_settings_count].settings.speaker_volume_percent;
+    record_reset(&g_settings[g_settings_count], item);
     return &g_settings[g_settings_count++];
 }
 
@@ -173,15 +199,34 @@ void *stop_sniff_worker(void *arg)
 {
     (void)arg;
     while (g_running) {
-        char macs[MAX_DEVICES][64];
+        /* ⭐⭐ THE BRIDGED PADS, READ FROM THE SESSION TABLE ON EVERY PASS
+         * (code review, 2026-10-05). This read a list published from a device
+         * scan: every Bluetooth device the TV had, bridged or not, kept out of
+         * sniff mode for the whole stream, which costs the pads their battery,
+         * while a pad that came after the scan was never on it. ➡️ A pad is
+         * now kept awake exactly while it is bridged, and a released one drops
+         * off at once. ⓘ Copied out first: the spawns below take time, and the
+         * table's lock is only ever held for short looks. */
+        char macs[MAX_SESSIONS][64];
         int count = 0;
-        pthread_mutex_lock(&g_bt_mac_mutex);
-        count = g_bt_mac_count;
-        if (count > MAX_DEVICES) count = MAX_DEVICES;
-        for (int i = 0; i < count; ++i) {
-            snprintf(macs[i], sizeof(macs[i]), "%s", g_bt_macs[i]);
+        pthread_mutex_lock(&g_sessions_mutex);
+        for (int i = 0; i < g_session_count && count < MAX_SESSIONS; ++i) {
+            const bridge_session_t *session = &g_sessions[i];
+            if (session->stopping || !valid_bt_address(session->bt_mac)) {
+                continue;
+            }
+            bool duplicate = false;
+            for (int j = 0; j < count; ++j) {
+                if (strcmp(macs[j], session->bt_mac) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                snprintf(macs[count++], sizeof(macs[0]), "%s", session->bt_mac);
+            }
         }
-        pthread_mutex_unlock(&g_bt_mac_mutex);
+        pthread_mutex_unlock(&g_sessions_mutex);
 
         for (int i = 0; i < count; ++i) {
             stop_sniff_once(macs[i]);
@@ -189,35 +234,6 @@ void *stop_sniff_worker(void *arg)
         usleep(500000);
     }
     return NULL;
-}
-
-void publish_bt_macs(void)
-{
-    char macs[MAX_DEVICES][64];
-    int count = 0;
-    for (int i = 0; i < g_devices.count && count < MAX_DEVICES; ++i) {
-        const logical_device_t *item = &g_devices.items[i];
-        if (strcmp(bus_label(item->bus), "BT") != 0 || !valid_bt_address(item->mac)) {
-            continue;
-        }
-        bool duplicate = false;
-        for (int j = 0; j < count; ++j) {
-            if (strcmp(macs[j], item->mac) == 0) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) {
-            snprintf(macs[count++], sizeof(macs[0]), "%s", item->mac);
-        }
-    }
-
-    pthread_mutex_lock(&g_bt_mac_mutex);
-    g_bt_mac_count = count;
-    for (int i = 0; i < count; ++i) {
-        snprintf(g_bt_macs[i], sizeof(g_bt_macs[0]), "%s", macs[i]);
-    }
-    pthread_mutex_unlock(&g_bt_mac_mutex);
 }
 
 /* Set the agent endpoint directly, skipping discovery. When: a host app that
@@ -273,6 +289,11 @@ int send_agent_command(const char *command, char *response, size_t response_len)
      * broadcast discovery away. agent_is_known() is right for the UI and the
      * plug paths, which want "known AND answering"; this one wants "do we know
      * where to ask". */
+    /* ⓘ Empty on every path, so a caller that prints the reply after a failure
+     * before the read prints nothing rather than whatever was on its stack. */
+    if (response && response_len > 0) {
+        response[0] = '\0';
+    }
     if (!g_agent_host[0]) {
         return -1;
     }
@@ -404,7 +425,7 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
  * torn down here, after its entry already holds the new one, so no other path
  * can reach it. */
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port,
-                 const char *node)
+                 const char *node, const char *bt_mac)
 {
     pthread_mutex_lock(&g_sessions_mutex);
     int index = session_index_locked(key);
@@ -417,6 +438,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
                                      ? g_sessions[index].controller : NULL;
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
         snprintf(g_sessions[index].node, sizeof(g_sessions[index].node), "%s", node ? node : "");
+        snprintf(g_sessions[index].bt_mac, sizeof(g_sessions[index].bt_mac), "%s", bt_mac ? bt_mac : "");
         g_sessions[index].port = port;
         g_sessions[index].controller = controller;
         pthread_mutex_unlock(&g_sessions_mutex);
@@ -433,6 +455,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
     snprintf(g_sessions[g_session_count].key, sizeof(g_sessions[0].key), "%s", key);
     snprintf(g_sessions[g_session_count].busid, sizeof(g_sessions[0].busid), "%s", busid ? busid : "");
     snprintf(g_sessions[g_session_count].node, sizeof(g_sessions[0].node), "%s", node ? node : "");
+    snprintf(g_sessions[g_session_count].bt_mac, sizeof(g_sessions[0].bt_mac), "%s", bt_mac ? bt_mac : "");
     g_sessions[g_session_count].port = port;
     g_sessions[g_session_count].controller = controller;
     g_sessions[g_session_count].stopping = false;
@@ -756,6 +779,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     g_last_plug_unreachable = false;
     if (!g_agent_host[0]) {
         log_append("Windows agent not found");
+        ctm_gesture_log(NULL, "bridge refused for %s: no listener address yet, "
+                        "which only a stream sets", item->name);
         return false;
     }
 
@@ -803,6 +828,16 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     const int start_rc = send_agent_command(cmd, response, sizeof(response));
     if (start_rc != 0) {
         log_append("agent bridge start failed: %s", start_rc == -2 ? "listener not reached" : response);
+        /* ⭐ IN THE LOG THAT CAN BE READ (code review, 2026-10-05). log_append
+         * reaches only an on-screen console nobody has open, while the control
+         * port tells people the reason is in ctm-gesture.log -- so a refusal
+         * such as the listener's "ERR bad bridge args" was in no file at all. */
+        char why[160];
+        snprintf(why, sizeof(why), "%s",
+                 start_rc == -2 ? "listener not reached"
+                                : (response[0] ? response : "no answer in time"));
+        why[strcspn(why, "\r\n")] = '\0';
+        ctm_gesture_log(NULL, "bridge refused for %s (kind %s): %s", item->name, kind, why);
         g_last_plug_unreachable = start_rc == -2;
         ctm_agent_probe_soon();
         return false;
@@ -829,6 +864,8 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     ctm_controller_t *controller = ctm_controller_create(&cdev);
     if (!controller) {
         log_append("controller create failed");
+        ctm_gesture_log(NULL, "bridge failed for %s: no controller could be made for it",
+                        item->name);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
@@ -850,18 +887,24 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     }
     if (ctm_controller_plug_in(controller, g_agent_host, port) != 0) {
         log_append("controller plug-in failed");
+        ctm_gesture_log(NULL, "bridge failed for %s: its session did not start", item->name);
         ctm_controller_destroy(controller);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
     }
+    /* ⓘ Only a Bluetooth pad has an address the stopSniff worker can use. */
+    const char *bt_mac =
+        strcmp(cdev.bus, "BT") == 0 && valid_bt_address(cdev.mac) ? cdev.mac : "";
     /* ⛔ Its answer was ignored, which left a controller that could not be
      * recorded running with nothing able to release it. Now it is torn down
      * again: the table is full, or the key's previous session is still
      * stopping (see add_session). */
-    if (!add_session(session_key, busid, controller, port, cdev.path)) {
+    if (!add_session(session_key, busid, controller, port, cdev.path, bt_mac)) {
         log_append("controller for %s not recorded (table full, or its last session is "
                    "still stopping); undoing the plug", session_key);
+        ctm_gesture_log(NULL, "bridge undone for %s: it could not be recorded (table full, "
+                        "or its last session still stopping)", item->name);
         ctm_controller_plug_out(controller);
         ctm_controller_destroy(controller);
         snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busid);

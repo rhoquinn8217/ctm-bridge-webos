@@ -43,9 +43,6 @@ bool g_last_plug_unreachable;
 bool g_running = true;
 pthread_t g_stop_sniff_thread;
 bool g_stop_sniff_thread_started;
-pthread_mutex_t g_bt_mac_mutex = PTHREAD_MUTEX_INITIALIZER;
-char g_bt_macs[MAX_DEVICES][64];
-int g_bt_mac_count;
 
 char g_log[LOG_LEN];
 size_t g_log_used;

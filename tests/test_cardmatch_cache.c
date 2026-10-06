@@ -34,8 +34,10 @@
 static char g_dir[128];
 static char g_usbbus_path[160];
 static char g_notes_path[160];
+static char g_boot_path[160];
 #define CARDMATCH_USBBUS_PATH g_usbbus_path   /* "<dir>/card%d/usbbus" */
 #define CARDMATCH_NOTES_PATH  g_notes_path    /* "<dir>/notes" */
+#define CARDMATCH_BOOT_ID_PATH g_boot_path    /* "<dir>/boot_id" */
 
 static int  log_lines;
 static char last_log[512];
@@ -74,10 +76,20 @@ static void remove_usbbus(int card)
     rmdir(path);
 }
 
+/* The kernel's boot id, as the cache will read it. */
+static void set_boot(const char *id)
+{
+    FILE *f = fopen(g_boot_path, "w");
+    if (!f) { perror(g_boot_path); exit(2); }
+    fprintf(f, "%s\n", id);
+    fclose(f);
+}
+
 static void reset(void)
 {
     for (int card = 0; card < 8; ++card) remove_usbbus(card);
     unlink(g_notes_path);
+    set_boot("boot-one");
     memset(g_cardmatch_cache, 0, sizeof(g_cardmatch_cache));
     g_cardmatch_cached = 0;
     g_cardmatch_loaded = 0;
@@ -229,6 +241,34 @@ static void test_a_loaded_note_is_still_checked(void)
     ok(cardmatch_cache_get("/dev/hidraw2") == -1, "and the file no longer carries it either");
 }
 
+static void test_notes_do_not_outlive_a_reboot(void)
+{
+    puts("a note from an earlier boot is not loaded -- the cold-boot silent tone");
+    reset();
+    set_usbbus(2, "002/014");
+    cardmatch_cache_put("/dev/hidraw2", 2);
+    restart();
+    set_boot("boot-two");                 /* the TV was switched off and on */
+    /* The same ports enumerate the same card under the same numbers, which
+     * is exactly why the usbbus check alone let the old note through. */
+    ok(cardmatch_cache_get("/dev/hidraw2") == -1, "the old boot's note is not believed");
+    ok(g_cardmatch_cached == 0, "nothing loaded");
+    ok(strstr(last_log, "earlier boot") != NULL, "and the log says why");
+}
+
+static void test_an_unmarked_file_is_not_believed(void)
+{
+    puts("a notes file with no boot line (an older build's) is not believed");
+    reset();
+    set_usbbus(2, "002/014");
+    FILE *f = fopen(g_notes_path, "w");
+    if (!f) { perror(g_notes_path); exit(2); }
+    fprintf(f, "/dev/hidraw2 2 002/014\n");
+    fclose(f);
+    ok(cardmatch_cache_get("/dev/hidraw2") == -1, "its note is not loaded");
+    ok(strstr(last_log, "unmarked") != NULL, "and the log says it was unmarked");
+}
+
 static void test_no_file_is_no_notes(void)
 {
     puts("no file, as after a TV reboot, means no notes and no complaint");
@@ -269,6 +309,8 @@ int main(void)
     if (mkdir(g_dir, 0700) != 0 && errno != EEXIST) { perror(g_dir); return 2; }
     snprintf(g_usbbus_path, sizeof(g_usbbus_path), "%s/card%%d/usbbus", g_dir);
     snprintf(g_notes_path, sizeof(g_notes_path), "%s/notes", g_dir);
+    snprintf(g_boot_path, sizeof(g_boot_path), "%s/boot_id", g_dir);
+    set_boot("boot-one");
 
     puts("");
     test_remembers_while_the_card_is_the_same();   puts("");
@@ -280,11 +322,14 @@ int main(void)
     test_an_update_keeps_the_latest_identity();    puts("");
     test_notes_outlive_a_restart();                puts("");
     test_a_loaded_note_is_still_checked();         puts("");
+    test_notes_do_not_outlive_a_reboot();          puts("");
+    test_an_unmarked_file_is_not_believed();       puts("");
     test_no_file_is_no_notes();                    puts("");
     test_mirrors_the_real_source();                puts("");
 
     reset();
     unlink(g_notes_path);
+    unlink(g_boot_path);
     rmdir(g_dir);
     printf("%d checks, %d failed\n\n", checks, failed);
     return failed ? 1 : 0;

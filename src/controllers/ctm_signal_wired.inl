@@ -320,6 +320,18 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
 {
     if (!node || !node[0]) return -1;
 
+    /* ⭐ THE SWITCHES (code review, 2026-10-05). A refusal with no session
+     * played its tone and its haptic bump whatever Settings said, though
+     * ctm_controller.h promises each switch for a handover, a handback AND a
+     * refusal. Both off: nothing to play, and "played" is still the answer, so
+     * the app does not buzz in its place. One off: its channels stay silent. */
+    const int tone = ctm_sig_tone_on();
+    const int rumble = ctm_sig_rumble_on();
+    if (!tone && !rumble) {
+        wired_sig_log("refusal not played: the tone and rumble are switched off");
+        return 0;
+    }
+
     /* ⛔ THE LOCK COVERS THE PROBE *AND* THE PLAY.
      *
      * It used to be released the moment the probe answered, and the card was
@@ -372,6 +384,14 @@ int ctm_signal_wired_no_session(const char *node, int pattern)
         close(fd);
         pthread_mutex_unlock(&g_cardmatch_lock);
         return -1;
+    }
+    /* Channels 0 and 1 are the speaker, 2 and 3 the haptics (WIRED_SIG_CHANNELS). */
+    if (!tone || !rumble) {
+        for (int f = 0; f < frames; ++f) {
+            int16_t *at = buf + (size_t)f * WIRED_SIG_CHANNELS;
+            if (!tone)   { at[0] = 0; at[1] = 0; }
+            if (!rumble) { at[2] = 0; at[3] = 0; }
+        }
     }
 
     /* ⛔ WRITE IT IN PIECES, AND DO NOT CALL A SHORT WRITE A SUCCESS.

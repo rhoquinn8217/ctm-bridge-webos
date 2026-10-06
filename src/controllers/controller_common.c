@@ -3493,7 +3493,18 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     /* ⓘ The node write is a DualSense report, so it goes to a DualSense only.
      * The shutdown sweep below stays unconditional: it is not about this
      * device, and it is the one pass that reaches a pad nothing tracked. */
-    if (c->ops->speaks_ds5) micsafe_disarm_node(c->dev.path);
+    /* ⭐ A DEVICE THAT IS ALREADY GONE GETS NO WRITES (code review,
+     * 2026-10-05). Its node hung up, so every write below fails, and the
+     * release signal was still written whole: 1.2 s of failed Bluetooth
+     * reports for a DualSense switched off while bridged, 2.4 s when it was
+     * never primed, on the app's interface thread, which is where the reaper
+     * that brings a gone device here runs. The C3 logged it as "0 sent, 122
+     * failed, took 1220ms". */
+    pthread_mutex_lock(&c->status_mutex);
+    const int gone = c->st_device_gone;
+    pthread_mutex_unlock(&c->status_mutex);
+
+    if (c->ops->speaks_ds5 && !gone) micsafe_disarm_node(c->dev.path);
     if (why == CTM_UNPLUG_SHUTDOWN) {
         ctm_mic_safety_disarm_all_reason("the bridge is shutting down");
     }
@@ -3506,7 +3517,9 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
      * may close what it writes to while it does, and two signals on one light
      * is a flicker. See controller_signal_begin. */
     signal_close(c);
-    if (c->ops->speaks_ds5) {
+    if (gone) {
+        ctl_log(c, "unplugging -- the device is gone, so no release signal");
+    } else if (c->ops->speaks_ds5) {
         feedback_play_unplugging(c, why);
     } else if (c->ops->signal_unplugging) {
         /* ⓘ A type's own release signal -- a cabled DS4's. Played here for the

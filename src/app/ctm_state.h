@@ -120,6 +120,11 @@ typedef struct {
      * played into a live session -- which on the rooted monitor blocks for
      * five seconds a write and comes out as a click. 🔗 T-238. */
     char node[64];
+    /* ⭐ A Bluetooth pad's address, for the stopSniff worker; empty for
+     * anything else. The worker reads it from this table, so a pad is kept
+     * out of sniff mode exactly while it is bridged (code review,
+     * 2026-10-05). */
+    char bt_mac[64];
     int port;
     ctm_controller_t *controller;   /* owns the in-process bridging session */
     /* ⭐ Claimed by a path that is tearing it down, under g_sessions_mutex.
@@ -134,6 +139,11 @@ typedef struct {
     tv_bridge_worker_settings_t settings;
     unsigned int headset_volume_percent;
     unsigned int speaker_volume_percent;
+    /* ⭐ Which device the settings were made for, "vid:pid|mac|serial". The key
+     * is a node name for hidraw devices, and Linux gives a freed node to the
+     * next device: without this, a DualSense on a DS4's old node was bridged
+     * with the DS4's defaults (code review, 2026-10-05). */
+    char made_for[176];
 } ui_device_settings_t;
 
 /* One USB interface of the puck (from the device-dir sysfs walk). */
@@ -205,9 +215,6 @@ void ctm_agent_probe_soon(void);
 extern bool g_running;
 extern pthread_t g_stop_sniff_thread;
 extern bool g_stop_sniff_thread_started;
-extern pthread_mutex_t g_bt_mac_mutex;
-extern char g_bt_macs[MAX_DEVICES][64];
-extern int g_bt_mac_count;
 
 extern char g_log[LOG_LEN];
 extern size_t g_log_used;
@@ -292,7 +299,6 @@ void apply_settings_to_session(const logical_device_t *item);
 int run_child_wait(char *const argv[]);
 void stop_sniff_once(const char *mac);
 void *stop_sniff_worker(void *arg);
-void publish_bt_macs(void);
 void ctm_bridge_set_agent_host(const char *host, int port);
 void ctm_bridge_gesture_init(void);
 bool plug_in_by_node(const char *node);
@@ -303,7 +309,7 @@ int next_bridge_port(void);
 int first_scan_index_for_item(const logical_device_t *item);
 void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len);
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port,
-                 const char *node);
+                 const char *node, const char *bt_mac);
 void stop_session(const char *key);
 void release_local_sessions_on_exit(void);
 /* TV pointer -> host mouse (synthetic; feeds webOS-smoothed pointer to the PC). */
