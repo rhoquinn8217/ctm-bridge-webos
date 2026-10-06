@@ -626,6 +626,9 @@ void stop_session(const char *key)
 bool ctm_tv_pointer_plug(void)
 {
     if (g_tv_pointer_active) return true;
+    /* ⓘ Said as a controller's plug says it, so the app can try once more on
+     * a listener that was not reached (code review, 2026-10-05). */
+    g_last_plug_unreachable = false;
     /* The address, not the remembered answer: see plug_in_scan_index(). */
     if (!g_agent_host[0]) {
         log_append("TV pointer: Windows agent not found");
@@ -636,8 +639,10 @@ bool ctm_tv_pointer_plug(void)
     snprintf(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "ctm-mouse-%u", ++seq);
     char cmd[160], response[256];
     snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
-    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
+    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    if (start_rc != 0) {
         log_append("TV pointer: agent bridge start failed: %s", response);
+        g_last_plug_unreachable = start_rc == -2;
         return false;
     }
     if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
