@@ -631,7 +631,14 @@ bool ctm_tv_pointer_active(void)
  * was plugged out and destroyed twice (see stop_session). ➡️ It claims every
  * entry nobody else has, tears those down, and then WAITS for the ones another
  * path is still finishing, so the stream's end still returns with every release
- * played. ⓘ No BRIDGE_STOP, as before: the listener sees the connections close.
+ * played.
+ * ⭐ AND THE LISTENER IS TOLD, ONE BRIDGE_STOP A PAD (code review, 2026-10-05).
+ * This sent none and left the listener to see the connections close, which it
+ * takes for a link that may come back: it held every virtual pad on Windows
+ * for about 15 s with its last state, so a button down when the stream ended
+ * stayed down in the game. The TV no longer reconnects a dropped stream, so
+ * that wait bought nothing. ⓘ Stopped at the first listener that cannot be
+ * reached: a PC that has gone away would otherwise cost a second a pad.
  * ⚠️ The wait gives up after 5 s rather than hanging an exit on a teardown that
  * never finishes. */
 void release_local_sessions_on_exit(void)
@@ -639,6 +646,7 @@ void release_local_sessions_on_exit(void)
     ctm_tv_pointer_unplug();
 
     char keys[MAX_SESSIONS][sizeof(g_sessions[0].key)];
+    char busids[MAX_SESSIONS][sizeof(g_sessions[0].busid)];
     ctm_controller_t *controllers[MAX_SESSIONS];
     int n = 0;
     pthread_mutex_lock(&g_sessions_mutex);
@@ -648,15 +656,25 @@ void release_local_sessions_on_exit(void)
         }
         g_sessions[i].stopping = true;
         snprintf(keys[n], sizeof(keys[n]), "%s", g_sessions[i].key);
+        snprintf(busids[n], sizeof(busids[n]), "%s", g_sessions[i].busid);
         controllers[n] = g_sessions[i].controller;
         ++n;
     }
     pthread_mutex_unlock(&g_sessions_mutex);
 
+    bool listener_reached = true;
     for (int i = 0; i < n; ++i) {
         if (controllers[i]) {
             ctm_controller_plug_out_reason(controllers[i], CTM_UNPLUG_SHUTDOWN);
             ctm_controller_destroy(controllers[i]);
+        }
+        if (listener_reached && busids[i][0]) {
+            char cmd[96];
+            char response[128];
+            snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busids[i]);
+            if (send_agent_command(cmd, response, sizeof(response)) == -2) {
+                listener_reached = false;
+            }
         }
     }
 
@@ -838,6 +856,18 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
                                 : (response[0] ? response : "no answer in time"));
         why[strcspn(why, "\r\n")] = '\0';
         ctm_gesture_log(NULL, "bridge refused for %s (kind %s): %s", item->name, kind, why);
+        /* ⭐ NO ANSWER IS NOT NO SESSION (code review, 2026-10-05). The command
+         * reached the listener, which may have started the session and only
+         * been slow to say so; given up on without a word, it stayed on the
+         * PC as a phantom pad holding its port. So it is told to stop. */
+        if (start_rc == -1 && !response[0]) {
+            char stop[96];
+            char stop_reply[128];
+            snprintf(stop, sizeof(stop), "BRIDGE_STOP %s", busid);
+            (void)send_agent_command(stop, stop_reply, sizeof(stop_reply));
+            ctm_gesture_log(NULL, "no answer for %s in time: told the listener to stop %s",
+                            item->name, busid);
+        }
         g_last_plug_unreachable = start_rc == -2;
         ctm_agent_probe_soon();
         return false;
