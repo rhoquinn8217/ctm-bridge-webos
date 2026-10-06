@@ -237,8 +237,11 @@ extern bool g_log_dirty;              /* set by log_append, cleared by ctm_ui_lo
  * ⓘ Falls back to /tmp when HOME is unset (desktop builds and the unit tests),
  * where /tmp is writable and this restriction does not apply.
  *
- * ⚠️ ctm_log_path() returns a SHARED STATIC BUFFER. Use it and be done with it;
- * do not hold it across another call, and never use two in one expression. */
+ * ⚠️ ctm_log_path() returns a buffer of the calling thread's own
+ * (log_path.inl), so another thread cannot change it under you (code review,
+ * 2026-10-05: it was one buffer for the whole process, and a line could land in
+ * another thread's file). Use it and be done with it: this thread's next call
+ * reuses the buffer, so never use two in one expression. */
 const char *ctm_log_path(const char *name);
 FILE *ctm_log_open(const char *name, const char *mode);
 
