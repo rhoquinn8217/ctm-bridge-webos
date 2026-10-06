@@ -336,7 +336,6 @@ static void refresh_devices(void)
 {
     enumerate_devices(&g_scan);
     build_logical_devices(&g_scan, &g_devices);
-    publish_bt_macs();
 
     /* The remote's row mirrors the LIVE TV-pointer state (never the persisted
      * plug keys) — a Back-hold release shows up on the next tick, and a stale

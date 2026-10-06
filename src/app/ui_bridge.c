@@ -199,15 +199,34 @@ void *stop_sniff_worker(void *arg)
 {
     (void)arg;
     while (g_running) {
-        char macs[MAX_DEVICES][64];
+        /* ⭐⭐ THE BRIDGED PADS, READ FROM THE SESSION TABLE ON EVERY PASS
+         * (code review, 2026-10-05). This read a list published from a device
+         * scan: every Bluetooth device the TV had, bridged or not, kept out of
+         * sniff mode for the whole stream, which costs the pads their battery,
+         * while a pad that came after the scan was never on it. ➡️ A pad is
+         * now kept awake exactly while it is bridged, and a released one drops
+         * off at once. ⓘ Copied out first: the spawns below take time, and the
+         * table's lock is only ever held for short looks. */
+        char macs[MAX_SESSIONS][64];
         int count = 0;
-        pthread_mutex_lock(&g_bt_mac_mutex);
-        count = g_bt_mac_count;
-        if (count > MAX_DEVICES) count = MAX_DEVICES;
-        for (int i = 0; i < count; ++i) {
-            snprintf(macs[i], sizeof(macs[i]), "%s", g_bt_macs[i]);
+        pthread_mutex_lock(&g_sessions_mutex);
+        for (int i = 0; i < g_session_count && count < MAX_SESSIONS; ++i) {
+            const bridge_session_t *session = &g_sessions[i];
+            if (session->stopping || !valid_bt_address(session->bt_mac)) {
+                continue;
+            }
+            bool duplicate = false;
+            for (int j = 0; j < count; ++j) {
+                if (strcmp(macs[j], session->bt_mac) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                snprintf(macs[count++], sizeof(macs[0]), "%s", session->bt_mac);
+            }
         }
-        pthread_mutex_unlock(&g_bt_mac_mutex);
+        pthread_mutex_unlock(&g_sessions_mutex);
 
         for (int i = 0; i < count; ++i) {
             stop_sniff_once(macs[i]);
@@ -215,35 +234,6 @@ void *stop_sniff_worker(void *arg)
         usleep(500000);
     }
     return NULL;
-}
-
-void publish_bt_macs(void)
-{
-    char macs[MAX_DEVICES][64];
-    int count = 0;
-    for (int i = 0; i < g_devices.count && count < MAX_DEVICES; ++i) {
-        const logical_device_t *item = &g_devices.items[i];
-        if (strcmp(bus_label(item->bus), "BT") != 0 || !valid_bt_address(item->mac)) {
-            continue;
-        }
-        bool duplicate = false;
-        for (int j = 0; j < count; ++j) {
-            if (strcmp(macs[j], item->mac) == 0) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) {
-            snprintf(macs[count++], sizeof(macs[0]), "%s", item->mac);
-        }
-    }
-
-    pthread_mutex_lock(&g_bt_mac_mutex);
-    g_bt_mac_count = count;
-    for (int i = 0; i < count; ++i) {
-        snprintf(g_bt_macs[i], sizeof(g_bt_macs[0]), "%s", macs[i]);
-    }
-    pthread_mutex_unlock(&g_bt_mac_mutex);
 }
 
 /* Set the agent endpoint directly, skipping discovery. When: a host app that
@@ -435,7 +425,7 @@ void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
  * torn down here, after its entry already holds the new one, so no other path
  * can reach it. */
 bool add_session(const char *key, const char *busid, ctm_controller_t *controller, int port,
-                 const char *node)
+                 const char *node, const char *bt_mac)
 {
     pthread_mutex_lock(&g_sessions_mutex);
     int index = session_index_locked(key);
@@ -448,6 +438,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
                                      ? g_sessions[index].controller : NULL;
         snprintf(g_sessions[index].busid, sizeof(g_sessions[index].busid), "%s", busid ? busid : "");
         snprintf(g_sessions[index].node, sizeof(g_sessions[index].node), "%s", node ? node : "");
+        snprintf(g_sessions[index].bt_mac, sizeof(g_sessions[index].bt_mac), "%s", bt_mac ? bt_mac : "");
         g_sessions[index].port = port;
         g_sessions[index].controller = controller;
         pthread_mutex_unlock(&g_sessions_mutex);
@@ -464,6 +455,7 @@ bool add_session(const char *key, const char *busid, ctm_controller_t *controlle
     snprintf(g_sessions[g_session_count].key, sizeof(g_sessions[0].key), "%s", key);
     snprintf(g_sessions[g_session_count].busid, sizeof(g_sessions[0].busid), "%s", busid ? busid : "");
     snprintf(g_sessions[g_session_count].node, sizeof(g_sessions[0].node), "%s", node ? node : "");
+    snprintf(g_sessions[g_session_count].bt_mac, sizeof(g_sessions[0].bt_mac), "%s", bt_mac ? bt_mac : "");
     g_sessions[g_session_count].port = port;
     g_sessions[g_session_count].controller = controller;
     g_sessions[g_session_count].stopping = false;
@@ -901,11 +893,14 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
         (void)send_agent_command(cmd, response, sizeof(response));
         return false;
     }
+    /* ⓘ Only a Bluetooth pad has an address the stopSniff worker can use. */
+    const char *bt_mac =
+        strcmp(cdev.bus, "BT") == 0 && valid_bt_address(cdev.mac) ? cdev.mac : "";
     /* ⛔ Its answer was ignored, which left a controller that could not be
      * recorded running with nothing able to release it. Now it is torn down
      * again: the table is full, or the key's previous session is still
      * stopping (see add_session). */
-    if (!add_session(session_key, busid, controller, port, cdev.path)) {
+    if (!add_session(session_key, busid, controller, port, cdev.path, bt_mac)) {
         log_append("controller for %s not recorded (table full, or its last session is "
                    "still stopping); undoing the plug", session_key);
         ctm_gesture_log(NULL, "bridge undone for %s: it could not be recorded (table full, "
