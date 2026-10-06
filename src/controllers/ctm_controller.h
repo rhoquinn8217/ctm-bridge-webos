@@ -343,13 +343,6 @@ void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms);
 int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
 
-/* The same two notes for a pad that IS bridged: 0 handing over, 1 handed back,
- * 2 refused -- the values of btsig_pattern_t.
- * ⚠️ The CALLER owns the claim and the thread: a tone takes about a second
- * and the session thread carries the pad's reports.
- * ⓘ The tone switch is checked inside, so no caller needs to. */
-int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
-
 /* The same two notes on a bare node, with no session behind it: 0 handing
  * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about
  * five seconds, so this is the only way a DS4 tone reliably plays. */
@@ -547,11 +540,10 @@ void controller_set_overlay_cb(overlay_request_cb cb);
  * Deliberately per-controller: a file-level variable here would be shared by
  * every controller's thread, which is the fault that took four sessions to
  * find in the capture path. */
-/* ⓘ FIVE, because the DS4 uses five (code review, 2026-10-05): its two
- * diagnostic counters sit in slots 3 and 4, and with three slots every read of
- * them came back 0 and every write was dropped, so the counts that two of its
- * recorded conclusions rest on could never have counted. */
-#define CTM_TYPE_STATE_SLOTS 5
+/* ⓘ Three. The DS4's two diagnostic counters sat in slots 3 and 4 and so
+ * never counted, and the only code that read them was signal code nothing
+ * called; both went together (code review, 2026-10-05). */
+#define CTM_TYPE_STATE_SLOTS 3
 uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot);
 void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v);
 
