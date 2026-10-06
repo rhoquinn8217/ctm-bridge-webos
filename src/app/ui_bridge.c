@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
@@ -241,10 +242,53 @@ void *stop_sniff_worker(void *arg)
  * that same machine) can say so instead of relying on a broadcast probe, which
  * cannot leave the local network. Passing NULL or "" clears it and restores
  * discovery. */
+/* ⭐ A PC ADDED BY NAME IS LOOKED UP HERE, ONCE A STREAM (code review,
+ * 2026-10-05). The commands to the listener took only a dotted IPv4 address,
+ * so a PC added by name -- a DDNS name, the usual way to reach one from
+ * outside -- streamed and could never bridge: every bridge said "listener not
+ * reached". The name becomes its IPv4 address here, and every connection to
+ * the listener uses that, the commands and the pads' own.
+ * ⓘ IPv4 only, because the listener listens on IPv4 alone. A name without an
+ * IPv4 address, or an IPv6 address, is kept as given and logged, and fails as
+ * it did before.
+ * ⓘ This runs on the interface thread as the stream starts, and a lookup can
+ * wait on the network. It is the name the stream itself was looked up by a
+ * moment earlier, so the network has just answered for it; a name it could
+ * not answer for never got as far as a stream. */
+static void agent_host_ipv4(const char *host, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%s", host);
+    struct in_addr literal;
+    if (inet_aton(host, &literal) != 0) {
+        return;
+    }
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    const int rc = getaddrinfo(host, NULL, &hints, &result);
+    char text[INET_ADDRSTRLEN];
+    if (rc == 0 && result &&
+        inet_ntop(AF_INET, &((const struct sockaddr_in *)result->ai_addr)->sin_addr,
+                  text, sizeof(text))) {
+        snprintf(out, out_len, "%s", text);
+        ctm_gesture_log(NULL, "listener host %s is %s", host, text);
+    } else {
+        ctm_gesture_log(NULL, "listener host %s has no IPv4 address (%s): bridging cannot reach it",
+                        host, rc != 0 ? gai_strerror(rc) : "no answer");
+    }
+    if (result) {
+        freeaddrinfo(result);
+    }
+}
+
 void ctm_bridge_set_agent_host(const char *host, int port)
 {
     if (host && host[0]) {
-        snprintf(g_agent_host, sizeof(g_agent_host), "%s", host);
+        char address[sizeof(g_agent_host)];
+        agent_host_ipv4(host, address, sizeof(address));
+        snprintf(g_agent_host, sizeof(g_agent_host), "%s", address);
     } else {
         g_agent_host[0] = '\0';
     }
