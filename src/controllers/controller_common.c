@@ -102,7 +102,8 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 
 /* audio_control (byte 8) fields */
 #define DS5_AUDIO_OUT_PATH_SPEAKER     0x30  /* route playback to the controller speaker */
-/* ⭐⭐ ECHO CANCEL ONLY -- NOISE CANCEL IS DELIBERATELY OFF (2026-08-23).
+/* ⓘ HISTORY, SUPERSEDED BY THE NOTE BELOW: ECHO CANCEL ONLY, NOISE CANCEL
+ * OFF (2026-08-23). Both bits are written now, on both transports.
  *
  * ⓘ Byte 8 packs two independent switches: bit 2 echo cancel, bit 3 noise
  * cancel. They were set together because games send 0x3c, and only ONE of them
@@ -3343,7 +3344,8 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     return c;
 }
 
-/* Open this controller's per-MAC log file (/tmp/ctm-<mac>.log). When: plug_in. */
+/* Open this controller's per-MAC log file, ctm-<mac>.log in the app's logs
+ * folder ($HOME/logs, or /tmp with no HOME). When: plug_in. */
 static void open_log(ctm_controller_t *c)
 {
     char mac[64], name[128];
@@ -3506,9 +3508,8 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
      * through a teardown, the write has already landed. The detector uses the
      * same ordering for the same reason.
      *
-     * ⚠️ Costs ~100ms here: five writes, 20ms apart, because a single write
-     * can be lost. Accepted -- a tenth of a second once, on a path that is
-     * already tearing a session down.
+     * ⓘ One write (micsafe_disarm_node), so it costs a few milliseconds.
+     * It was five writes 20 ms apart once; the comment outlived them.
      *
      * ⭐ ON A FULL SHUTDOWN, SWEEP EVERYTHING rather than only this
      * controller. A device this app never tracked is exactly the one nothing

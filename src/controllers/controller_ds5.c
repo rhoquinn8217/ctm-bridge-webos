@@ -26,7 +26,8 @@ static bool ds5_matches(const ctm_controller_dev_t *dev)
 /* Light-show diagnostics. The relay path runs up to a thousand times a second,
  * so this logs the FIRST few reports of a show and nothing after -- enough to
  * see what arrived and what was written, without writing a file at input rate.
- * Uses the controller's own log, which lands in /tmp/ctm-<mac-or-kind>.log. */
+ * Uses the controller's own log, ctm-<mac-or-kind>.log in the app's logs
+ * folder. */
 
 /* Which scratch slot each feature uses. Per controller, never shared. */
 /* We write no lightbar patterns. The light belongs, in order, to the player's
@@ -70,7 +71,8 @@ static uint64_t ds5_now_ms(void)
  *
  * Same two bits, same fix, the other transport. */
 #define DS5_BT_AUDIO_OUT_PATH_SPEAKER  0x30
-/* ⭐⭐ ECHO CANCEL ONLY -- NOISE CANCEL IS DELIBERATELY OFF (2026-08-23).
+/* ⓘ HISTORY, SUPERSEDED BY THE NOTES BELOW: ECHO CANCEL ONLY, NOISE CANCEL
+ * OFF (2026-08-23). Both bits are written now, on both transports.
  *
  * ⓘ Byte 8 packs two independent switches: bit 2 echo cancel, bit 3 noise
  * cancel. They were set together because games send 0x3c, and only ONE of them
@@ -92,6 +94,9 @@ static uint64_t ds5_now_ms(void)
  * would mean the two bits are not independent after all, which the staged
  * measurement suggests they are but never proved. */
 /* ⛔⛔ BLUETOOTH KEEPS BIT 3. WIRED DOES NOT. Measured 2026-08-24.
+ * ⓘ Superseded the same day for the cable too: the wired speaker attenuates
+ * without bit 3 as well, so both transports write both bits
+ * (DS5_AUDIO_ECHO_NOISE_CANCEL in controller_common.c).
  *
  * ⚠️ THE TWO BITS ARE INDEPENDENT ON A CABLE AND NOT OVER BLUETOOTH. Dropping
  * noise cancel fixed the microphone's dead channel on wired, and the speaker

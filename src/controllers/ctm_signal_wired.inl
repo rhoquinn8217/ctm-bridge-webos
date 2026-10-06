@@ -306,8 +306,8 @@ static void wired_sig_prepare(const char *node)
     rep[DS5_IDX_VALID_FLAG0]    = DS5_F0_ALLOW_SPEAKER_VOLUME |
                                   DS5_F0_ALLOW_AUDIO_CONTROL;
     rep[DS5_IDX_SPEAKER_VOLUME] = 0x64;
-    /* ⓘ Echo cancel only -- noise cancel is beamforming and cost us the
-     * microphone's second channel. See the note in controller_common.c. */
+    /* ⓘ Both bits, echo and noise cancel, as everywhere: without noise
+     * cancel the speaker attenuates. See the note in controller_common.c. */
     rep[DS5_IDX_AUDIO_CONTROL]  = DS5_AUDIO_OUT_PATH_SPEAKER |
                                   DS5_AUDIO_ECHO_NOISE_CANCEL;
     (void)!write(fd, rep, sizeof(rep));

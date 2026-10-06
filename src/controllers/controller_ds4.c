@@ -303,32 +303,22 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .matches = ds4_matches,
     .select_node = NULL,
     .on_plug_init = NULL,
-    /* ⚠️ UNTESTED ON HARDWARE: the chord and the overlay blanking, at the
-     * Bluetooth report's offsets. Kept to exactly that -- no signal, nothing
-     * else -- because no TV available when it was written could bridge a
-     * Bluetooth DS4 to try it. */
+    /* The chord and the overlay blanking, at the Bluetooth report's offsets. */
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_patch_output,
     /* ⭐ T-229: the volumes and the route are SENT on a change, because
      * patch_output alone only reaches a pad the host is already talking to. */
     .set_settings = ds4_bt_set_settings,
-    /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
-     * light and the pulse want a 0x11 builder that does not exist yet. */
-    /* ⭐⭐ LIGHT AND PULSE, BUT NOT THE TONE.
-     * The tone is played by ui_bridge.c outside the session, because a write
-     * to a bridged pad blocks for seconds. The light and the pulse are a
-     * handful of small reports, not a stream, so they are fine from in here --
-     * and they must be, because this is also what tells the TV to stand aside
-     * (ctm_controller_will_signal_connect reads this table). ⛔ Without it the
-     * TV fires its OWN pulse into our tone, which is the 2026-09-18 fault:
-     * "the TV pulsed a pad the core was about to sing to". */
+    /* ⭐⭐ ON BLUETOOTH THESE TWO ONLY SAY SO AND RETURN. The tone, the light
+     * and the pulse all ride the reports ds4_signal_tone_node writes, played by
+     * ui_bridge.c outside the session, because a write to a bridged pad blocks
+     * for seconds. ⭐ They stay in the table because it is also what tells the
+     * TV to stand aside (ctm_controller_will_signal_connect reads it). ⛔
+     * Without them the TV fires its OWN pulse into our tone, which is the
+     * 2026-09-18 fault: "the TV pulsed a pad the core was about to sing to". */
     .signal_connected = ds4_signal_connected,
     .signal_unplugging = ds4_signal_unplugging,
-    /* ⛔ NO .signal_unplugging either. The handback is played in ui_bridge.c
-     * AFTER the session has gone, for the same reason the handover is played
-     * before it starts: a tone from inside a live session is starved. Wiring
-     * it here too would play a second, broken one first. 🔗 T-238. */
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */

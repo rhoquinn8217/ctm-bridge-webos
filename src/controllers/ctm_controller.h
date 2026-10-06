@@ -3,11 +3,8 @@
 
 /* Controller abstraction (D2). One mechanism per detected controller: each
  * type supplies an ops vtable; the factory picks the right ops for a device.
- *
- * STAGE 1 (scaffold, this commit): the interface + classification (matches) +
- * the factory. The shared byte pump in controller_common.c and the wiring into
- * plug_in_item are STAGE 2 — until then these ops do not yet drive live
- * sessions; the proven tv_bridge_worker / ctm_hidraw_bridge paths still run.
+ * The shared byte pump in controller_common.c runs every live session through
+ * these ops; the older bridge paths they replaced are gone.
  *
  * The layer is UI-independent: the app fills a neutral ctm_controller_dev_t
  * from its logical_device_t, so controllers/ does not depend on app/ types. */
@@ -504,7 +501,8 @@ uint32_t controller_signal_kept(ctm_controller_t *c);
 void controller_signal_motors_done(ctm_controller_t *c);
 bool controller_signal_motors_held(ctm_controller_t *c);
 
-/* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
+/* Write a line to this controller's own log (ctm-<mac-or-kind>.log, in the
+ * app's logs folder: $HOME/logs, or /tmp with no HOME), and
  * to the app's console sink if one is set. When: a type wants to record
  * something about its device. Cheap, but it opens a file -- do not call it per
  * report in the relay path without throttling. */
