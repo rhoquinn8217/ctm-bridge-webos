@@ -134,6 +134,11 @@ typedef struct {
     tv_bridge_worker_settings_t settings;
     unsigned int headset_volume_percent;
     unsigned int speaker_volume_percent;
+    /* ⭐ Which device the settings were made for, "vid:pid|mac|serial". The key
+     * is a node name for hidraw devices, and Linux gives a freed node to the
+     * next device: without this, a DualSense on a DS4's old node was bridged
+     * with the DS4's defaults (code review, 2026-10-05). */
+    char made_for[176];
 } ui_device_settings_t;
 
 /* One USB interface of the puck (from the device-dir sysfs walk). */

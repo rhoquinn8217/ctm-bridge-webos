@@ -81,23 +81,49 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
     return settings;
 }
 
+/* The device a record's defaults are for, so a record can tell when its node
+ * has passed to another one. */
+static void record_identity(const logical_device_t *item, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%s:%s|%s|%s", item->vid, item->pid, item->mac, item->serial);
+}
+
+/* Fills a record with the defaults for `item`, the device it is now for. */
+static void record_reset(ui_device_settings_t *record, const logical_device_t *item)
+{
+    snprintf(record->key, sizeof(record->key), "%s", item->key);
+    record->settings = default_settings_for_item(item);
+    record->headset_volume_percent = record->settings.headset_volume_percent;
+    record->speaker_volume_percent = record->settings.speaker_volume_percent;
+    record_identity(item, record->made_for, sizeof(record->made_for));
+}
+
 ui_device_settings_t *ui_record_for_item(const logical_device_t *item)
 {
     if (!item) return NULL;
     for (int i = 0; i < g_settings_count; ++i) {
         if (strcmp(g_settings[i].key, item->key) == 0) {
+            /* ⛔⛔ THE SAME NODE IS NOT THE SAME DEVICE (code review,
+             * 2026-10-05). A hidraw device's key is its node, records are never
+             * removed, and Linux hands a freed node to the next device: a
+             * Bluetooth DualSense taking a Bluetooth DS4's old hidraw number was
+             * bridged with the DS4's defaults -- speaker 0x3b, under the
+             * DualSense's audibility floor, and haptics gain 0. ➡️ A record made
+             * for another device starts over with this one's defaults. */
+            char now[sizeof(g_settings[0].made_for)];
+            record_identity(item, now, sizeof(now));
+            if (strcmp(g_settings[i].made_for, now) != 0) {
+                ctm_gesture_log(NULL, "settings for %s were made for %s; starting over for %s",
+                                item->key, g_settings[i].made_for, now);
+                record_reset(&g_settings[i], item);
+            }
             return &g_settings[i];
         }
     }
     if (g_settings_count >= MAX_DEVICES) {
         return NULL;
     }
-    snprintf(g_settings[g_settings_count].key, sizeof(g_settings[0].key), "%s", item->key);
-    g_settings[g_settings_count].settings = default_settings_for_item(item);
-    g_settings[g_settings_count].headset_volume_percent =
-        g_settings[g_settings_count].settings.headset_volume_percent;
-    g_settings[g_settings_count].speaker_volume_percent =
-        g_settings[g_settings_count].settings.speaker_volume_percent;
+    record_reset(&g_settings[g_settings_count], item);
     return &g_settings[g_settings_count++];
 }
 
