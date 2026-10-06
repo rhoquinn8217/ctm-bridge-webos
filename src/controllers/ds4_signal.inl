@@ -376,9 +376,21 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
      * rhoquinn8217: *"We need to make sure that rumble lightbar and tone are
      * also gated by the USB Bridge settings like the dual sense."*
      * 🔗 The DualSense does the same thing in btsig_play_fd. */
-    if (!ctm_sig_tone_on()) {
-        ctl_log(log_to, "ds4sig: not played, the tone is switched off");
+    /* ⭐⭐ EACH SWITCH ITS OWN PART (code review, 2026-10-05). The light and the
+     * pulse ride these same reports, so returning here whenever the tone was
+     * off dropped them too: with the tone off a Bluetooth DS4 showed nothing at
+     * all on a bridge, a handback or a refusal. With the tone off the notes are
+     * silence now and the prime is skipped, so the light and the pulse still
+     * play on time; only with all three off is there nothing to send. */
+    const int tone = ctm_sig_tone_on();
+    const int show = vis != NULL && (vis->on || vis->rumble);
+    if (!tone && !show) {
+        ctl_log(log_to, "ds4sig: not played, the tone, light and rumble are all switched off");
         return 0;             /* switched off is not a failure */
+    }
+    if (!tone) {
+        ctl_log(log_to, "ds4sig: the tone is switched off -- light %s, pulse %s, over silence",
+                vis->on ? "on" : "off", vis->rumble ? "on" : "off");
     }
 
     const uint8_t (*first)[DS4SIG_FRAME_BYTES];
@@ -432,7 +444,9 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
      * condition it measured well in was a REFUSAL 4 s after another refusal
      * (5 of 5, 1% spread), so the gate would need to be far tighter than 5 s and
      * to know which signal it is. */
-    const int prime_frames = DS4SIG_PRIME_FRAMES * 3;
+    /* ⓘ No prime without a tone: it only wakes the decoder for the notes, and
+     * the light waits for it to finish. */
+    const int prime_frames = tone ? DS4SIG_PRIME_FRAMES * 3 : 0;
     (void) ds4sig_is_warm;
 
     /* The gap is silence rather than nothing, because the decoder wants a
@@ -441,13 +455,13 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
                           DS4SIG_GAP_FRAMES + DS4SIG_TONE_FRAMES];
     int n = 0;
     for (int i = 0; i < prime_frames; i++) frames[n++] = g_ds4sig_silence;
-    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = first[i];
+    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = tone ? first[i] : g_ds4sig_silence;
     for (int i = 0; i < DS4SIG_GAP_FRAMES;   i++) frames[n++] = g_ds4sig_silence;
-    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = second[i];
+    for (int i = 0; i < DS4SIG_TONE_FRAMES;  i++) frames[n++] = tone ? second[i] : g_ds4sig_silence;
 
     /* ⓘ One buffer for either report: 0x15 is the larger of the two. */
     uint8_t rep[DS4SIG_COMBO_LEN];
-    const int combo = (vis != NULL && vis->on) ? 1 : 0;
+    const int combo = show;   /* the 0x15 report carries the light, the pulse, or both */
     const size_t rep_len = combo ? (size_t)DS4SIG_COMBO_LEN : (size_t)DS4SIG_REPORT_LEN;
     /* ⭐ The light starts when the NOTES do, not during the prime: the prime is
      * silence, and a red flash over silence would arrive before the sound. */
@@ -521,10 +535,12 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
                 } else {
                     const int level = vis->solid ? 255
                                                  : ds4_signal_breath(at, vis->ms, vis->breaths);
-                    claims = 0x02u;             /* DS4_OUT_LIGHT */
-                    lr = (uint8_t)((vis->r * level) / 255);
-                    lg = (uint8_t)((vis->g * level) / 255);
-                    lb = (uint8_t)((vis->b * level) / 255);
+                    if (vis->on) {
+                        claims = 0x02u;         /* DS4_OUT_LIGHT */
+                        lr = (uint8_t)((vis->r * level) / 255);
+                        lg = (uint8_t)((vis->g * level) / 255);
+                        lb = (uint8_t)((vis->b * level) / 255);
+                    }
                     if (vis->rumble) {
                         claims |= 0x01u;        /* DS4_OUT_MOTORS, always, so a stop lands */
                         motor = (at < DS4SIG_VIS_PULSE_MS) ? DS4SIG_VIS_PULSE_LVL : 0;
@@ -559,8 +575,11 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     if (combo) {
         const uint8_t *quiet[DS4SIG_FRAMES_PER_REPORT];
         for (int q = 0; q < DS4SIG_FRAMES_PER_REPORT; ++q) quiet[q] = g_ds4sig_silence;
+        /* ⓘ Only what was used: a light switched off is never touched, not
+         * even to darken it. */
         ds4sig_build_combined(rep, counter, quiet,
-                              (uint8_t)(0x01u | 0x02u), 0, 0, 0, 0,
+                              (uint8_t)((vis->rumble ? 0x01u : 0u) | (vis->on ? 0x02u : 0u)),
+                              0, 0, 0, 0,
                               cfg_hp ? (uint8_t)cfg_hp : 0x4f,
                               cfg_sp ? (uint8_t)cfg_sp : 0x4f);
         if (write(fd, rep, rep_len) == (ssize_t)rep_len) sent++; else failed++;
@@ -700,12 +719,14 @@ int ds4_signal_tone_node(const char *node, int pattern)
      * ⚠️ The visible answer to a release therefore lands a little later than it
      * used to; that was the trade rhoquinn8217 asked for. 🔗 ds4_signal_unplugging,
      * which no longer draws it on Bluetooth. */
-    const int lit = 1;
+    /* ⭐ The light and the pulse follow their own switches (code review,
+     * 2026-10-05); both were set on here whatever Settings said. */
     ds4sig_visual_t vis;
     memset(&vis, 0, sizeof vis);
+    vis.on = ctm_sig_light_on();
+    vis.rumble = ctm_sig_rumble_on();
+    const int lit = vis.on || vis.rumble;
     if (lit) {
-        vis.on = 1;
-        vis.rumble = 1;
         int solid = 0;
         ds4_signal_shape_of(pattern, &vis.r, &vis.g, &vis.b, &vis.breaths, &solid, &vis.ms);
         vis.solid = solid;
@@ -736,8 +757,8 @@ int ds4_signal_refused_bt(const char *node)
      * layout and where it is sourced from. */
     ds4sig_visual_t vis;
     memset(&vis, 0, sizeof vis);
-    vis.on = 1;
-    vis.rumble = 1;
+    vis.on = ctm_sig_light_on();       /* ⭐ each its own switch, as above */
+    vis.rumble = ctm_sig_rumble_on();
     int solid = 0;
     ds4_signal_shape_of(2 /* BTSIG_REFUSED */, &vis.r, &vis.g, &vis.b,
                         &vis.breaths, &solid, &vis.ms);
