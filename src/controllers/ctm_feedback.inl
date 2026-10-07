@@ -157,15 +157,89 @@ static void feedback_paint_wired(ctm_controller_t *c, uint8_t r, uint8_t g, uint
     (void)!write(c->hid_fd, rep, sizeof(rep));
 }
 
+/* The whole signal's length: the lead-in, the notes and the gaps between them.
+ * ⓘ One place, so the light alone on a cable without its sound card lasts
+ * exactly as long as the full signal does (code review, 2026-10-05). */
+static int feedback_signal_frames(int beeps)
+{
+    const int frames_per  = (FEEDBACK_RATE * FEEDBACK_MS) / 1000;
+    const int gap_frames  = (FEEDBACK_RATE * FEEDBACK_GAP_MS) / 1000;
+    const int lead_frames = (FEEDBACK_RATE * FEEDBACK_LEAD_MS) / 1000;
+    return lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
+}
+
+static long feedback_signal_ms(int beeps)
+{
+    return (long)feedback_signal_frames(beeps) * 1000L / FEEDBACK_RATE;
+}
+
+/* ⭐⭐ THE LIGHT BREATHES THROUGH THE WAIT, instead of the wait being idle.
+ *
+ * ⛔ The first version wrote ONE report at full brightness and never
+ * animated, so the light sat solid for the whole signal -- rhoquinn8217,
+ * 2026-08-19: "yellow is solid". ⭐ Painting in steps across the same
+ * period the sound occupies makes the two one event rather than a colour
+ * that happens to be on while a tone plays.
+ *
+ * ⓘ Driven by the clock, like the app's pulses: a late step lands at the
+ * brightness that moment deserves rather than shifting the whole shape.
+ *
+ * ⚠️ Restores nothing at the end. The claim is released by writing the last
+ * frame, and whoever owns the light next writes over it -- on a handback
+ * and a refusal that is the app's player colour, a moment later.
+ * ⭐⭐ A BRIDGE ENDS GREEN, NOT DARK (rhoquinn8217, 2026-09-15): "have the
+ * last green flash persist rather than fade off. That way it has color
+ * incase nothing else changes after it bridges and isn't left off." A pad
+ * whose host sets no colour read as not connected. The host's own colour
+ * replaces the green whenever it sends one. */
+/* ⓘ Its own function since the code review of 2026-10-05, so a cable whose
+ * sound card could not be opened still gets the light (feedback_play).
+ * Returns 1 when it painted, 0 when the light is switched off or there is no
+ * time to paint in; the caller then waits on its own. */
+static int feedback_breathe_wired(ctm_controller_t *c, btsig_pattern_t pattern, long wait_ms)
+{
+    if (!c || wait_ms <= 0 || !ctm_sig_light_on()) return 0;
+    const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
+    const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
+    const long step_ms = 20;
+    const long pulses = (pattern == BTSIG_HANDING_OVER) ? 1 : 2;
+    const long span   = wait_ms / pulses;
+    for (long done = 0; done < wait_ms; done += step_ms) {
+        /* The settle below still runs, so the light is never left mid-breath. */
+        if (controller_signal_cancelled(c)) break;
+        const long within = done % span;
+        const long half   = span / 2;
+        long lvl = half ? ((within < half) ? (within * 255) / half
+                                           : ((span - within) * 255) / half)
+                        : 0;
+        if (lvl > 255) lvl = 255;
+        feedback_paint_wired(c, (uint8_t)((R * lvl) / 255),
+                                (uint8_t)((G * lvl) / 255), 0x00);
+        struct timespec st = {0, step_ms * 1000000L};
+        nanosleep(&st, NULL);
+    }
+    if (pattern == BTSIG_HANDING_OVER) {
+        feedback_paint_wired(c, 0x00, 0xff, 0x00);
+    } else {
+        feedback_paint_wired(c, 0x00, 0x00, 0x00);
+    }
+    return 1;
+}
+
 static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out,
                           btsig_pattern_t pattern)
 {
     if (!c) return;
     if (!CTM_SIGNALS_ENABLED) return;
-    if (c->alsa_fd < 0) {
-        /* NO AUDIO DEVICE, SO THIS IS BLUETOOTH -- and the TV does the whole
-         * signal itself: light, a felt pulse and a tone, in reports it builds
-         * and writes straight to the controller.
+    /* ⛔ THE BUS SAYS BLUETOOTH, NOT A MISSING SPEAKER (code review,
+     * 2026-10-05). This read "no audio device, so Bluetooth", and a cabled pad
+     * whose sound card could not be opened was sent the whole Bluetooth signal,
+     * 120 to 240 reports it has no use for. See signal_route.inl. */
+    const signal_route_t route = signal_route_for(c->dev.bus, c->alsa_fd >= 0);
+    if (route == SIGNAL_ROUTE_BLUETOOTH) {
+        /* BLUETOOTH, so the TV does the whole signal itself: light, a felt
+         * pulse and a tone, in reports it builds and writes straight to the
+         * controller.
          *
          * THIS REPLACES ASKING THE HOST. The first version filled in audio on
          * reports the host was already sending, and needed the host to keep
@@ -188,6 +262,17 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
          * vocabulary the app's own patterns used, so nothing is relearned. */
         btsig_play(c, pattern);
         ctl_log(c, "feedback: %s -- signalled from the TV", what);
+        return;
+    }
+
+    if (route == SIGNAL_ROUTE_LIGHT_ONLY) {
+        /* A CABLE WITHOUT ITS SOUND CARD: it could not be opened. The tone and
+         * the felt pulse both travel as audio, so neither can play. The light
+         * is a HID report and still can, for as long as the whole signal
+         * would have taken, so the two read alike. */
+        const int painted = feedback_breathe_wired(c, pattern, feedback_signal_ms(2) + 40);
+        ctl_log(c, "feedback: %s -- on a cable with no speaker device open: %s",
+                what, painted ? "the light alone" : "nothing, the light is switched off");
         return;
     }
 
@@ -214,7 +299,7 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
      * (FEEDBACK_REPEAT_GAP_MS), and a bridge made three seconds after cabling
      * sounded with no wait at all (C1, build 299). */
     const int lead_frames = (FEEDBACK_RATE * FEEDBACK_LEAD_MS) / 1000;
-    const int frames = lead_frames + beeps * frames_per + (beeps - 1) * gap_frames;
+    const int frames = feedback_signal_frames(beeps);
     const size_t bytes = (size_t)frames * FEEDBACK_CHANNELS * sizeof(int16_t);
     int16_t *buf = (int16_t *)calloc(1, bytes);
     if (!buf) {
@@ -340,53 +425,8 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
     const long wait_ms = play_ms + 40;
     struct timespec ts = {(time_t)(wait_ms / 1000),
                           (long)(wait_ms % 1000) * 1000000L};
-    /* ⭐⭐ THE LIGHT BREATHES THROUGH THE WAIT, instead of the wait being idle.
-     *
-     * ⛔ The first version wrote ONE report at full brightness and never
-     * animated, so the light sat solid for the whole signal -- rhoquinn8217,
-     * 2026-08-19: "yellow is solid". ⭐ Painting in steps across the same
-     * period the sound occupies makes the two one event rather than a colour
-     * that happens to be on while a tone plays.
-     *
-     * ⓘ Driven by the clock, like the app's pulses: a late step lands at the
-     * brightness that moment deserves rather than shifting the whole shape.
-     *
-     * ⚠️ Restores nothing at the end. The claim is released by writing the last
-     * frame, and whoever owns the light next writes over it -- on a handback
-     * and a refusal that is the app's player colour, a moment later.
-     * ⭐⭐ A BRIDGE ENDS GREEN, NOT DARK (rhoquinn8217, 2026-09-15): "have the
-     * last green flash persist rather than fade off. That way it has color
-     * incase nothing else changes after it bridges and isn't left off." A pad
-     * whose host sets no colour read as not connected. The host's own colour
-     * replaces the green whenever it sends one. */
-    if (c && c->alsa_fd >= 0 && wait_ms > 0 && ctm_sig_light_on()) {
-        const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
-        const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
-        const long step_ms = 20;
-        const long pulses = (pattern == BTSIG_HANDING_OVER) ? 1 : 2;
-        const long span   = wait_ms / pulses;
-        for (long done = 0; done < wait_ms; done += step_ms) {
-            /* The settle below still runs, so the light is never left mid-breath. */
-            if (controller_signal_cancelled(c)) break;
-            const long within = done % span;
-            const long half   = span / 2;
-            long lvl = half ? ((within < half) ? (within * 255) / half
-                                               : ((span - within) * 255) / half)
-                            : 0;
-            if (lvl > 255) lvl = 255;
-            feedback_paint_wired(c, (uint8_t)((R * lvl) / 255),
-                                    (uint8_t)((G * lvl) / 255), 0x00);
-            struct timespec st = {0, step_ms * 1000000L};
-            nanosleep(&st, NULL);
-        }
-        if (pattern == BTSIG_HANDING_OVER) {
-            feedback_paint_wired(c, 0x00, 0xff, 0x00);
-        } else {
-            feedback_paint_wired(c, 0x00, 0x00, 0x00);
-        }
-    } else {
-        nanosleep(&ts, NULL);
-    }
+    /* ⭐⭐ THE LIGHT BREATHES THROUGH THE WAIT: feedback_breathe_wired. */
+    if (!feedback_breathe_wired(c, pattern, wait_ms)) nanosleep(&ts, NULL);
     /* ⭐ SAYS WHAT IT DECIDED, not just what it did. The silent-first-tone
      * hunt went four rounds on guesses because this line could not distinguish
      * "the lead-in ran and did not help" from "the lead-in never ran". */

@@ -2857,6 +2857,10 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c);
  * matching (whose playback open it uses). Fork-only. */
 #include "ctm_signal_wired.inl"
 
+/* Which way a DualSense's signal goes. Before the feedback file, which asks it,
+ * and the plug-time speaker wake, which asks it too. */
+#include "signal_route.inl"
+
 #include "ctm_feedback.inl"
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
@@ -3279,8 +3283,15 @@ static void *session_main(void *arg)
          * ⓘ Wired takes the other branch: it has a real audio device, opened
          * in on_plug_init just above. */
         /* ⚠️ "No audio device" is not "Bluetooth DualSense": a keyboard has no
-         * audio device either, and was sent this 398-byte report. */
-        if (c->ops->speaks_ds5 && c->alsa_fd < 0) btsig_wake_speaker(c);
+         * audio device either, and was sent this 398-byte report. ⛔ Nor is a
+         * cabled DualSense, which has none YET: its card is opened by the card
+         * match inside the session, after this line, so every cabled bridge
+         * was sent the Bluetooth report too (code review, 2026-10-05). The bus
+         * decides: signal_route.inl. */
+        if (c->ops->speaks_ds5 &&
+            signal_route_for(c->dev.bus, c->alsa_fd >= 0) == SIGNAL_ROUTE_BLUETOOTH) {
+            btsig_wake_speaker(c);
+        }
 
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
