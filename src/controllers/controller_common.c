@@ -3564,10 +3564,15 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
         pthread_join(c->session_thread, NULL);
         c->session_started = 0;
     }
+    /* ⛔ THE MICROPHONE THREAD FIRST, THEN ITS TRANSPORT (code review,
+     * 2026-10-05). It sends each capture on c->xport, and it was joined AFTER
+     * the transport was destroyed, so a capture in flight at a release could
+     * send on a transport that was gone. c->stop is set and the socket shut
+     * down above, so a send in progress returns and the thread leaves. */
+    mic_capture_stop(c);
     ctm_transport_disconnect(&c->xport);
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
-    mic_capture_stop(c);
     pthread_mutex_lock(&c->alsa_mutex);
     if (c->alsa_fd >= 0) {
         ctl_log(c, "alsa: speaker closed (plug out), fd=%d", c->alsa_fd);
