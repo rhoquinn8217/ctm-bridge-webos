@@ -16,7 +16,7 @@
 #include <errno.h>
 #include <poll.h>
 
-static inline int ctm_wait_readable(int fd, int timeout_ms)
+static inline int socket_wait_readable(int fd, int timeout_ms)
 {
     if (fd < 0) return -1;
     struct pollfd pfd;

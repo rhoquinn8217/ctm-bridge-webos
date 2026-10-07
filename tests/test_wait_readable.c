@@ -43,7 +43,7 @@ int main(void)
     printf("\na quiet socket: nothing within the deadline\n");
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    int r = ctm_wait_readable(sv[0], 50);
+    int r = socket_wait_readable(sv[0], 50);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     ok(r == 0, "returns 0 (nothing yet), the case the handshake counts");
     ok(elapsed_ms(&t0, &t1) >= 40, "and it waited for the deadline, not returned at once");
@@ -51,18 +51,18 @@ int main(void)
     printf("\na byte waiting: ready\n");
     char b = 'x';
     ok(write(sv[1], &b, 1) == 1, "wrote one byte from the far end");
-    ok(ctm_wait_readable(sv[0], 50) == 1, "returns 1");
+    ok(socket_wait_readable(sv[0], 50) == 1, "returns 1");
     ok(read(sv[0], &b, 1) == 1, "and the read takes it without blocking");
-    ok(ctm_wait_readable(sv[0], 0) == 0, "drained: back to 0");
+    ok(socket_wait_readable(sv[0], 0) == 0, "drained: back to 0");
 
     printf("\nthe far end closed: ready, so the read can report it\n");
     close(sv[1]);
-    ok(ctm_wait_readable(sv[0], 50) == 1, "returns 1");
+    ok(socket_wait_readable(sv[0], 50) == 1, "returns 1");
     ok(read(sv[0], &b, 1) == 0, "and the read says end of stream");
     close(sv[0]);
 
     printf("\nno socket\n");
-    ok(ctm_wait_readable(-1, 50) == -1, "returns -1 for fd -1");
+    ok(socket_wait_readable(-1, 50) == -1, "returns -1 for fd -1");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

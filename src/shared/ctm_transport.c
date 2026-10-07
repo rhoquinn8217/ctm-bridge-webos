@@ -264,7 +264,7 @@ int ctm_transport_wait_readable(ctm_transport_t *t, unsigned int timeout_ms)
 {
     if (!t) return -1;
     if (t->kind == CTM_TRANSPORT_ENET) return 1;
-    return ctm_wait_readable(t->fd, (int)timeout_ms);
+    return socket_wait_readable(t->fd, (int)timeout_ms);
 }
 
 int ctm_transport_connected(const ctm_transport_t *t)
