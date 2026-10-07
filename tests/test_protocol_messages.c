@@ -13,6 +13,7 @@
  *    Or:             ./tests/run-tests.sh
  */
 
+#include <stddef.h>
 #include <stdio.h>
 
 #include "../src/shared/ctm_bridge_protocol.h"
@@ -48,6 +49,23 @@ int main(void)
     ok(sizeof(ctmb_header_t) == 32, "32 bytes, packed");
     ok(CTMB_MAGIC == 0x54424d43u, "the magic number");
     ok(CTMB_VERSION == 1u, "version 1");
+    ok(offsetof(ctmb_header_t, payload_len) == 28, "the payload length last, at 28");
+
+    /* ⛔ NOTHING PINNED THESE (code review, 2026-10-05). Both ends copy each
+     * structure byte for byte: a field added, moved or resized on one side
+     * reads as garbage on the other, with no error anywhere. The listener's
+     * src/backend/bridge.inl asserts the same numbers when it compiles. */
+    printf("=== the structures both ends copy byte for byte ===\n");
+    ok(sizeof(ctmb_device_caps_t) == 272, "device caps: 272 bytes");
+    ok(offsetof(ctmb_device_caps_t, serial) == 80, "  the serial at 80");
+    ok(sizeof(ctmb_hid_descriptor_info_t) == 32, "descriptor info: 32 bytes");
+    ok(sizeof(ctmb_host_config_t) == 58, "host config: 58 bytes");
+    ok(offsetof(ctmb_host_config_t, latency_ms) == 27, "  the latency at 27");
+    ok(offsetof(ctmb_host_config_t, speaker_volume_pct) == 29, "  the speaker volume at 29");
+    ok(offsetof(ctmb_host_config_t, headset_volume_pct) == 30, "  the headset volume at 30");
+    ok(offsetof(ctmb_host_config_t, audio_mode) == 31, "  the audio mode at 31");
+    ok(sizeof(ctmb_enum_info_t) == 32, "enumeration info: 32 bytes");
+    ok(sizeof(ctmb_enum_iface_t) == 4, "an enumerated interface: 4 bytes");
 
     printf("\n%d check(s), %d failed\n", checks, failed);
     return failed ? 1 : 0;
