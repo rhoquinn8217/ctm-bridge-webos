@@ -608,7 +608,11 @@ void stop_session(const char *key)
 
 bool ctm_tv_pointer_plug(void)
 {
-    if (g_tv_pointer_active) return true;
+    if (g_tv_pointer_active) {
+        if (!ctm_hostmouse_host_gone()) return true;
+        /* Its session gave up on the host: end that one before a new one. */
+        ctm_tv_pointer_unplug();
+    }
     /* ⓘ Said as a controller's plug says it, so the app can try once more on
      * a listener that was not reached (code review, 2026-10-05). */
     g_last_plug_unreachable = false;
@@ -659,7 +663,10 @@ void ctm_tv_pointer_unplug(void)
 
 bool ctm_tv_pointer_active(void)
 {
-    return g_tv_pointer_active;
+    /* ⓘ Not once its session has given up on the host (code review,
+     * 2026-10-05): the remote's pointer goes back to the TV, and the panel
+     * shows it released. */
+    return g_tv_pointer_active && !ctm_hostmouse_host_gone();
 }
 
 /* ⭐ EVERY SESSION, AT THE END OF A STREAM OR OF THE APP.

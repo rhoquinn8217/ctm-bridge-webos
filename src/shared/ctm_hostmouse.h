@@ -31,6 +31,10 @@ int ctm_hostmouse_plug(const char *host, int port);
 /* Stop + join the session thread and drop the link. Safe when idle. */
 void ctm_hostmouse_unplug(void);
 
+/* True once a plugged session has given up on its host: no link for 15 s.
+ * The thread has ended; ctm_hostmouse_unplug() still tidies up. */
+bool ctm_hostmouse_host_gone(void);
+
 /* Feed pointer state from the app's event loop. x/y in surface coordinates of
  * a w x h surface (scaled to 0..32767 here); buttons bit0=left bit1=right
  * bit2=middle; wheel_delta in detents (+ away from user). Coalesces motion,

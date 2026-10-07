@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ctm_bridge_protocol.h"
@@ -93,6 +94,7 @@ static struct {
     volatile int stop;
     volatile int active;
     volatile int connected;
+    volatile int host_gone;   /* the session gave up on its host */
     char host[128];
     int port;
     ctm_transport_t xport;
@@ -145,18 +147,45 @@ static int hm_send_hello(void)
                                   hello, sizeof(hello));
 }
 
-/* Session thread: connect (retry until stop), HELLO, then serve the host's
- * feature requests / ignore outputs until the link drops; reconnect in place. */
+/* ⛔ IT GIVES UP AS A PAD DOES (code review, 2026-10-05). It retried every
+ * half second for as long as it was plugged, so a listener that had gone kept
+ * this thread knocking until the stream ended, and the remote stayed "bridged"
+ * in the panel with nothing reaching the PC. After this long without a link it
+ * stops and says so, the same fifteen seconds as a pad's session
+ * (CTM_HOST_GONE_MS); ctm_tv_pointer_active() then reads false, so the
+ * remote's pointer goes back to the TV and the panel shows it released. */
+#define HM_HOST_GONE_MS 15000
+
+static uint64_t hm_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+/* Session thread: connect (retry until stop, or until the host has been gone
+ * for HM_HOST_GONE_MS), HELLO, then serve the host's feature requests / ignore
+ * outputs until the link drops; reconnect in place. */
 static void *hm_session_main(void *arg)
 {
     (void)arg;
+    uint64_t lost_at = hm_now_ms();   /* the plug, then each link that dropped */
     while (!g_hm.stop) {
-        ctm_transport_init(&g_hm.xport, NULL);
         while (!g_hm.stop &&
                ctm_transport_connect_once(&g_hm.xport, g_hm.host, g_hm.port, 400) != 0) {
+            if (hm_now_ms() - lost_at >= HM_HOST_GONE_MS) {
+                hm_log("host gone: no link for %d s -- giving up", HM_HOST_GONE_MS / 1000);
+                g_hm.host_gone = 1;
+                break;
+            }
             usleep(500 * 1000);
         }
-        if (g_hm.stop) { ctm_transport_disconnect(&g_hm.xport); break; }
+        if (g_hm.stop || g_hm.host_gone) { ctm_transport_disconnect(&g_hm.xport); break; }
+        /* ⓘ Each link counts its messages from the start, as it did when the
+         * transport was made anew for every link. */
+        pthread_mutex_lock(&g_hm.xport.send_mutex);
+        g_hm.xport.send_sequence = 0;
+        pthread_mutex_unlock(&g_hm.xport.send_mutex);
         if (hm_send_hello() != 0) {
             hm_log("HELLO failed");
             ctm_transport_disconnect(&g_hm.xport);
@@ -190,7 +219,7 @@ static void *hm_session_main(void *arg)
         g_hm.connected = 0;
         pthread_mutex_unlock(&g_hm.state_mutex);
         ctm_transport_disconnect(&g_hm.xport);
-        ctm_transport_destroy(&g_hm.xport);
+        lost_at = hm_now_ms();
     }
     pthread_mutex_lock(&g_hm.state_mutex);
     g_hm.connected = 0;
@@ -204,8 +233,16 @@ int ctm_hostmouse_plug(const char *host, int port)
     snprintf(g_hm.host, sizeof(g_hm.host), "%s", host);
     g_hm.port = port;
     g_hm.stop = 0;
+    g_hm.host_gone = 0;
+    /* ⛔ ONCE PER PLUG, NOT PER LINK (code review, 2026-10-05). The session
+     * thread made the transport, and with it the send lock, anew on every
+     * reconnect, while the app's thread could be sending through that lock
+     * (ctm_hostmouse_feed). Made here and destroyed in ctm_hostmouse_unplug,
+     * both on the app's thread, which is also the one that feeds. */
+    ctm_transport_init(&g_hm.xport, NULL);
     if (pthread_create(&g_hm.thread, NULL, hm_session_main, NULL) != 0) {
         hm_log("session thread create failed");
+        ctm_transport_destroy(&g_hm.xport);
         return -1;
     }
     g_hm.thread_started = true;
@@ -223,8 +260,14 @@ void ctm_hostmouse_unplug(void)
         pthread_join(g_hm.thread, NULL);
         g_hm.thread_started = false;
     }
+    ctm_transport_destroy(&g_hm.xport);
     g_hm.active = 0;
     hm_log("unplugged");
+}
+
+bool ctm_hostmouse_host_gone(void)
+{
+    return g_hm.active && g_hm.host_gone;
 }
 
 void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_delta)
