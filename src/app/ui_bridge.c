@@ -9,6 +9,7 @@
 #include "ctm_hostmouse.h"
 #include "agent_address.inl"
 #include "agent_endpoint.inl"
+#include "agent_reply.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -345,15 +346,16 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_probed = true;
         /* -2, not -1: the listener was not REACHED, which one lost packet can
          * cause, so a caller may try again; -1 is every other failure. Callers
-         * that only ask "did it work" compare with 0 and are unaffected. */
-        return -2;
+         * that only ask "did it work" compare with 0 and are unaffected. The
+         * whole contract is agent_reply.inl's, with its test. */
+        return agent_command_rc(false, false, 0, NULL);
     }
 
     char line[512];
     snprintf(line, sizeof(line), "%s\n", command);
     if (send(fd, line, strlen(line), 0) < 0) {
         close(fd);
-        return -1;
+        return agent_command_rc(true, false, 0, NULL);
     }
     ssize_t n = recv(fd, response, response_len > 0 ? response_len - 1 : 0, 0);
     close(fd);
@@ -373,7 +375,7 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_online = true;
         g_agent_probed = true;
     }
-    return n > 0 && response && starts_with(response, "OK") ? 0 : -1;
+    return agent_command_rc(true, true, n, response);
 }
 
 static int session_index_locked(const char *key)
