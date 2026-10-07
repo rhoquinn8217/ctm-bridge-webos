@@ -175,10 +175,14 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
                                               * dualsensectl all use */
 
+/* The Bluetooth output reports' checksum, the one copy of it (code review,
+ * 2026-10-05). Before the microphone safety, which signs its packet with it. */
+#include "bt_sign.inl"
+
 /* Microphone safety. ⚠️ INCLUDED HERE, NEAR THE TOP, DELIBERATELY -- the input
  * relay calls into it and an include further down would be after its own
- * caller. It needs nothing from this file, only the standard headers above.
- * Fork-only. */
+ * caller. It needs nothing from this file but the checksum just above and the
+ * standard headers. Fork-only. */
 #include "ctm_mic_safety.inl"
 
 #define MAX_REPORT 4096
@@ -1721,30 +1725,12 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
     adopt_pad_mac(c, pad, "feature 0x09");
 }
 
-/* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
-static uint32_t crc32_step(uint32_t crc, const uint8_t *data, size_t len)
-{
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
-        }
-    }
-    return crc;
-}
-
 /* Append the Sony BT HID output-report CRC32 (seed 0xa2) into the trailing 4
- * bytes. When: a DS patch_output hook, after rewriting a report. */
+ * bytes. When: a DS patch_output hook, after rewriting a report. The checksum
+ * itself is bt_sign.inl's. */
 void ctm_bt_sign_output(uint8_t *data, size_t len)
 {
-    if (!data || len < 8) return;
-    uint8_t seed = 0xa2;
-    uint32_t crc = crc32_step(0xffffffffu, &seed, 1);
-    crc = ~crc32_step(crc, data, len - 4);
-    data[len - 4] = (uint8_t)(crc & 0xffu);
-    data[len - 3] = (uint8_t)((crc >> 8) & 0xffu);
-    data[len - 2] = (uint8_t)((crc >> 16) & 0xffu);
-    data[len - 1] = (uint8_t)((crc >> 24) & 0xffu);
+    bt_sign_output(data, len);
 }
 
 /* A report descriptor into the controller's log, 32 bytes a line, so a pad seen
