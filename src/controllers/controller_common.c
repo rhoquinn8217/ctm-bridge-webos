@@ -2887,6 +2887,18 @@ static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         if (c->stop) return -1;
         if (c->xport.kind == CTM_TRANSPORT_ENET) {
             if (ctm_transport_service(&c->xport, 50) < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+        } else {
+            /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
+             * 2026-10-05), so the 5 s below could never fire: a listener that
+             * accepted and said nothing held this session for ever, with no
+             * host-gone. Wait for something to read, a slice at a time, and
+             * count the slices that bring nothing. */
+            int ready = ctm_transport_wait_readable(&c->xport, 50);
+            if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+            if (ready == 0) {
+                if (now_us() - start >= 5000000ull) { ctl_log(c, "host config timeout"); return -1; }
+                continue;
+            }
         }
         int got = c_recv(c, &h, &payload);
         if (got < 0) { ctl_log(c, "host config receive failed"); return -1; }
