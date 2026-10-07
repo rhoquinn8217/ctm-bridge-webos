@@ -994,6 +994,12 @@ bool item_is_tv_remote(const logical_device_t *item)
  * logical row's Plug button. */
 bool plug_in_item(logical_device_t *item)
 {
+    /* ⛔ SAID ON EVERY PATH, NOT ONLY ONCE THE LISTENER IS ASKED (code
+     * review, 2026-10-05). Each way out before the request left the last
+     * plug's answer standing, so a stale "not reached" could schedule a
+     * pointless retry, hold a refusal back two seconds, or leave a pad lit
+     * as if it were being bridged. */
+    g_last_plug_unreachable = false;
     if (!item) {
         return false;
     }
