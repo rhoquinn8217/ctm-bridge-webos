@@ -2516,6 +2516,10 @@ static int send_keepalive(ctm_controller_t *c)
     return 0;
 }
 
+/* How long the loop below may sleep: until the keepalive is due, 20 ms at
+ * most. It was 1 ms for every device (code review, 2026-10-05). */
+#include "input_wait.inl"
+
 static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
@@ -2524,7 +2528,7 @@ static void *input_thread_main(void *arg)
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
-        int pr = poll(pfds, 2, 1);
+        int pr = poll(pfds, 2, input_wait_ms(now_us(), c->last_input_us, c->ops->keepalive_ms));
         if (pr < 0) { if (errno == EINTR) continue; break; }
         if (pr == 0) {
             /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
