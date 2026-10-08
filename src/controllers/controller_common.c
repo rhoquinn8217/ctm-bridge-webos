@@ -216,6 +216,11 @@ struct ctm_controller {
     int alsa_consec_fail;      /* audio writes that failed outright, in a row */
     int alsa_retry_streak;     /* audio writes that needed any retry, in a row */
     unsigned long long alsa_writes;   /* audio chunks written, for the log */
+    /* ⓘ The speaker's handle: held to write to it, close it or reopen it. */
+    pthread_mutex_t alsa_mutex;
+    /* Game audio chunks dropped while a signal had the speaker, for the log.
+     * The session thread's alone. */
+    unsigned alsa_busy_drops;
     /* The audio settings currently in force on this controller. Start as the
      * defaults and are updated by any host report that claims them, so a
      * reopen restores what the host asked for rather than what we assumed. */
@@ -590,7 +595,7 @@ static uint64_t now_us(void);
  * here than improving on it.
  *
  * When: once per arriving audio message, on the session thread. */
-static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
+static void write_iso_audio_locked(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
 {
     if (!c || c->alsa_fd < 0 || !pcm || len == 0) return;
 
@@ -687,6 +692,40 @@ static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t le
     }
     c->alsa_consec_fail = 0;
     c->alsa_retry_streak = 0;
+}
+
+/* ⭐⭐ ONE WRITER AT A TIME, AND NO CLOSE UNDER A WRITE (code review,
+ * 2026-10-05). Game audio arrives on the session thread and a signal's tone is
+ * written from its own thread, both through the function above: their chunks
+ * interleaved in the device, and a self-heal on one thread closed the handle
+ * under the other's write. alsa_mutex guards the handle now.
+ * ⓘ Game audio does not WAIT for a tone. A chunk that finds the speaker busy
+ * is dropped, as a chunk the device will not take always was, so the session
+ * thread, which carries the reports, never stalls behind a tone. */
+static void write_iso_audio(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
+{
+    if (!c) return;
+    if (pthread_mutex_trylock(&c->alsa_mutex) != 0) {
+        c->alsa_busy_drops++;
+        return;
+    }
+    if (c->alsa_busy_drops > 0) {
+        alsa_log("[alsa-write]", "dropped %u chunk(s) of game audio while a signal had the speaker",
+                 c->alsa_busy_drops);
+        c->alsa_busy_drops = 0;
+    }
+    write_iso_audio_locked(c, pcm, len);
+    pthread_mutex_unlock(&c->alsa_mutex);
+}
+
+/* A signal's way in: it waits its turn, and then has the speaker until its
+ * buffer is taken. */
+static void write_iso_audio_waiting(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
+{
+    if (!c) return;
+    pthread_mutex_lock(&c->alsa_mutex);
+    write_iso_audio_locked(c, pcm, len);
+    pthread_mutex_unlock(&c->alsa_mutex);
 }
 
 /* Monotonic clock in microseconds. When: pacing schedules + handshake timeout. */
@@ -3311,6 +3350,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     pthread_mutex_init(&c->settings_mutex, NULL);
     pthread_mutex_init(&c->status_mutex, NULL);
     pthread_mutex_init(&c->signal_mutex, NULL);
+    pthread_mutex_init(&c->alsa_mutex, NULL);
     pthread_cond_init(&c->signal_idle, NULL);
     return c;
 }
@@ -3539,11 +3579,13 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
     mic_capture_stop(c);
+    pthread_mutex_lock(&c->alsa_mutex);
     if (c->alsa_fd >= 0) {
         ctl_log(c, "alsa: speaker closed (plug out), fd=%d", c->alsa_fd);
         close(c->alsa_fd);
         c->alsa_fd = -1;
     }
+    pthread_mutex_unlock(&c->alsa_mutex);
     c->alsa_consec_fail = 0;
     c->alsa_retry_streak = 0;
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }
@@ -3635,6 +3677,7 @@ void ctm_controller_destroy(ctm_controller_t *c)
     pthread_mutex_destroy(&c->settings_mutex);
     pthread_mutex_destroy(&c->status_mutex);
     pthread_mutex_destroy(&c->signal_mutex);
+    pthread_mutex_destroy(&c->alsa_mutex);
     pthread_cond_destroy(&c->signal_idle);
     free(c->enum_payload);
     free(c->type_ctx);

@@ -7,6 +7,7 @@
 #include "ctm_state.h"
 #include "ctm_bridge_protocol.h"
 #include "ctm_hostmouse.h"
+#include "agent_address.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -241,10 +242,21 @@ void *stop_sniff_worker(void *arg)
  * that same machine) can say so instead of relying on a broadcast probe, which
  * cannot leave the local network. Passing NULL or "" clears it and restores
  * discovery. */
+/* ⭐ A PC added by name is looked up to its IPv4 address as the stream starts
+ * (code review, 2026-10-05): agent_address.inl says why, and what is kept. */
 void ctm_bridge_set_agent_host(const char *host, int port)
 {
     if (host && host[0]) {
-        snprintf(g_agent_host, sizeof(g_agent_host), "%s", host);
+        char address[sizeof(g_agent_host)];
+        const char *why = "";
+        const int found = agent_address_ipv4(host, address, sizeof(address), &why);
+        if (found > 0) {
+            ctm_gesture_log(NULL, "listener host %s is %s", host, address);
+        } else if (found < 0) {
+            ctm_gesture_log(NULL, "listener host %s has no IPv4 address (%s): bridging cannot reach it",
+                            host, why);
+        }
+        snprintf(g_agent_host, sizeof(g_agent_host), "%s", address);
     } else {
         g_agent_host[0] = '\0';
     }
@@ -582,6 +594,9 @@ void stop_session(const char *key)
 bool ctm_tv_pointer_plug(void)
 {
     if (g_tv_pointer_active) return true;
+    /* ⓘ Said as a controller's plug says it, so the app can try once more on
+     * a listener that was not reached (code review, 2026-10-05). */
+    g_last_plug_unreachable = false;
     /* The address, not the remembered answer: see plug_in_scan_index(). */
     if (!g_agent_host[0]) {
         log_append("TV pointer: Windows agent not found");
@@ -592,8 +607,16 @@ bool ctm_tv_pointer_plug(void)
     snprintf(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "ctm-mouse-%u", ++seq);
     char cmd[160], response[256];
     snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
-    if (send_agent_command(cmd, response, sizeof(response)) != 0) {
+    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    if (start_rc != 0) {
         log_append("TV pointer: agent bridge start failed: %s", response);
+        g_last_plug_unreachable = start_rc == -2;
+        /* ⓘ No answer is not no session, as for a pad (plug_in_scan_index):
+         * the listener may have started it, so it is told to stop. */
+        if (start_rc == -1 && !response[0]) {
+            snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", g_tv_pointer_busid);
+            (void)send_agent_command(cmd, response, sizeof(response));
+        }
         return false;
     }
     if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
@@ -631,7 +654,14 @@ bool ctm_tv_pointer_active(void)
  * was plugged out and destroyed twice (see stop_session). ➡️ It claims every
  * entry nobody else has, tears those down, and then WAITS for the ones another
  * path is still finishing, so the stream's end still returns with every release
- * played. ⓘ No BRIDGE_STOP, as before: the listener sees the connections close.
+ * played.
+ * ⭐ AND THE LISTENER IS TOLD, ONE BRIDGE_STOP A PAD (code review, 2026-10-05).
+ * This sent none and left the listener to see the connections close, which it
+ * takes for a link that may come back: it held every virtual pad on Windows
+ * for about 15 s with its last state, so a button down when the stream ended
+ * stayed down in the game. The TV no longer reconnects a dropped stream, so
+ * that wait bought nothing. ⓘ Stopped at the first listener that cannot be
+ * reached: a PC that has gone away would otherwise cost a second a pad.
  * ⚠️ The wait gives up after 5 s rather than hanging an exit on a teardown that
  * never finishes. */
 void release_local_sessions_on_exit(void)
@@ -639,6 +669,7 @@ void release_local_sessions_on_exit(void)
     ctm_tv_pointer_unplug();
 
     char keys[MAX_SESSIONS][sizeof(g_sessions[0].key)];
+    char busids[MAX_SESSIONS][sizeof(g_sessions[0].busid)];
     ctm_controller_t *controllers[MAX_SESSIONS];
     int n = 0;
     pthread_mutex_lock(&g_sessions_mutex);
@@ -648,15 +679,25 @@ void release_local_sessions_on_exit(void)
         }
         g_sessions[i].stopping = true;
         snprintf(keys[n], sizeof(keys[n]), "%s", g_sessions[i].key);
+        snprintf(busids[n], sizeof(busids[n]), "%s", g_sessions[i].busid);
         controllers[n] = g_sessions[i].controller;
         ++n;
     }
     pthread_mutex_unlock(&g_sessions_mutex);
 
+    bool listener_reached = true;
     for (int i = 0; i < n; ++i) {
         if (controllers[i]) {
             ctm_controller_plug_out_reason(controllers[i], CTM_UNPLUG_SHUTDOWN);
             ctm_controller_destroy(controllers[i]);
+        }
+        if (listener_reached && busids[i][0]) {
+            char cmd[96];
+            char response[128];
+            snprintf(cmd, sizeof(cmd), "BRIDGE_STOP %s", busids[i]);
+            if (send_agent_command(cmd, response, sizeof(response)) == -2) {
+                listener_reached = false;
+            }
         }
     }
 
@@ -838,6 +879,18 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
                                 : (response[0] ? response : "no answer in time"));
         why[strcspn(why, "\r\n")] = '\0';
         ctm_gesture_log(NULL, "bridge refused for %s (kind %s): %s", item->name, kind, why);
+        /* ⭐ NO ANSWER IS NOT NO SESSION (code review, 2026-10-05). The command
+         * reached the listener, which may have started the session and only
+         * been slow to say so; given up on without a word, it stayed on the
+         * PC as a phantom pad holding its port. So it is told to stop. */
+        if (start_rc == -1 && !response[0]) {
+            char stop[96];
+            char stop_reply[128];
+            snprintf(stop, sizeof(stop), "BRIDGE_STOP %s", busid);
+            (void)send_agent_command(stop, stop_reply, sizeof(stop_reply));
+            ctm_gesture_log(NULL, "no answer for %s in time: told the listener to stop %s",
+                            item->name, busid);
+        }
         g_last_plug_unreachable = start_rc == -2;
         ctm_agent_probe_soon();
         return false;
