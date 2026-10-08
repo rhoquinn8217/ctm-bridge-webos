@@ -153,6 +153,30 @@ static void test_dpad(void)
     ok(r[1 + 12] == 5, "left and right together cancel, leaving down -> 5");
 }
 
+/* ⭐ A held d-pad survives a resync (code review, 2026-10-05): the full read
+ * after dropped events took the hat and then the four buttons, so a hat pad's
+ * buttons, all up, cleared what the hat had just set. */
+static void test_dpad_after_resync(void)
+{
+    printf("\nthe d-pad read back whole after the kernel dropped events\n");
+    ok(xpad_dpad_read(-1, 0, 0, 0, 0, 0) == XPAD_DPAD_LEFT,
+       "a hat pad holding left keeps left: its four buttons read up");
+    ok(xpad_dpad_read(1, -1, 0, 0, 0, 0) == (XPAD_DPAD_UP | XPAD_DPAD_RIGHT),
+       "a hat pad holding up-right keeps both");
+    ok(xpad_dpad_read(0, 0, 0, 0, 0, 1) == XPAD_DPAD_DOWN,
+       "a button pad holding down keeps down: its hat reads 0");
+    ok(xpad_dpad_read(0, 0, 1, 0, 1, 0) == (XPAD_DPAD_LEFT | XPAD_DPAD_UP),
+       "a button pad holding up-left keeps both");
+    ok(xpad_dpad_read(0, 0, 0, 0, 0, 0) == 0, "nothing held is nothing");
+
+    xpad_state_t s;
+    uint8_t r[XPAD_BT_REPORT_LEN];
+    xpad_state_init(&s);
+    s.dpad = xpad_dpad_read(-1, 0, 0, 0, 0, 0);
+    frame(&s, r);
+    ok(r[1 + 12] == 7, "and the report says left -> 7");
+}
+
 static void test_rumble(void)
 {
     printf("\nthe host's rumble report\n");
@@ -209,6 +233,7 @@ int main(void)
     test_buttons();
     test_sticks_and_triggers();
     test_dpad();
+    test_dpad_after_resync();
     test_rumble();
 
     printf("\n%d check(s), %d failed\n", checks, failed);
