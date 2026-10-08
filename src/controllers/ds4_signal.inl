@@ -553,8 +553,7 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
                 if (at >= vis->ms) {
                     vis_done = 1;               /* one last dark report below */
                 } else {
-                    const int level = vis->solid ? 255
-                                                 : ds4_signal_breath(at, vis->ms, vis->breaths);
+                    const int level = ds4_signal_level(pattern, at);
                     if (vis->on) {
                         claims = 0x02u;         /* DS4_OUT_LIGHT */
                         lr = (uint8_t)((vis->r * level) / 255);
@@ -597,9 +596,14 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
         for (int q = 0; q < DS4SIG_FRAMES_PER_REPORT; ++q) quiet[q] = g_ds4sig_silence;
         /* ⓘ Only what was used: a light switched off is never touched, not
          * even to darken it. */
+        /* ⭐ A BRIDGE ENDS GREEN, the others dark (rhoquinn8217, 2026-10-08):
+         * green says "bridged" until the PC sets the light. A Bluetooth DS4
+         * cannot breathe as the other pads do -- a write to a bridged one can
+         * block for seconds -- so its green holds still. */
+        const uint8_t end_green = (pattern == 0 && vis->on) ? 0xff : 0x00;
         ds4sig_build_combined(rep, counter, quiet,
                               (uint8_t)((vis->rumble ? 0x01u : 0u) | (vis->on ? 0x02u : 0u)),
-                              0, 0, 0, 0,
+                              0, 0, end_green, 0,
                               cfg_hp ? (uint8_t)cfg_hp : 0x4f,
                               cfg_sp ? (uint8_t)cfg_sp : 0x4f);
         if (write(fd, rep, rep_len) == (ssize_t)rep_len) sent++; else failed++;

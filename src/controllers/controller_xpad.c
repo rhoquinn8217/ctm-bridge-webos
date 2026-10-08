@@ -24,6 +24,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <linux/input.h>
@@ -346,28 +347,33 @@ static int xpad_write_output(ctm_controller_t *c, int fd, const uint8_t *report,
     return 0;
 }
 
-/* ⭐ THE CONFIRMATION: one short pulse the moment the host has the pad.
+/* ⭐ THE CONFIRMATIONS: one short pulse as the host takes the pad, and one as
+ * it comes back -- one buzz for each, from one place (rhoquinn8217's rule,
+ * 2026-09-15: "a 1 buzz means ok and we will keep for bridge and release").
  *
  * ⛔ An Xbox pad has no light and no speaker, so the DualSense signal cannot
- * reach it, and the app skips its own SDL rumble for a wired node whose
- * session signals itself. ➡️ So it is played here, through the node this
- * session holds, as the session starts. ✅ Felt on the U5s 2026-09-13.
- * ⓘ Uploaded once and replayed on a reconnect; closing the node erases it. No
- * sleep: the kernel stops it after replay.length. */
-static int xpad_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
+ * reach it. The bridge's pulse was played here, as the session started, and
+ * the app played one of its own as well, because this type had no signal to
+ * tell it to stand aside: two buzzes where every other pad gives one (code
+ * review, 2026-10-05). ➡️ As this type's signals, both moments are the core's,
+ * the app stands aside for both (ctm_controller_will_signal_connect), and the
+ * release's buzz arrives with the release, not when the app notices it half a
+ * second or more later. ✅ The bridge's pulse was felt on the U5s 2026-09-13.
+ * ⓘ Uploaded once and replayed; closing the node erases it. No sleep on the
+ * way in: the kernel stops it after replay.length. Returns 1 when it played. */
+static int xpad_pulse(ctm_controller_t *c, uint16_t magnitude, uint16_t ms, const char *what)
 {
-    (void)t;
     xpad_ctx_t *x = (xpad_ctx_t *)controller_type_ctx(c);
     if (!x || x->fd < 0 || x->rumble_broken || !signals_rumble_on()) return 0;
     struct ff_effect e;
     memset(&e, 0, sizeof(e));
     e.type = FF_RUMBLE;
     e.id = (int16_t)x->pulse_id;
-    e.u.rumble.strong_magnitude = 0x7000;
-    e.u.rumble.weak_magnitude = 0x7000;
-    e.replay.length = 220;
+    e.u.rumble.strong_magnitude = magnitude;
+    e.u.rumble.weak_magnitude = magnitude;
+    e.replay.length = ms;
     if (ioctl(x->fd, EVIOCSFF, &e) < 0) {
-        ctl_log(c, "xpad: confirmation pulse refused errno=%d", errno);
+        ctl_log(c, "xpad: %s pulse refused errno=%d", what, errno);
         return 0;
     }
     x->pulse_id = e.id;
@@ -377,8 +383,26 @@ static int xpad_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
     play.code = (uint16_t)e.id;
     play.value = 1;
     const int played = write(x->fd, &play, sizeof(play)) == (ssize_t)sizeof(play);
-    ctl_log(c, "xpad: confirmation pulse %s", played ? "played" : "not played");
-    return 0;
+    ctl_log(c, "xpad: %s pulse %s", what, played ? "played" : "not played");
+    return played;
+}
+
+/* signal_connected: the session has started. Does not block. */
+static void xpad_signal_connected(ctm_controller_t *c)
+{
+    (void)xpad_pulse(c, 0x7000, 220, "confirmation");
+}
+
+/* signal_unplugging: as the pad comes back, the strength the app's release
+ * pulse had. ⓘ Waits it out: plug-out closes the node next, and closing it
+ * stops the pulse. */
+static void xpad_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
+{
+    (void)why;
+    if (xpad_pulse(c, 0xAFFF, 220, "release")) {
+        struct timespec ts = {0, 240 * 1000000L};
+        nanosleep(&ts, NULL);
+    }
 }
 
 const ctm_controller_ops_t controller_xpad_ops = {
@@ -391,7 +415,8 @@ const ctm_controller_ops_t controller_xpad_ops = {
      * host twice: the handover retires Moonlight's pad for it. */
     .grab_evdev = false,
     .matches = xpad_matches,
-    .on_plug_init = xpad_on_plug_init,
+    .signal_connected = xpad_signal_connected,
+    .signal_unplugging = xpad_signal_unplugging,
     .blank_input = xpad_blank_report,
     .preflight = xpad_preflight,
     .open_input = xpad_open_input,

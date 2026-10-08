@@ -202,19 +202,25 @@ static int feedback_breathe_wired(ctm_controller_t *c, btsig_pattern_t pattern, 
     const uint8_t R = (pattern != BTSIG_HANDING_OVER) ? 0xff : 0x00;
     const uint8_t G = (pattern != BTSIG_REFUSED)      ? 0xff : 0x00;
     const long step_ms = 20;
-    const long pulses = (pattern == BTSIG_HANDING_OVER) ? 1 : 2;
-    const long span   = wait_ms / pulses;
-    for (long done = 0; done < wait_ms; done += step_ms) {
-        /* The settle below still runs, so the light is never left mid-breath. */
+    /* ⭐⭐ THREE QUICK FLASHES ON THE WAY BACK, SOLID GREEN ON A BRIDGE
+     * (rhoquinn8217, 2026-10-08). This breathed twice for a release, where
+     * Bluetooth flashed three times and a DS4 breathed three. The flashes run
+     * their own length, past the tone's if need be, so a cable flashes as
+     * Bluetooth does, and the release waits for them. A bridge holds green
+     * for the tone and stays green: the breathing that follows is the
+     * session's (ready_light_tick), and a breath starts at full. */
+    const bool flashes = (pattern != BTSIG_HANDING_OVER);
+    const long paint_ms = (flashes && wait_ms < SIGNAL_FLASH_MS) ? SIGNAL_FLASH_MS : wait_ms;
+    int last = -1;
+    for (long done = 0; done < paint_ms; done += step_ms) {
+        /* The settle below still runs, so the light is never left mid-pattern. */
         if (controller_signal_cancelled(c)) break;
-        const long within = done % span;
-        const long half   = span / 2;
-        long lvl = half ? ((within < half) ? (within * 255) / half
-                                           : ((span - within) * 255) / half)
-                        : 0;
-        if (lvl > 255) lvl = 255;
-        feedback_paint_wired(c, (uint8_t)((R * lvl) / 255),
-                                (uint8_t)((G * lvl) / 255), 0x00);
+        const int lvl = flashes ? signal_flash_level(done, paint_ms, SIGNAL_FLASHES) : 255;
+        if (lvl != last) {
+            feedback_paint_wired(c, (uint8_t)((R * lvl) / 255),
+                                    (uint8_t)((G * lvl) / 255), 0x00);
+            last = lvl;
+        }
         struct timespec st = {0, step_ms * 1000000L};
         nanosleep(&st, NULL);
     }
@@ -325,10 +331,7 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
 
             const double t = (double)i / (double)FEEDBACK_RATE;
             const double tone = sin(2.0 * M_PI * hz[b] * t) * env * level;
-            const double bump = sin(2.0 * M_PI * FEEDBACK_RUMBLE_HZ * t) * env;
-
             const int16_t s = (int16_t)(tone * FEEDBACK_TONE_LEVEL);
-            const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
 
             /* ⭐ ONE WRITE CARRIES BOTH, so a switch zeroes its channels
              * rather than skipping anything -- see the note at the top of this
@@ -337,6 +340,26 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
             const int f = (base + i) * FEEDBACK_CHANNELS;
             buf[f + 0] = tone_on ? s : 0;   /* speaker left  */
             buf[f + 1] = tone_on ? s : 0;   /* speaker right */
+        }
+    }
+    /* ⭐⭐ ONE BUZZ, NOT ONE PER NOTE. rhoquinn8217's rule, 2026-09-15: "a 1
+     * buzz means ok and we will keep for bridge and release". The pulse ran
+     * under each note, so a cable buzzed twice where Bluetooth buzzes once
+     * (code review, 2026-10-05). One envelope now spans both notes and the
+     * gap between them. */
+    {
+        const int span = beeps * frames_per + (beeps - 1) * gap_frames;
+        const int attack  = span / 10;
+        const int release = (span * 18) / 100;
+        for (int i = 0; i < span; ++i) {
+            double env;
+            if (i < attack)                 env = (double)i / (double)attack;
+            else if (i > span - release)    env = (double)(span - i) / (double)release;
+            else                            env = 1.0;
+            const double t = (double)i / (double)FEEDBACK_RATE;
+            const double bump = sin(2.0 * M_PI * FEEDBACK_RUMBLE_HZ * t) * env;
+            const int16_t r = (int16_t)(bump * FEEDBACK_RUMBLE_LEVEL);
+            const int f = (lead_frames + i) * FEEDBACK_CHANNELS;
             buf[f + 2] = rumble_on ? r : 0; /* haptic left   */
             buf[f + 3] = rumble_on ? r : 0; /* haptic right  */
         }

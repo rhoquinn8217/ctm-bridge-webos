@@ -178,6 +178,8 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 /* The Bluetooth output reports' checksum, the one copy of it (code review,
  * 2026-10-05). Before the microphone safety, which signs its packet with it. */
 #include "bt_sign.inl"
+/* How every signal's light is shaped, and the bridged-and-waiting breath. */
+#include "signal_shape.inl"
 
 /* Microphone safety. ⚠️ INCLUDED HERE, NEAR THE TOP, DELIBERATELY -- the input
  * relay calls into it and an include further down would be after its own
@@ -266,6 +268,11 @@ struct ctm_controller {
      * connection (code review, 2026-10-05): input_link_lost(). Cleared when
      * a connection starts. */
     volatile int link_send_failed;
+    /* The bridged-and-waiting light: ready_light_tick(). */
+    volatile int ready_light_taken;   /* the PC has set the light: stop for good */
+    uint64_t ready_light_t0_us;       /* when it started breathing; 0 = not yet */
+    uint64_t ready_light_next_us;     /* when its next step is due */
+    int ready_light_failed;           /* writes in a row that did not go */
 
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
@@ -2238,6 +2245,61 @@ bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t valu
     return held;
 }
 
+/* Is a signal painting this pad, or is the pad on its way back to the TV?
+ * Either way its light is not the ready light's to touch. */
+static bool controller_signal_busy(ctm_controller_t *c)
+{
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool busy = c->signal_running || c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return busy;
+}
+
+/* --- the bridged-and-waiting light ----------------------------------------
+ *
+ * ⭐⭐ A BRIDGED PAD BREATHES GREEN UNTIL THE PC TAKES ITS LIGHT. rhoquinn8217,
+ * 2026-10-08: "I want a continuous breathing to show that it's ready and allow
+ * anything to take it, most likely steam. But I want it to signify it's
+ * already bridge but nothing has taken it yet."
+ *
+ * ⓘ On the session thread, which writes the PC's reports anyway: one light
+ * report every SIGNAL_READY_STEP_MS, from when the bridge's own signal has
+ * finished -- it ends on solid green, where the breath starts -- and never
+ * while a signal holds the pad or the pad is going back to the TV. The PC's
+ * first report that sets the light ends it for the rest of the session, a
+ * reconnect included: the PC still has the pad then. Nothing is restored when
+ * it stops, because the report that stopped it has just set the colour. */
+static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    if (c->ready_light_taken || !c->ops->host_sets_light) return;
+    if (!c->ops->host_sets_light(data, len)) return;
+    c->ready_light_taken = 1;
+    ctl_log(c, "ready light: the PC set the light%s",
+            c->ready_light_t0_us ? ", so it stops breathing" : " before it began to breathe");
+}
+
+static void ready_light_tick(ctm_controller_t *c)
+{
+    if (!c->ops->ready_light || c->ready_light_taken || !ctm_sig_light_on()) return;
+    const uint64_t now = now_us();
+    if (c->ready_light_next_us != 0 && now < c->ready_light_next_us) return;
+    c->ready_light_next_us = now + (uint64_t)SIGNAL_READY_STEP_MS * 1000u;
+    if (controller_signal_busy(c)) return;
+    if (c->ready_light_t0_us == 0) {
+        c->ready_light_t0_us = now;
+        ctl_log(c, "ready light: breathing green until the PC sets the light");
+    }
+    const int level = signal_ready_level((long)((now - c->ready_light_t0_us) / 1000u));
+    if (c->ops->ready_light(c, level) == 0) {
+        c->ready_light_failed = 0;
+    } else if (++c->ready_light_failed == 20) {
+        /* ⓘ A pad that refused a second of these refuses the rest: stop
+         * asking, rather than writing into nothing for the whole session. */
+        c->ready_light_taken = 1;
+        ctl_log(c, "ready light: 20 writes in a row failed, so it stops");
+    }
+}
+
 uint32_t controller_signal_kept(ctm_controller_t *c)
 {
     if (!c) return 0;
@@ -2759,6 +2821,9 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                            const ctmb_header_t *h, uint8_t *payload)
 {
     if (h->type == CTMB_MSG_OUTPUT_REPORT) {
+        /* ⓘ Before anything rewrites it: the PC setting the light ends the
+         * ready light (ready_light_note_host). */
+        ready_light_note_host(c, payload, h->payload_len);
         if (c->ops && c->ops->composite) {
             /* Route the host's OUT write to the interface that owns the OUT
              * endpoint it addressed (request_id = endpoint). Verbatim; pacing is
@@ -3110,6 +3175,8 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     /* ⓘ A failed send ends the connection too: input_link_lost(). */
     while (!c->stop && link_alive && !c->link_send_failed) {
         drain_paced(c, paced_q, &paced_head, &paced_count, &next_paced_us, host_cfg.bt_pace_us);
+        /* The bridged-and-waiting light: ready_light_tick. */
+        ready_light_tick(c);
         int timeout_ms = 50;
         if (paced_count > 0 && next_paced_us != 0) {
             uint64_t now = now_us();

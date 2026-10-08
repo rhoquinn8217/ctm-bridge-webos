@@ -14,6 +14,7 @@
 
 #include "ctm_controller.h"
 #include "ds4_report.inl"
+#include "signal_shape.inl"
 
 #include <errno.h>
 #include <fcntl.h>    /* open, for the refusal's node-level signal */
@@ -319,6 +320,11 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
      * 2026-09-18 fault: "the TV pulsed a pad the core was about to sing to". */
     .signal_connected = ds4_signal_connected,
     .signal_unplugging = ds4_signal_unplugging,
+    /* ⛔ NO READY LIGHT ON BLUETOOTH. The breath writes the pad twenty times a
+     * second, and a write to a bridged Bluetooth DS4 can block for seconds,
+     * holding the kernel's one lock for every hidraw node (2026-10-05, the
+     * rooted monitor). Its bridge signal ends on green instead, which stays
+     * until the PC sets the light (ds4_signal.inl). */
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */
@@ -355,14 +361,13 @@ static bool ds4_usb_matches(const ctm_controller_dev_t *dev)
  * SDL hands a DS4 the top byte of that. */
 #define DS4_PULSE_LEVEL     0xc0   /* 🔗 DS4SIG_VIS_PULSE_LVL: was 0x7f, exactly half */
 #define DS4_CONNECTED_MS    700
-#define DS4_RELEASED_MS     800
 /* Kept beside the host's colour, above its 24 bits: "the host has set one",
  * so black is a colour and never having set one is not. */
 #define DS4_KEPT_COLOUR     0x01000000u
 
 typedef struct {
     uint8_t r, g, b;
-    int breaths;
+    int breaths;        /* how many breaths, or flashes when `flashes` */
     long ms;
     /* ⭐ HOLD AT FULL INSTEAD OF BREATHING, which is what the DualSense does for
      * a handover. 🔗 btsig_level: *"Handing over: SOLID, not pulsing. The app's
@@ -370,6 +375,9 @@ typedef struct {
      * runs, so pulsing again animates the same event twice."* The same
      * reasoning applies here, so the same shape is used. */
     bool solid;
+    /* ⭐ THREE QUICK FLASHES FOR A RELEASE AND A REFUSAL, as every pad shows
+     * them (rhoquinn8217, 2026-10-08): signal_shape.inl. These breathed. */
+    bool flashes;
 } ds4_signal_shape_t;
 
 typedef struct {
@@ -387,9 +395,17 @@ typedef struct {
  *   refused       red, 3 flashes     -- R=0xff G=0x00
  * ⓘ The colours already matched; the counts did not, and a refusal had no
  * shape here at all. */
-static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS, true };
-static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, 3, DS4_RELEASED_MS, false };
-static const ds4_signal_shape_t k_ds4_refused   = { 0xff, 0x00, 0x00, 3, DS4_RELEASED_MS, false };
+static const ds4_signal_shape_t k_ds4_connected = { 0x00, 0xff, 0x00, 1, DS4_CONNECTED_MS, true, false };
+static const ds4_signal_shape_t k_ds4_released  = { 0xff, 0xff, 0x00, SIGNAL_FLASHES, SIGNAL_FLASH_MS, false, true };
+static const ds4_signal_shape_t k_ds4_refused   = { 0xff, 0x00, 0x00, SIGNAL_FLASHES, SIGNAL_FLASH_MS, false, true };
+
+/* The light's brightness `at` ms into a shape. */
+static int ds4_shape_level(const ds4_signal_shape_t *s, long at)
+{
+    if (s->solid) return 255;
+    if (s->flashes) return signal_flash_level(at, s->ms, s->breaths);
+    return ds4_breath_level(at, s->ms, s->breaths);
+}
 
 /* What a signal may claim right now, as output valid flags. */
 static uint8_t ds4_signal_drives(void)
@@ -488,7 +504,7 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
         /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
          * buzzes is for a pad with no lightbar and no speaker. */
         const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
-        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
+        const int level = light ? ds4_shape_level(s, at) : 0;
         if (level != last_level || (!motors_released && motor != last_motor)) {
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
                                              (motors_released ? 0 : DS4_OUT_MOTORS));
@@ -541,6 +557,14 @@ int ds4_signal_breath(long at_ms, long total_ms, int breaths)
     return ds4_breath_level(at_ms, total_ms, breaths);
 }
 
+int ds4_signal_level(int pattern, long at_ms)
+{
+    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
+                                : (pattern == 1) ? &k_ds4_released
+                                                 : &k_ds4_connected;
+    return ds4_shape_level(s, at_ms);
+}
+
 /* ⭐⭐ THE LIGHT AND THE PULSE ON A BARE NODE, with no session behind them.
  *
  * ⛔ A REFUSAL HAS NO CONTROLLER. A plug that failed leaves no object and no
@@ -574,7 +598,7 @@ int ds4_signal_light_pulse_node(const char *node, int pattern)
         /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
          * buzzes is for a pad with no lightbar and no speaker. */
         const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
-        const int level = light ? (s->solid ? 255 : ds4_breath_level(at, s->ms, s->breaths)) : 0;
+        const int level = light ? ds4_shape_level(s, at) : 0;
         if (level != last_level || motor != last_motor) {
             uint8_t rep[DS4_BT_OUT_LEN];
             const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
@@ -636,7 +660,7 @@ static void *ds4_connected_thread(void *arg)
     const uint8_t drives = ds4_signal_drives();
     ds4_signal_run_t run;
     ds4_signal_play(c, bt, &k_ds4_connected, drives, true, &run);
-    ctl_log(c, "signal: connected -- green breath %s, pulse %s: %d report(s), %d failed, %ldms%s",
+    ctl_log(c, "signal: connected -- green %s, pulse %s: %d report(s), %d failed, %ldms%s",
             (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
             run.sent, run.failed, run.took_ms, run.cut ? ", cut short by a release" : "");
 
@@ -698,7 +722,7 @@ static void ds4_signal_connected(ctm_controller_t *c)
     }
 }
 
-/* signal_unplugging: two yellow breaths and a pulse as the pad comes back. When:
+/* signal_unplugging: three quick yellow flashes and a pulse as the pad comes back. When:
  * plug-out, before the session stops and the node closes, with any connected
  * signal already stopped and waited for.
  *
@@ -734,7 +758,7 @@ static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
         if (ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
         else ++run.failed;
     }
-    ctl_log(c, "signal: %s -- yellow breaths %s, pulse %s: %d report(s), %d failed, %ldms",
+    ctl_log(c, "signal: %s -- yellow flashes %s, pulse %s: %d report(s), %d failed, %ldms",
             what, (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
             run.sent, run.failed, run.took_ms);
 }
@@ -821,6 +845,19 @@ static bool ds4_usb_read_pad_mac(ctm_controller_t *c, int fd, char *out, size_t 
     return true;
 }
 
+/* ready_light: the bridged-and-waiting breath on a cabled DS4 (ready_light_tick
+ * in controller_common.c), in the pad's own output report. */
+static int ds4_usb_ready_light(ctm_controller_t *c, int level)
+{
+    return ds4_signal_write(c, false, DS4_OUT_LIGHT, 0, 0x00, (uint8_t)level, 0x00);
+}
+
+/* host_sets_light: the PC's report claims the lightbar. */
+static bool ds4_usb_host_sets_light(const uint8_t *data, size_t len)
+{
+    return ds4_output_colour(data, len, NULL);
+}
+
 /* ⭐⭐ A CABLED DUALSHOCK 4. Until now it matched nothing specific and fell
  * through to generic: relayed verbatim, with no chord, no blanking under the
  * overlay and no signal.
@@ -852,4 +889,6 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .patch_output = ds4_usb_patch_output,
     .signal_connected = ds4_signal_connected,
     .signal_unplugging = ds4_signal_unplugging,
+    .ready_light = ds4_usb_ready_light,
+    .host_sets_light = ds4_usb_host_sets_light,
 };
