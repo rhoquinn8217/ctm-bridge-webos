@@ -10,6 +10,7 @@
 #include "agent_address.inl"
 #include "agent_endpoint.inl"
 #include "agent_reply.inl"
+#include "session_name.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -439,11 +440,39 @@ int first_scan_index_for_item(const logical_device_t *item)
     return index >= 0 && index < g_scan.count ? index : -1;
 }
 
+/* This run's tag, which ends every session name: session_name.inl. Made once,
+ * from the kernel's random numbers, or the clock and the process id when
+ * those cannot be read. */
+static char g_session_run_tag[SESSION_RUN_TAG_LEN + 1];
+static pthread_once_t g_session_run_tag_once = PTHREAD_ONCE_INIT;
+
+static void session_run_tag_init(void)
+{
+    uint32_t seed = 0;
+    const int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        if (read(fd, &seed, sizeof(seed)) != (ssize_t)sizeof(seed)) seed = 0;
+        close(fd);
+    }
+    if (seed == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        seed = (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec ^ ((uint32_t)getpid() << 12);
+    }
+    session_run_tag_from(seed, g_session_run_tag);
+}
+
+static const char *session_run_tag(void)
+{
+    pthread_once(&g_session_run_tag_once, session_run_tag_init);
+    return g_session_run_tag;
+}
+
 void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
 {
     static unsigned seq;
     const char *kind = bridge_kind_for_item(item);
-    snprintf(out, out_len, "ctm-%s-%u", kind, ++seq);
+    session_name_make(out, out_len, kind, ++seq, session_run_tag());
 }
 
 /* ⭐⭐ A NEW SESSION, OR A NEW CONTROLLER FOR ONE ALREADY IN THE TABLE.
@@ -625,7 +654,8 @@ bool ctm_tv_pointer_plug(void)
     }
     static unsigned seq;
     int port = next_bridge_port();
-    snprintf(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "ctm-mouse-%u", ++seq);
+    session_name_make(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "mouse", ++seq,
+                      session_run_tag());
     char cmd[160], response[256];
     snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
     const int start_rc = send_agent_command(cmd, response, sizeof(response));
