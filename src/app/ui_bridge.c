@@ -440,6 +440,41 @@ int first_scan_index_for_item(const logical_device_t *item)
     return index >= 0 && index < g_scan.count ? index : -1;
 }
 
+/* ⭐⭐ ASK THE LISTENER FOR THE PORT (rhoquinn8217, 2026-10-08: two TVs streaming
+ * from one PC, each bridging its own pads). Every TV chose 48055 for its first
+ * pad, so a second TV took the first one's port. Now the TV sends port 0 and
+ * the listener hands one out of its range, in its answer ("OK bridge starting
+ * port=N"). ⓘ A listener that does not know port 0 refuses it as "ERR bad
+ * bridge args", and the TV then chooses its own, as before.
+ * Returns what send_agent_command returns; *port is the port to dial. */
+static int bridge_start_command(const char *kind, const char *busid, int *port,
+                                char *response, size_t response_len)
+{
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s 0 %s", kind, busid);
+    int rc = send_agent_command(cmd, response, response_len);
+    if (rc == 0) {
+        const int given = agent_reply_port(response);
+        if (given > 0) {
+            *port = given;
+            return 0;
+        }
+        /* ⓘ An OK naming no port: the session may exist on a port this TV
+         * cannot know, so it is stopped, and the bridge fails. */
+        char stop[96], stop_reply[128];
+        snprintf(stop, sizeof(stop), "BRIDGE_STOP %s", busid);
+        (void)send_agent_command(stop, stop_reply, sizeof(stop_reply));
+        snprintf(response, response_len, "the listener named no port");
+        return -1;
+    }
+    if (rc == -1 && strncmp(response, "ERR bad bridge args", 19) == 0) {
+        *port = next_bridge_port();
+        snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, *port, busid);
+        rc = send_agent_command(cmd, response, response_len);
+    }
+    return rc;
+}
+
 /* This run's tag, which ends every session name: session_name.inl. Made once,
  * from the kernel's random numbers, or the clock and the process id when
  * those cannot be read. */
@@ -653,12 +688,12 @@ bool ctm_tv_pointer_plug(void)
         return false;
     }
     static unsigned seq;
-    int port = next_bridge_port();
+    int port = 0;
     session_name_make(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "mouse", ++seq,
                       session_run_tag());
     char cmd[160], response[256];
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
-    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    const int start_rc = bridge_start_command("hid", g_tv_pointer_busid, &port,
+                                              response, sizeof(response));
     if (start_rc != 0) {
         log_append("TV pointer: agent bridge start failed: %s", response);
         g_last_plug_unreachable = start_rc == -2;
@@ -902,12 +937,11 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     }
 
     char response[512];
-    int port = next_bridge_port();
+    int port = 0;
     char cmd[256];
     char busid[32];
     make_bridge_busid(item, busid, sizeof(busid));
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
-    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    const int start_rc = bridge_start_command(kind, busid, &port, response, sizeof(response));
     if (start_rc != 0) {
         log_append("agent bridge start failed: %s", start_rc == -2 ? "listener not reached" : response);
         /* ⭐ IN THE LOG THAT CAN BE READ (code review, 2026-10-05). log_append

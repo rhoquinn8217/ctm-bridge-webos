@@ -24,3 +24,23 @@ static inline int agent_command_rc(bool reached, bool sent, ssize_t got, const c
     if (!sent) return -1;
     return (got > 0 && reply && strncmp(reply, "OK", 2) == 0) ? 0 : -1;
 }
+
+/* The port a BRIDGE_START answer hands out, "OK bridge starting port=48057",
+ * or 0 when it names none, or a number that cannot be a bridge's port.
+ * ⓘ The listener hands one out to a TV that asks with port 0, so two TVs
+ * never choose the same one (rhoquinn8217, 2026-10-08: two TVs at once). */
+static inline int agent_reply_port(const char *reply)
+{
+    const char *at = reply ? strstr(reply, "port=") : NULL;
+    if (!at) return 0;
+    at += 5;
+    long value = 0;
+    int digits = 0;
+    while (*at >= '0' && *at <= '9' && digits < 6) {
+        value = value * 10 + (*at - '0');
+        ++at;
+        ++digits;
+    }
+    if (digits == 0 || value < 1024 || value > 65535) return 0;
+    return (int)value;
+}
