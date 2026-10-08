@@ -1473,20 +1473,24 @@ static void *mic_capture_thread(void *arg)
          * from this thread cannot interleave with the input reader. */
         {
             size_t bytes = (size_t)got * MIC_CAP_CHANNELS * sizeof(int16_t);
-            /* Belt and braces with the start point. Sending before the
-             * session's opening exchange has finished puts audio on the wire
-             * where the host expects a hello, and the session dies -- see the
-             * comment at mic_capture_start()'s call site. The thread now
-             * starts after the link is up, so this should never be false;
-             * it is here because that race hid for two days and would hide
-             * again. */
-            if (!ctm_transport_connected(&c->xport)) {
-                continue;
-            }
-            if (bytes > 0 && c_send(c, CTMB_MSG_MIC_AUDIO, CTMB_FLAG_OK, 0, buf, bytes) != 0) {
-                sends_failed++;
-            } else {
-                sends_ok++;
+            /* ⛔⛔ ONLY ONCE THE CONNECTION'S OPENING EXCHANGE IS DONE (code
+             * review, 2026-10-05). Audio sent before HELLO lands where the
+             * listener expects a hello, and it closes the connection. This
+             * asked whether the link was CONNECTED, which a reconnect makes
+             * true before its hello, and this thread runs across reconnects:
+             * a cabled DualSense's reconnect was closed by its own
+             * microphone, redialled, and closed again until the give-up. The
+             * transport now holds audio back until the session marks the
+             * exchange done, and stops it before a connection ends. A chunk
+             * it holds back (1) is dropped, as a failed one is. */
+            if (bytes > 0) {
+                const int rc = ctm_transport_send_when_ready(&c->xport, CTMB_MSG_MIC_AUDIO,
+                                                             CTMB_FLAG_OK, 0, buf, bytes);
+                if (rc < 0) {
+                    sends_failed++;
+                } else if (rc == 0) {
+                    sends_ok++;
+                }
             }
         }
         for (long i = 0; i < got; i++) {
@@ -2968,6 +2972,9 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     memset(paced_q, 0, sizeof(paced_q));
 
     if (handshake(c, caps, report_desc, report_desc_len, &host_cfg) != 0) return;
+    /* The opening exchange is done: the microphone may speak (code review,
+     * 2026-10-05; see ctm_transport_send_when_ready). */
+    ctm_transport_set_ready(&c->xport, 1);
 
     { uint8_t drain[64]; while (read(c->wake_pipe[0], drain, sizeof(drain)) > 0) { /* discard */ } }
 
@@ -3119,6 +3126,8 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         }
     }
 
+    /* Nothing more from the microphone on this connection. */
+    ctm_transport_set_ready(&c->xport, 0);
     pthread_mutex_lock(&c->status_mutex);
     c->st_connected = 0;
     pthread_mutex_unlock(&c->status_mutex);

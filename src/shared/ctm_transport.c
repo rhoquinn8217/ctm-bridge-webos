@@ -157,6 +157,7 @@ void ctm_transport_init(ctm_transport_t *t, ctm_enet_client_t *enet)
     t->fd = -1;
     t->enet = enet;
     t->send_sequence = 0;
+    t->ready = 0;
     pthread_mutex_init(&t->send_mutex, NULL);
 }
 
@@ -169,6 +170,7 @@ void ctm_transport_destroy(ctm_transport_t *t)
 void ctm_transport_attach_tcp(ctm_transport_t *t, int fd)
 {
     if (!t) return;
+    ctm_transport_set_ready(t, 0);
     t->kind = CTM_TRANSPORT_TCP;
     t->fd = fd;
     if (fd >= 0) tune_tcp(fd);
@@ -178,6 +180,7 @@ int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
                                unsigned int enet_timeout_ms)
 {
     if (!t) return -1;
+    ctm_transport_set_ready(t, 0);
 
     /* 1) ENet first, brief timeout. */
     if (t->enet && enet_client_connect(t->enet, host, port, enet_timeout_ms) == 0) {
@@ -196,6 +199,30 @@ int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
     return -1;
 }
 
+/* The header every message carries. */
+static void fill_header(ctmb_header_t *h, uint16_t type, uint32_t flags,
+                        uint32_t request_id, size_t len)
+{
+    memset(h, 0, sizeof(*h));
+    h->magic = CTMB_MAGIC;
+    h->version = CTMB_VERSION;
+    h->type = type;
+    h->flags = flags;
+    h->timestamp_us = ctm_now_us();
+    h->request_id = request_id;
+    h->payload_len = (uint32_t)len;
+}
+
+/* One message on the TCP socket, with send_mutex already held. */
+static int send_tcp_locked(ctm_transport_t *t, ctmb_header_t *h,
+                           const void *payload, size_t len)
+{
+    h->sequence = ++t->send_sequence;
+    if (send_all(t->fd, h, sizeof(*h)) != 0) return -1;
+    if (len && send_all(t->fd, payload, len) != 0) return -1;
+    return 0;
+}
+
 int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
                            uint32_t request_id, const void *payload, size_t len)
 {
@@ -209,22 +236,42 @@ int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
 
     if (t->fd < 0) return -1;
     ctmb_header_t h;
-    memset(&h, 0, sizeof(h));
-    h.magic = CTMB_MAGIC;
-    h.version = CTMB_VERSION;
-    h.type = type;
-    h.flags = flags;
-    h.timestamp_us = ctm_now_us();
-    h.request_id = request_id;
-    h.payload_len = (uint32_t)len;
+    fill_header(&h, type, flags, request_id, len);
 
     pthread_mutex_lock(&t->send_mutex);
-    h.sequence = ++t->send_sequence;
-    int rc = 0;
-    if (send_all(t->fd, &h, sizeof(h)) != 0) rc = -1;
-    else if (len && send_all(t->fd, payload, len) != 0) rc = -1;
+    const int rc = send_tcp_locked(t, &h, payload, len);
     pthread_mutex_unlock(&t->send_mutex);
     return rc;
+}
+
+int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t flags,
+                                  uint32_t request_id, const void *payload, size_t len)
+{
+    if (!t || len > CTMB_MAX_PAYLOAD) return -1;
+    ctmb_header_t h;
+    fill_header(&h, type, flags, request_id, len);
+
+    pthread_mutex_lock(&t->send_mutex);
+    int rc;
+    if (!t->ready) {
+        rc = 1;
+    } else if (t->kind == CTM_TRANSPORT_ENET) {
+        rc = enet_client_send_msg(t->enet, type, flags, request_id, payload, len);
+    } else if (t->fd < 0) {
+        rc = -1;
+    } else {
+        rc = send_tcp_locked(t, &h, payload, len);
+    }
+    pthread_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+void ctm_transport_set_ready(ctm_transport_t *t, int ready)
+{
+    if (!t) return;
+    pthread_mutex_lock(&t->send_mutex);
+    t->ready = ready ? 1 : 0;
+    pthread_mutex_unlock(&t->send_mutex);
 }
 
 int ctm_transport_recv_msg(ctm_transport_t *t, ctmb_header_t *h, uint8_t **payload)
@@ -277,6 +324,7 @@ int ctm_transport_connected(const ctm_transport_t *t)
 void ctm_transport_disconnect(ctm_transport_t *t)
 {
     if (!t) return;
+    ctm_transport_set_ready(t, 0);
     if (t->kind == CTM_TRANSPORT_ENET) {
         if (t->enet) enet_client_disconnect(t->enet);
     } else if (t->fd >= 0) {

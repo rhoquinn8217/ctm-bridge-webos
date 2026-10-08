@@ -40,6 +40,9 @@ typedef struct {
     ctm_enet_client_t *enet;    /* borrowed; caller owns its lifecycle */
     pthread_mutex_t send_mutex; /* serializes TCP header+payload writes */
     uint32_t send_sequence;
+    /* The connection's opening exchange is done, so any message may go.
+     * Set and read under send_mutex: ctm_transport_send_when_ready(). */
+    int ready;
 } ctm_transport_t;
 
 /* Initialize to idle. enet may be NULL (TCP-only). */
@@ -60,6 +63,19 @@ int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
 /* Send one framed message (header + payload). Thread-safe. Returns 0/-1. */
 int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
                            uint32_t request_id, const void *payload, size_t len);
+
+/* ⭐⭐ SEND ONLY ONCE THE OPENING EXCHANGE IS DONE (code review, 2026-10-05).
+ * For a thread that runs across reconnects, the microphone's, which must not
+ * speak first on a new connection: the listener closes a connection whose
+ * first message is not HELLO. Returns 0 sent, 1 not sent (not ready yet, or
+ * no longer), -1 failed. The check and the send hold the send lock together,
+ * so no send starts after ctm_transport_set_ready(t, 0) has returned. */
+int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t flags,
+                                  uint32_t request_id, const void *payload, size_t len);
+
+/* The opening exchange is done (1), or the connection is ending (0). A
+ * connect, an attach and a disconnect set 0 themselves. */
+void ctm_transport_set_ready(ctm_transport_t *t, int ready);
 
 /* Pop one received message. Returns 1 (got — fills *h and, for non-empty
  * payloads, mallocs *payload which the caller frees), 0 (none right now, ENet
