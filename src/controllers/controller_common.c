@@ -372,6 +372,89 @@ static void alsa_log(const char *tag, const char *fmt, ...)
     fclose(f);
 }
 
+/* The speaker's hardware parameters, set on an open playback handle: four
+ * channels of S16_LE at 48000, and a buffer capped at 4800 frames with the
+ * unbounded request as the fallback. Returns what HW_PARAMS returned, its
+ * errno in `*out_errno`, and what the kernel chose in `*out`.
+ *
+ * ⛔⛔ ONE COPY FOR BOTH SPEAKER OPENERS (code review, 2026-10-05). The
+ * opener that moves a speaker to its pad's own card (ctm_cardmatch.inl) set
+ * these through a hand copy made before the cap, so a speaker moved there
+ * got the second-long buffer back. tests/test_speaker_buffer_cap.c fails if
+ * a playback open sets them any other way. */
+static int ds5_playback_hw_params(int fd, int card, struct snd_pcm_hw_params *out,
+                                  int *out_errno)
+{
+    struct snd_pcm_hw_params hw;
+    memset(&hw, 0, sizeof(hw));
+    /* Init all intervals to full range ("any"), then constrain */
+    for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+        hw.intervals[i].min = 0;
+        hw.intervals[i].max = 0xFFFFFFFFU;
+    }
+    /* Init all masks to full range */
+    for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+        memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+    /* ACCESS: RW_INTERLEAVED(3) only */
+    memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+    hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
+    /* FORMAT: S16_LE(2) only */
+    memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+    hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
+    /* CHANNELS: exactly 4 */
+    hw.intervals[2].min = hw.intervals[2].max = 4;
+    hw.intervals[2].integer = 1;
+    /* RATE: exactly 48000 */
+    hw.intervals[3].min = hw.intervals[3].max = 48000;
+    hw.intervals[3].integer = 1;
+    /* PERIOD_SIZE: let the kernel choose what suits the hardware.
+     * A hardcoded 48-frame period once mismatched the host's 480-frame
+     * chunks and contributed to underruns. */
+    /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
+     * host's chunks.
+     *
+     * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
+     * upper bound, and the kernel is free to take what suits the hardware:
+     * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
+     * **49152 frames = 1.024 SECONDS**, which is exactly the delay
+     * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
+     * stayed on time.
+     * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
+     * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
+     * the same second-long buffer. The fault was never device-specific; it
+     * was an unbounded parameter on both, and the cap is needed on both.
+     *
+     * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
+     * five times the floor, so there is still room for jitter. ⛔ A tighter
+     * cap risks underruns, which are worse than lag -- see the self-heal
+     * this file already carries for them.
+     *
+     * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
+     * fails and we would open no audio at all -- a SILENT speaker, worse than
+     * a late one. So the unbounded request is retried on failure. */
+    hw.intervals[9].min = 960;
+    hw.intervals[9].max = 4800;
+    hw.intervals[9].integer = 0;
+    /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
+    struct snd_pcm_hw_params hw_unbounded = hw;
+    hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
+    int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+    int hw_errno = (hw_rc < 0) ? errno : 0;
+    if (hw_rc < 0) {
+        hw = hw_unbounded;
+        hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        if (hw_rc >= 0) {
+            alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
+                     card, hw_errno);
+        } else {
+            hw_errno = errno;
+        }
+    }
+    *out = hw;
+    *out_errno = hw_errno;
+    return hw_rc;
+}
+
 /* Open the DualSense's own USB audio playback device for wired ISO passthrough.
  * Scans ALSA cards for one named "DualSense", opens pcmC{n}D0p, configures
  * S16_LE 4ch 48kHz. Returns fd on success, -1 on failure.
@@ -465,70 +548,8 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
             continue;
         }
         struct snd_pcm_hw_params hw;
-        memset(&hw, 0, sizeof(hw));
-        /* Init all intervals to full range ("any"), then constrain */
-        for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
-            hw.intervals[i].min = 0;
-            hw.intervals[i].max = 0xFFFFFFFFU;
-        }
-        /* Init all masks to full range */
-        for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
-            memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
-        /* ACCESS: RW_INTERLEAVED(3) only */
-        memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
-        hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
-        /* FORMAT: S16_LE(2) only */
-        memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
-        hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
-        /* CHANNELS: exactly 4 */
-        hw.intervals[2].min = hw.intervals[2].max = 4;
-        hw.intervals[2].integer = 1;
-        /* RATE: exactly 48000 */
-        hw.intervals[3].min = hw.intervals[3].max = 48000;
-        hw.intervals[3].integer = 1;
-        /* PERIOD_SIZE: let the kernel choose what suits the hardware.
-         * A hardcoded 48-frame period once mismatched the host's 480-frame
-         * chunks and contributed to underruns. */
-        /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
-         * host's chunks.
-         *
-         * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
-         * upper bound, and the kernel is free to take what suits the hardware:
-         * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
-         * **49152 frames = 1.024 SECONDS**, which is exactly the delay
-         * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
-         * stayed on time.
-         * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
-         * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
-         * the same second-long buffer. The fault was never device-specific; it
-         * was an unbounded parameter on both, and the cap is needed on both.
-         *
-         * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
-         * five times the floor, so there is still room for jitter. ⛔ A tighter
-         * cap risks underruns, which are worse than lag -- see the self-heal
-         * this file already carries for them.
-         *
-         * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
-         * fails and we would open no audio at all -- a SILENT speaker, worse than
-         * a late one. So the unbounded request is retried on failure. */
-        hw.intervals[9].min = 960;
-        hw.intervals[9].max = 4800;
-        hw.intervals[9].integer = 0;
-        /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
-        struct snd_pcm_hw_params hw_unbounded = hw;
-        hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
-        int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
-        int hw_errno = (hw_rc < 0) ? errno : 0;
-        if (hw_rc < 0) {
-            hw = hw_unbounded;
-            hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
-            if (hw_rc >= 0) {
-                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
-                         card, hw_errno);
-            } else {
-                hw_errno = errno;
-            }
-        }
+        int hw_errno = 0;
+        int hw_rc = ds5_playback_hw_params(fd, card, &hw, &hw_errno);
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
         int prep_errno = (hw_rc >= 0 && prep_rc < 0) ? errno : 0;
         if (hw_rc < 0 || prep_rc < 0) {

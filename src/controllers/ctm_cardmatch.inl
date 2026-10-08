@@ -190,32 +190,22 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
         return -1;
     }
 
+    /* ⛔ THE ORDINARY OPENER'S PARAMETERS, CAP AND FALLBACK INCLUDED (code
+     * review, 2026-10-05). This set its own, copied before the buffer was
+     * capped, so a speaker moved to its own card had a second of buffer:
+     * the lag the cap was made for. */
     struct snd_pcm_hw_params hw;
-    memset(&hw, 0, sizeof(hw));
-    for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
-        hw.intervals[i].min = 0;
-        hw.intervals[i].max = 0xFFFFFFFFU;
-    }
-    for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
-        memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
-    memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
-    hw.masks[0].bits[3 / 32] = 1u << (3 % 32);   /* RW_INTERLEAVED */
-    memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
-    hw.masks[1].bits[2 / 32] = 1u << (2 % 32);   /* S16_LE */
-    hw.intervals[2].min = hw.intervals[2].max = 4;   /* speaker + haptics */
-    hw.intervals[2].integer = 1;
-    hw.intervals[3].min = hw.intervals[3].max = MIC_CAP_RATE;
-    hw.intervals[3].integer = 1;
-    hw.intervals[9].min = 960;
-    hw.intervals[9].max = 0xFFFFFFFFU;
-    hw.intervals[9].integer = 0;
-
-    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0 ||
+    int hw_errno = 0;
+    if (ds5_playback_hw_params(fd, card, &hw, &hw_errno) < 0 ||
         ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
         ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
         close(fd);
         return -1;
     }
+    /* The same line the ordinary opener writes, so a move's buffer can be
+     * read from alsa_debug.log too. */
+    alsa_log("[alsa-hwparams]", "card=%d period_frames=%u buffer_frames=%u (speaker moved to its own card)",
+             card, (unsigned)hw.intervals[5].max, (unsigned)hw.intervals[9].max);
     return fd;
 }
 
