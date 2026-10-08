@@ -3144,15 +3144,27 @@ static void *session_main(void *arg)
     ctl_log(c, "open_hid took %ldms",
             (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
                    (oh1.tv_nsec - oh0.tv_nsec) / 1000000));
+    /* ⛔ A SESSION THAT CANNOT START SAYS SO (code review, 2026-10-05). These
+     * two exits set only `stop`, which no one outside reads: the app releases
+     * a session when it sees host gone or device gone, so the row stayed
+     * "bridged" over a session that had ended. Device gone is the flag the
+     * app's sweep acts on for a session that cannot use its device; the line
+     * above it in the log says why. */
     if (c->hid_fd < 0) {
-        ctl_log(c, "hid open failed path=%s errno=%d", c->dev.path, errno);
+        ctl_log(c, "hid open failed path=%s errno=%d -- the session cannot start", c->dev.path, errno);
+        pthread_mutex_lock(&c->status_mutex);
+        c->st_device_gone = 1;
+        pthread_mutex_unlock(&c->status_mutex);
         c->stop = 1;
         return NULL;
     }
     /* Composite primary endpoints are resolved in open_composite_siblings()
      * (reliable /sys/class/input path), at run_session start. */
     if (pipe(c->wake_pipe) != 0) {
-        ctl_log(c, "wake pipe failed errno=%d", errno);
+        ctl_log(c, "wake pipe failed errno=%d -- the session cannot start", errno);
+        pthread_mutex_lock(&c->status_mutex);
+        c->st_device_gone = 1;
+        pthread_mutex_unlock(&c->status_mutex);
         c->stop = 1;
         return NULL;
     }
