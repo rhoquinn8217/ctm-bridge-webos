@@ -1175,6 +1175,10 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
  * card the probe identified rather than scanning for one. */
 static int cardmatch_open_card(int card);
 
+/* When the capture recovers and how long it waits first: mic_recover.inl
+ * (code review, 2026-10-05). */
+#include "mic_recover.inl"
+
 static void *mic_capture_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
@@ -1258,7 +1262,7 @@ static void *mic_capture_thread(void *arg)
      * No capture failure has ever been observed here -- a million reads across
      * several sessions, none failed -- so there is nothing to tune them
      * against. They are a starting point. */
-    int consec_fail = 0, retry_streak = 0;
+    mic_recover_t rec = {0, 0};
     uint64_t heals = 0;
 
     mic_cap_log("%s card=%d thread running fd=%d", node, mic_card, fd);
@@ -1283,62 +1287,80 @@ static void *mic_capture_thread(void *arg)
             mic_cap_log("poll failed errno=%d, stopping", errno);
             break;
         }
-        if (pfd.revents & (POLLERR | POLLNVAL)) {
+        int read_errno = 0;
+        const char *why = NULL;
+        if (pfd.revents & (POLLERR | POLLNVAL | POLLHUP)) {
             /* Overrun or the device went away. Re-prepare and carry on; the
-             * read below reports anything that is still wrong. */
+             * read below reports anything that is still wrong.
+             * ⛔ COUNTED AND WAITED ON (code review, 2026-10-05). A pulled
+             * cable fails every poll at once, and this went straight back to
+             * poll: a core spun until the pad was released. */
             ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
             ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-            continue;
+            int wait_ms = 0;
+            const mic_action_t act = mic_recover_error(&rec, MIC_ERR_POLL, &wait_ms);
+            struct timespec ts = {0, (long)wait_ms * 1000000L};
+            nanosleep(&ts, NULL);
+            if (act == MIC_RETRY) {
+                continue;
+            }
+            why = "poll error";
         }
 
         struct snd_xferi xfer;
         memset(&xfer, 0, sizeof(xfer));
         xfer.buf = buf;
         xfer.frames = MIC_CAP_FRAMES;
-        int rc = ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
-        if (rc < 0) {
-            const int read_errno = errno;
+        int rc = why ? -1 : ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
+        if (rc < 0 && !why) {
+            read_errno = errno;
             reads_failed++;
-            consec_fail++;
-            int fatal = 0;
+            mic_err_t kind;
             if (read_errno == EPIPE) {
                 /* overrun: the stream ran ahead of us. Re-prepare and restart. */
                 ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
                 ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-                retry_streak++;
+                kind = MIC_ERR_OVERRUN;
             } else if (read_errno == EAGAIN) {
-                struct timespec ts = {0, 1000000};   /* 1 ms */
-                nanosleep(&ts, NULL);
-                retry_streak++;
+                kind = MIC_ERR_AGAIN;
             } else {
                 /* Anything else means the device itself is gone or broken.
                  * This used to log and exit, which left the microphone dead
                  * for the rest of the session with nothing said about it --
                  * while the PLAYBACK side of the same USB audio device has
                  * recovered from exactly this for months. */
-                fatal = 1;
+                kind = MIC_ERR_GONE;
             }
 
             /* Two triggers, mirroring playback: failing outright, or needing
              * recovery over and over. The second fires before anything is
-             * audible, which is the point of having it. */
-            const char *why = NULL;
-            if (fatal) why = "read error";
-            else if (consec_fail >= 20) why = "consecutive-fail";
-            else if (retry_streak >= 5) why = "retry-streak";
-            if (!why) {
+             * audible, which is the point of having it. mic_recover.inl
+             * holds both, and the waits. */
+            int wait_ms = 0;
+            const mic_action_t act = mic_recover_error(&rec, kind, &wait_ms);
+            if (wait_ms > 0) {
+                struct timespec ts = {0, (long)wait_ms * 1000000L};
+                nanosleep(&ts, NULL);
+            }
+            if (act == MIC_RETRY) {
                 continue;
             }
-
-            /* Reopen. The scan runs again from scratch, because the card
-             * index drifts across a re-enumeration and a remembered one would
-             * reopen the wrong node. */
+            why = (kind == MIC_ERR_GONE) ? "read error"
+                : (rec.consec_fail >= MIC_RECOVER_FAILS) ? "consecutive-fail" : "retry-streak";
+        }
+        if (why) {
+            /* ⛔⛔ REOPEN THIS PAD'S OWN CARD, NEVER A SCAN (code review,
+             * 2026-10-05). This scanned for the first free DualSense card,
+             * and with a second DualSense on a cable and not bridged, that is
+             * the other pad's microphone, sent to the PC as this one's. The
+             * card the capture was using is this pad's; if it will not open,
+             * the pad has gone, and the capture stops. */
             mic_cap_log("%s card=%d self-heal: %s errno=%d consec=%d retry=%d, reopening",
-                        node, mic_card, why, read_errno, consec_fail, retry_streak);
+                        node, mic_card, why, read_errno, rec.consec_fail, rec.retry_streak);
             close(fd);
-            fd = open_ds5_alsa_capture(&mic_card, node);
+            fd = mic_card >= 0 ? cardmatch_open_card(mic_card) : -1;
             if (fd < 0) {
-                mic_cap_log("%s self-heal: reopen FAILED, thread stopping", node);
+                mic_cap_log("%s self-heal: reopen of card=%d FAILED, thread stopping", node, mic_card);
                 break;
             }
             if (ioctl(fd, SNDRV_PCM_IOCTL_START, NULL) < 0) {
@@ -1346,13 +1368,11 @@ static void *mic_capture_thread(void *arg)
                             node, errno);
             }
             heals++;
-            consec_fail = 0;
-            retry_streak = 0;
+            mic_recover_ok(&rec);
             mic_cap_log("%s self-healed: reopened card=%d fd=%d", node, mic_card, fd);
             continue;
         }
-        consec_fail = 0;
-        retry_streak = 0;
+        mic_recover_ok(&rec);
         /* HOW MANY FRAMES WE ACTUALLY GOT IS xfer.result, NOT xfer.frames.
          * frames is what we ASKED for and the kernel leaves it alone; result
          * is what it delivered. The device hands over 48-frame periods (see
