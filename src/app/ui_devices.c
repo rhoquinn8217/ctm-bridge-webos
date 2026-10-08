@@ -327,15 +327,6 @@ bool is_xpad_input_only_candidate(const char *bus, const char *vid,
             contains_ci(name, "xbox"));
 }
 
-void steam_root_from_phys(const char *phys, char *out, size_t out_len)
-{
-    snprintf(out, out_len, "%s", phys && phys[0] ? phys : "unknown");
-    char *input = strstr(out, "/input");
-    if (input) {
-        *input = '\0';
-    }
-}
-
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len)
 {
     if (is_steam_puck_device(dev)) {

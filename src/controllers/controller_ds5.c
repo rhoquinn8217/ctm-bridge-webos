@@ -26,7 +26,8 @@ static bool ds5_matches(const ctm_controller_dev_t *dev)
 /* Light-show diagnostics. The relay path runs up to a thousand times a second,
  * so this logs the FIRST few reports of a show and nothing after -- enough to
  * see what arrived and what was written, without writing a file at input rate.
- * Uses the controller's own log, which lands in /tmp/ctm-<mac-or-kind>.log. */
+ * Uses the controller's own log, ctm-<mac-or-kind>.log in the app's logs
+ * folder. */
 
 /* Which scratch slot each feature uses. Per controller, never shared. */
 /* We write no lightbar patterns. The light belongs, in order, to the player's
@@ -70,7 +71,8 @@ static uint64_t ds5_now_ms(void)
  *
  * Same two bits, same fix, the other transport. */
 #define DS5_BT_AUDIO_OUT_PATH_SPEAKER  0x30
-/* ⭐⭐ ECHO CANCEL ONLY -- NOISE CANCEL IS DELIBERATELY OFF (2026-08-23).
+/* ⓘ HISTORY, SUPERSEDED BY THE NOTES BELOW: ECHO CANCEL ONLY, NOISE CANCEL
+ * OFF (2026-08-23). Both bits are written now, on both transports.
  *
  * ⓘ Byte 8 packs two independent switches: bit 2 echo cancel, bit 3 noise
  * cancel. They were set together because games send 0x3c, and only ONE of them
@@ -92,6 +94,9 @@ static uint64_t ds5_now_ms(void)
  * would mean the two bits are not independent after all, which the staged
  * measurement suggests they are but never proved. */
 /* ⛔⛔ BLUETOOTH KEEPS BIT 3. WIRED DOES NOT. Measured 2026-08-24.
+ * ⓘ Superseded the same day for the cable too: the wired speaker attenuates
+ * without bit 3 as well, so both transports write both bits
+ * (DS5_AUDIO_ECHO_NOISE_CANCEL in controller_common.c).
  *
  * ⚠️ THE TWO BITS ARE INDEPENDENT ON A CABLE AND NOT OVER BLUETOOTH. Dropping
  * noise cancel fixed the microphone's dead channel on wired, and the speaker
@@ -113,11 +118,6 @@ static uint64_t ds5_now_ms(void)
 #define DS5_BT_AUDIO_ECHO_NOISE_CANCEL 0x0c  /* bits 2 AND 3 -- Bluetooth needs both */
 #define DS5_BT_AUDIO_SPEAKER_ON \
     (DS5_BT_AUDIO_OUT_PATH_SPEAKER | DS5_BT_AUDIO_ECHO_NOISE_CANCEL)
-
-/* One Opus frame at the settings the tone is encoded with: 48 kHz, 10 ms,
- * 160 kbps constant bitrate. Named here rather than including the generated
- * blob, which this file has no other need of. */
-#define FEEDBACK_OPUS_FRAME_BYTES_EXPECTED 200
 
 static uint8_t ds5_audio_block_for_mode(tv_bridge_audio_mode_t mode)
 {
@@ -238,21 +238,6 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             size_t block_len = payload_len + 2;
             if (block_id == 0 && payload_len == 0) break;
             if (block_len > limit - pos) break;
-            if (ctm_controller_tone_pending(c) &&
-                (block_id == 0x93 || block_id == 0x94 ||
-                 block_id == 0x95 || block_id == 0x96)) {
-                /* A CONFIRMATION TONE, ONE OPUS FRAME PER REPORT.
-                 *
-                 * Only when the block is exactly one frame wide. Opus frames
-                 * are not a byte stream and cannot be split or padded, so a
-                 * block of any other size is left alone rather than filled
-                 * with something the controller's decoder would reject. */
-                if ((int)payload_len == FEEDBACK_OPUS_FRAME_BYTES_EXPECTED &&
-                    ctm_controller_tone_take(c, &data[pos + 2],
-                                             (int)payload_len) > 0) {
-                    patched = 1;
-                }
-            }
             if (block_id == 0x91 && payload_len >= 6) {
                 for (size_t i = 3; i <= 7; ++i) {
                     if (data[pos + i] != auto_latency) {
@@ -444,17 +429,6 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
             }
             if (data[pos + 9] != target_audio_flags) {
                 data[pos + 9] = target_audio_flags;
-                patched = 1;
-            }
-        } else if (ctm_controller_tone_pending(c) &&
-                   (block_id == 0x93 || block_id == 0x94 ||
-                    block_id == 0x95 || block_id == 0x96) &&
-                   (int)payload_len == FEEDBACK_OPUS_FRAME_BYTES_EXPECTED) {
-            /* See the note in the AUTO loop above. Duplicated rather than
-             * hoisted: the two loops are upstream's, and two small deletable
-             * blocks reconcile better with an upstream change than a helper
-             * wedged between them. */
-            if (ctm_controller_tone_take(c, &data[pos + 2], (int)payload_len) > 0) {
                 patched = 1;
             }
         } else if ((block_id == 0x93 || block_id == 0x94 || block_id == 0x95 || block_id == 0x96) && audio_block != 0) {

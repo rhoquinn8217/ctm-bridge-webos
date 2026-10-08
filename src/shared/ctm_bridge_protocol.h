@@ -16,6 +16,8 @@ enum ctmb_message_type {
     CTMB_MSG_OUTPUT_REPORT = 4,
     CTMB_MSG_FEATURE_GET = 5,
     CTMB_MSG_FEATURE_REPORT = 6,
+    /* ⓘ LOG and ERROR: the TV has never sent either. The listener logs one
+     * if it arrives, so the numbers stay taken (code review, 2026-10-05). */
     CTMB_MSG_LOG = 7,
     CTMB_MSG_ERROR = 8,
     CTMB_MSG_FEATURE_SET = 9,
@@ -23,21 +25,11 @@ enum ctmb_message_type {
     CTMB_MSG_ISO_AUDIO = 11,     /* raw PCM audio: CTM-USBIP -> aurora-tv for wired ISO passthrough */
     CTMB_MSG_MIC_AUDIO = 12,     /* raw PCM audio: aurora-tv -> CTM-USBIP, the controller microphone */
 
-    /* aurora-tv -> CTM-USBIP: "keep the audio block in your outgoing reports
-     * for this many milliseconds". Payload is a little-endian uint16 of ms.
-     *
-     * WHY IT IS NEEDED. On Bluetooth the controller's speaker rides inside the
-     * output report, and the host only emits those reports while it has real
-     * audio to send. A controller that has just been bridged -- or is about to
-     * be released -- has nothing playing, so no report is emitted at all and a
-     * confirmation tone from this side has nowhere to go.
-     *
-     * The hold is not a window to hit. Reports arrive, the tone overwrites
-     * them, and it ends when the frames run out; the only requirement is that
-     * the hold outlasts the tone. So neither end has to agree on a duration.
-     *
-     * An older listener ignores unknown message types silently, so the worst
-     * case against one is a tone that does not sound. */
+    /* ⓘ RESERVED, NEVER USED (code review, 2026-10-05). AUDIO_HOLD was to ask
+     * the listener to keep sending Bluetooth audio reports while a tone played
+     * inside them; neither side ever sent or acted on it, and the Bluetooth
+     * confirmation is played by the TV's own signal code instead. The number
+     * stays taken: it is never reused. */
     CTMB_MSG_AUDIO_HOLD = 13,
 
     /* aurora-tv -> CTM-USBIP: "open your settings window on this device".

@@ -8,6 +8,7 @@
 #include "ctm_bridge_protocol.h"
 #include "ctm_hostmouse.h"
 #include "agent_address.inl"
+#include "agent_endpoint.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -237,15 +238,17 @@ void *stop_sniff_worker(void *arg)
     return NULL;
 }
 
-/* Set the agent endpoint directly, skipping discovery. When: a host app that
- * already knows where the agent is (e.g. moonlight, which is streaming from
- * that same machine) can say so instead of relying on a broadcast probe, which
- * cannot leave the local network. Passing NULL or "" clears it and restores
- * discovery. */
+/* Set the agent endpoint: the PC the stream comes from, by its address or its
+ * name. Passing NULL or "" clears it, and nothing can bridge until it is set
+ * again: there is no discovery any more (the broadcast went 2026-09-15, see
+ * below; code review, 2026-10-05: this still promised it). */
 /* ⭐ A PC added by name is looked up to its IPv4 address as the stream starts
  * (code review, 2026-10-05): agent_address.inl says why, and what is kept. */
 void ctm_bridge_set_agent_host(const char *host, int port)
 {
+    char old_host[sizeof(g_agent_host)];
+    snprintf(old_host, sizeof(old_host), "%s", g_agent_host);
+    const int old_port = g_agent_port;
     if (host && host[0]) {
         char address[sizeof(g_agent_host)];
         const char *why = "";
@@ -261,7 +264,19 @@ void ctm_bridge_set_agent_host(const char *host, int port)
         g_agent_host[0] = '\0';
     }
     g_agent_port = port > 0 ? port : CTM_AGENT_PORT;
-    g_agent_online = g_agent_host[0] != '\0';
+    /* ⭐ What is known follows the address (code review, 2026-10-05):
+     * agent_endpoint.inl has the rule. A new address reads unknown until it
+     * answers; the same one keeps its last reading. Either way the probe is
+     * asked to look now, so the reading is fresh as the stream starts rather
+     * than up to ten seconds later. */
+    bool online = g_agent_online;
+    bool probed = g_agent_probed;
+    agent_endpoint_set(old_host, old_port, g_agent_host, g_agent_port, &online, &probed);
+    g_agent_online = online;
+    g_agent_probed = probed;
+    if (g_agent_host[0]) {
+        ctm_agent_probe_soon();
+    }
 }
 
 /* Do we know where the agent is, and was it answering when the worker last
@@ -753,22 +768,9 @@ const char *bridge_kind_for_item(const logical_device_t *item)
     return "hid";
 }
 
-/* Session key for ONE specific hidraw node of a logical device, so each
- * interface can be plugged/unplugged independently. When: per-node plug + its
- * button state. */
-void node_session_key(const logical_device_t *item, int scan_index, char *out, size_t out_len)
-{
-    const char *tag = "node";
-    if (scan_index >= 0 && scan_index < g_scan.count && g_scan.devices[scan_index].hidraw[0]) {
-        tag = g_scan.devices[scan_index].hidraw;
-    }
-    snprintf(out, out_len, "%s#%s", item ? item->key : "", tag);
-}
-
 /* Core plug: start the host bridge, build a controller from one chosen scan
- * node, plug it in, and register the session under session_key. Shared by the
- * whole-device plug (plug_in_item) and the per-interface plug (plug_in_node).
- * When: any Plug button. */
+ * node, plug it in, and register the session under session_key. Used by the
+ * whole-device plug (plug_in_item). When: any Plug button. */
 /* Serialize the cached puck enumeration (g_puck_enum) into a CTMB_MSG_ENUM
  * payload: [ctmb_enum_info_t][descriptors blob][ per iface: ctmb_enum_iface_t +
  * report_desc ]. Caller frees. NULL if no valid enumeration. */
@@ -994,19 +996,6 @@ bool plug_in_item(logical_device_t *item)
         return false;
     }
     return plug_in_scan_index(item, scan_index, item->key);
-}
-
-/* Plug ONE chosen hidraw interface (keyed per node, independent of the whole-
- * device plug). When: a sub-row Plug button — pick exactly which interface of a
- * composite device to bridge. */
-bool plug_in_node(logical_device_t *item, int scan_index)
-{
-    if (!item || scan_index < 0 || scan_index >= g_scan.count) {
-        return false;
-    }
-    char key[96];
-    node_session_key(item, scan_index, key, sizeof(key));
-    return plug_in_scan_index(item, scan_index, key);
 }
 
 /* The unplug gesture's worker and the plug-by-node entry point live in their

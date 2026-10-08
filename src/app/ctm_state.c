@@ -35,9 +35,11 @@ int g_settings_count;
 char g_agent_host[64];
 int g_agent_port = CTM_AGENT_PORT;
 bool g_agent_online;
-/* ⭐ Has anything actually asked yet? ⛔ g_agent_online starts false, so without
- * this the panel reports OFFLINE before a single probe has completed -- which is
- * usually right and is still a claim we have not earned. */
+/* ⭐ Has anything actually asked THIS address yet? ⛔ g_agent_online starts false,
+ * so without this the panel reports OFFLINE before a single probe has completed
+ * -- which is usually right and is still a claim we have not earned.
+ * ⓘ Cleared when the address changes (agent_endpoint.inl, code review,
+ * 2026-10-05): it used to stay set from the first address ever probed. */
 bool g_agent_probed;
 bool g_last_plug_unreachable;
 bool g_running = true;
@@ -49,44 +51,19 @@ size_t g_log_used;
 pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 bool g_log_dirty;
 
-/* Append a timestamped line to the in-memory log buffer + stderr. Thread-safe
- * (buffer guarded by g_log_mutex, touches NO LVGL) so controller threads can
- * log through the sink. The on-screen console is refreshed separately by
- * ctm_ui_log_flush() on the UI thread. When: app + controller events. */
-/* Resolve once: $HOME/logs, created if missing. /tmp is the fallback for
- * desktop builds and tests, where HOME is not an app sandbox. */
-static const char *ctm_log_dir(void)
-{
-    static char dir[PATH_MAX];
-    static int resolved = 0;
-    if (resolved) {
-        return dir;
-    }
-    resolved = 1;
-    const char *home = getenv("HOME");
-    if (home != NULL && home[0] != '\0') {
-        snprintf(dir, sizeof(dir), "%s/logs", home);
-        /* EEXIST is success for our purposes; anything else falls back. */
-        if (mkdir(dir, 0755) == 0 || errno == EEXIST) {
-            return dir;
-        }
-    }
-    snprintf(dir, sizeof(dir), "/tmp");
-    return dir;
-}
-
-const char *ctm_log_path(const char *name)
-{
-    static char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/%s", ctm_log_dir(), name ? name : "ctm.log");
-    return path;
-}
+/* Where the logs go, and the path buffer each thread gets: log_path.inl
+ * (ctm_log_dir and ctm_log_path). */
+#include "log_path.inl"
 
 FILE *ctm_log_open(const char *name, const char *mode)
 {
     return fopen(ctm_log_path(name), mode ? mode : "a");
 }
 
+/* Append a timestamped line to the in-memory log buffer + stderr. Thread-safe
+ * (buffer guarded by g_log_mutex, touches NO LVGL) so controller threads can
+ * log through the sink. The on-screen console is refreshed separately by
+ * ctm_ui_log_flush() on the UI thread. When: app + controller events. */
 void log_append(const char *fmt, ...)
 {
     char body[512];
@@ -170,11 +147,6 @@ int read_text_file(const char *path, char *out, size_t out_len)
         out[--n] = '\0';
     }
     return 0;
-}
-
-void join_path(char *out, size_t out_len, const char *a, const char *b)
-{
-    snprintf(out, out_len, "%s/%s", a, b);
 }
 
 bool starts_with(const char *text, const char *prefix)

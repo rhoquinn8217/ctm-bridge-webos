@@ -22,13 +22,9 @@ typedef struct ctm_monitor ctm_monitor_t;
  * device appears, 0 when it goes away. `dev` is valid only for the call. */
 typedef void (*ctm_monitor_cb)(void *ud, const ctm_controller_dev_t *dev, int present);
 
-/* Start the scan+watch thread. cb may be NULL (then poll via ctm_monitor_list).
+/* Start the scan+watch thread. cb may be NULL.
  * Returns NULL on failure. When: app startup. */
 ctm_monitor_t *ctm_monitor_start(ctm_monitor_cb cb, void *ud);
-
-/* Snapshot the current device list into out[0..max-1]; returns the count.
- * Thread-safe. When: a UI refresh that wants the whole list. */
-int ctm_monitor_list(ctm_monitor_t *m, ctm_controller_dev_t *out, int max);
 
 /* Stop + join the monitor thread and free it. When: app shutdown. */
 void ctm_monitor_stop(ctm_monitor_t *m);

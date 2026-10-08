@@ -637,25 +637,6 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
  * ⛔ BLUETOOTH ONLY. A cabled DS4 reaches its speaker through a USB sound card,
  * and the pads here have none -- so `ds4_usb` must never arrive at this
  * function. 🔗 T-229 item C. */
-/* The tone for a pad that IS bridged -- a handover or a handback -- played
- * down the session's own fd rather than a freshly opened node.
- *
- * ⚠️ CALLER'S JOB, NOT THIS FUNCTION'S: the claim and the thread. A tone
- * takes about a second, and the session thread carries the pad's reports, so
- * sleeping on it starves the very thing being waited for. 🔗 The note beside
- * feedback_play, which learned that the expensive way.
- * ⓘ The tone switch is checked inside ds4sig_play_fd, so every caller gets it. */
-int ds4_signal_tone_bt(ctm_controller_t *c, int pattern)
-{
-    if (!c || c->hid_fd < 0) return -1;
-    /* ⓘ Slot 3 counts host audio reports the patch hook dropped while this
-     * signal held the pad. Zeroed here and read by the caller's log line, so a
-     * run says whether the drop fired rather than leaving it to be assumed. */
-    ctm_controller_set_type_state(c, 3 /* DS4_SLOT_AUDIO_DROPPED */, 0);
-    ctm_controller_set_type_state(c, 4 /* DS4_SLOT_HOST_SEEN */, 0);
-    return ds4sig_play_fd(c->hid_fd, pattern, c, c->dev.path, NULL);
-}
-
 /* ⭐⭐ A TONE ON A NODE THAT NO SESSION OWNS -- and after tonight this is the
  * ONLY reliable way to play one.
  *

@@ -31,12 +31,6 @@ int ctm_hostmouse_plug(const char *host, int port);
 /* Stop + join the session thread and drop the link. Safe when idle. */
 void ctm_hostmouse_unplug(void);
 
-/* True from plug to unplug (regardless of link state). */
-bool ctm_hostmouse_active(void);
-
-/* True while the data link is up (handshake done). */
-bool ctm_hostmouse_connected(void);
-
 /* Feed pointer state from the app's event loop. x/y in surface coordinates of
  * a w x h surface (scaled to 0..32767 here); buttons bit0=left bit1=right
  * bit2=middle; wheel_delta in detents (+ away from user). Coalesces motion,
@@ -48,9 +42,6 @@ void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_
  * the remote's D-pad/OK arrive on the host as real key strokes. No-op when
  * not connected; pressed set clears on reconnect (no stuck keys). */
 void ctm_hostmouse_feed_key(uint8_t hid_usage, bool down);
-
-/* Optional log sink (thread-safe on the caller's side); NULL = stderr only. */
-void ctm_hostmouse_set_logger(void (*sink)(const char *line));
 
 #ifdef __cplusplus
 }

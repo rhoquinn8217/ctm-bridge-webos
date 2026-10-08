@@ -61,17 +61,6 @@ static uint8_t ds4_volume_raw_byte(unsigned int value)
  *   whatever was set last, so an explicit value every frame is the sane
  *   default the user asked for). Rumble/LED bytes untouched.
  * When: every outbound report, from the pump. Returns 0 (never drops). */
-/* ⓘ DIAGNOSTIC, added 2026-09-22. Counts host audio reports dropped while a
- * signal plays, so the tone's own log line can say whether the drop fired at
- * all. ⚠️ A count of ZERO during a manual bridge would mean host audio does
- * not reach ds4_patch_output, and the competition is somewhere else. */
-#define DS4_SLOT_AUDIO_DROPPED 3
-/* ⓘ DIAGNOSTIC: host reports of ANY id seen while a signal holds the pad.
- * `dropped=0` proved no AUDIO arrives; this says whether ANYTHING does -- a
- * 0x11 claiming the volumes mid-tone would be just as disruptive and would
- * never have shown up in that count. */
-#define DS4_SLOT_HOST_SEEN     4
-
 static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 {
     tv_bridge_worker_settings_t s;
@@ -80,11 +69,6 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
 
     size_t len = len_io ? *len_io : 0;
     if (!data || len < 10) return 0;
-
-    if (controller_signal_host_report(c, false, 0)) {
-        ctm_controller_set_type_state(c, DS4_SLOT_HOST_SEEN,
-            ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN) + 1);
-    }
 
     int patched = 0;
 
@@ -110,8 +94,6 @@ static int ds4_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
          * ⓘ Returning 1 means the patch CONSUMED the report: it is not
          * written on. 🔗 apply_output_settings. */
         if (controller_signal_host_report(c, false, 0)) {
-            ctm_controller_set_type_state(c, DS4_SLOT_AUDIO_DROPPED,
-                ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED) + 1);
             return 1;
         }
         uint8_t route = ds4_route_for_mode(settings->audio_mode);
@@ -307,99 +289,6 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
     ds4_bt_send_audio(c, s);
 }
 
-/* --- the BLUETOOTH pad's own signals (T-238) -------------------------------
- *
- * ⛔⛔ UNTIL NOW A BLUETOOTH DS4 SIGNALLED NOTHING AT ALL. `signal_connected`
- * sat on the CABLED ops table alone, and ctm_controller.h says why in words:
- * *"for a Bluetooth Xbox pad or a Bluetooth DS4 the core has nothing to play,
- * so NOBODY signals and the bridge is silent."* ⭐ Giving the Bluetooth table
- * these two hooks also makes ctm_controller_will_signal_connect() answer yes
- * for this pad, so the TV correctly stands aside -- that rule is COMPUTED from
- * the ops table rather than copied, which is exactly why this works without
- * touching the TV.
- *
- * ⓘ TONE ONLY, FOR NOW. The light and the pulse need a Bluetooth output
- * report (0x11, 78 bytes, CRC-signed) and ds4_build_output makes the CABLED
- * 0x05 -- so they are a separate piece of work, and they will use the gate
- * ds4_signal_drives() already applies. ⚠️ Until then a Bluetooth bridge is
- * heard and not seen.
- *
- * ✅ THE TONE IS GATED, inside ds4sig_play_fd, by the same switch the
- * DualSense's uses. */
-/* ⛔⛔ BACK ON ITS OWN THREAD, AND THE REASON IS A REGRESSION I CAUSED.
- *
- * Running it on the session thread DID free the Bluetooth link -- measured,
- * build 413: writes fell from 10257 ms to 81 ms, and the pacing went from
- * `24169ms for 928ms of audio` to `929ms for 928ms`. ✅ That part worked.
- * ⛔ But the configure write BLOCKS for about 4.2 s at bridge time (build 415:
- * `configure 4152ms`), and on the session thread that delays the pad's input
- * by five seconds at every bridge. ⚠️ A five-second wait before a controller
- * responds is far worse than a confirmation tone that does not play.
- *
- * ⓘ SO THE TONE IS STILL IMPERFECT ON A BRIDGE, KNOWINGLY. 🔗 T-238 carries
- * what was measured and what is left. The handback and the refusal are clean;
- * the bridge is the one that is not. */
-#define DS4_BT_CONNECT_SETTLE_MS  500
-
-static void *ds4_bt_connected_thread(void *arg)
-{
-    ctm_controller_t *c = (ctm_controller_t *)arg;
-    struct timespec settle = { DS4_BT_CONNECT_SETTLE_MS / 1000,
-                               (long)(DS4_BT_CONNECT_SETTLE_MS % 1000) * 1000000L };
-    nanosleep(&settle, NULL);
-    if (controller_signal_stopping(c)) {
-        ctl_log(c, "signal: connected -- not played, the pad was released while settling");
-        controller_signal_end(c, NULL);
-        return NULL;
-    }
-    const int rc = ds4_signal_tone_bt(c, 0 /* BTSIG_HANDING_OVER */);
-    ctl_log(c, "signal: connected -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
-            rc,
-            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
-            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
-    controller_signal_end(c, NULL);
-    return NULL;
-}
-
-/* ⚠️ ON ITS OWN THREAD: the tone takes about a second and the session thread
- * carries the pad's reports. 🔗 The note beside feedback_play, which learned
- * that the expensive way -- and which build 413 confirmed from the other
- * direction. */
-static void ds4_bt_signal_connected(ctm_controller_t *c)
-{
-    if (!controller_signal_begin(c)) {
-        ctl_log(c, "signal: connected -- not played, a signal is still playing "
-                   "or the pad is being released");
-        return;
-    }
-    pthread_t sig;
-    const int rc = pthread_create(&sig, NULL, ds4_bt_connected_thread, c);
-    if (rc == 0) {
-        pthread_detach(sig);
-    } else {
-        ctl_log(c, "signal: connected -- could not start the signal thread rc=%d", rc);
-        controller_signal_end(c, NULL);
-    }
-}
-
-/* signal_unplugging: high then low, falling, coming home.
- * ⓘ Synchronous, like the cabled one, and for the same reason: it is not cut
- * short by the release it announces, because it IS the release. */
-static void ds4_bt_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
-{
-    const char *what;
-    switch (why) {
-    case CTM_UNPLUG_SHUTDOWN: what = "unplugging (shutdown)"; break;
-    case CTM_UNPLUG_REPLACED: what = "unplugging (replaced)"; break;
-    default:                  what = "unplugging (requested)"; break;
-    }
-    const int rc = ds4_signal_tone_bt(c, 1 /* BTSIG_HANDED_BACK */);
-    ctl_log(c, "signal: %s -- tone rc=%d, host audio dropped=%llu, host reports seen=%llu",
-            what, rc,
-            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_AUDIO_DROPPED),
-            (unsigned long long)ctm_controller_type_state(c, DS4_SLOT_HOST_SEEN));
-}
-
 /* ⓘ Defined further down, beside the cabled pad's signal machinery they
  * share. Declared here because the Bluetooth table comes first in this file
  * and now uses them too. */
@@ -414,32 +303,22 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     .matches = ds4_matches,
     .select_node = NULL,
     .on_plug_init = NULL,
-    /* ⚠️ UNTESTED ON HARDWARE: the chord and the overlay blanking, at the
-     * Bluetooth report's offsets. Kept to exactly that -- no signal, nothing
-     * else -- because no TV available when it was written could bridge a
-     * Bluetooth DS4 to try it. */
+    /* The chord and the overlay blanking, at the Bluetooth report's offsets. */
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
     .patch_output = ds4_patch_output,
     /* ⭐ T-229: the volumes and the route are SENT on a change, because
      * patch_output alone only reaches a pad the host is already talking to. */
     .set_settings = ds4_bt_set_settings,
-    /* ⭐ T-238: a Bluetooth DS4 signals at all now. Tone only so far; the
-     * light and the pulse want a 0x11 builder that does not exist yet. */
-    /* ⭐⭐ LIGHT AND PULSE, BUT NOT THE TONE.
-     * The tone is played by ui_bridge.c outside the session, because a write
-     * to a bridged pad blocks for seconds. The light and the pulse are a
-     * handful of small reports, not a stream, so they are fine from in here --
-     * and they must be, because this is also what tells the TV to stand aside
-     * (ctm_controller_will_signal_connect reads this table). ⛔ Without it the
-     * TV fires its OWN pulse into our tone, which is the 2026-09-18 fault:
-     * "the TV pulsed a pad the core was about to sing to". */
+    /* ⭐⭐ ON BLUETOOTH THESE TWO ONLY SAY SO AND RETURN. The tone, the light
+     * and the pulse all ride the reports ds4_signal_tone_node writes, played by
+     * ui_bridge.c outside the session, because a write to a bridged pad blocks
+     * for seconds. ⭐ They stay in the table because it is also what tells the
+     * TV to stand aside (ctm_controller_will_signal_connect reads it). ⛔
+     * Without them the TV fires its OWN pulse into our tone, which is the
+     * 2026-09-18 fault: "the TV pulsed a pad the core was about to sing to". */
     .signal_connected = ds4_signal_connected,
     .signal_unplugging = ds4_signal_unplugging,
-    /* ⛔ NO .signal_unplugging either. The handback is played in ui_bridge.c
-     * AFTER the session has gone, for the same reason the handover is played
-     * before it starts: a tone from inside a live session is starved. Wiring
-     * it here too would play a second, broken one first. 🔗 T-238. */
 };
 
 /* --- a cabled DS4 ----------------------------------------------------------- */

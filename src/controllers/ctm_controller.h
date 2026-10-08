@@ -3,11 +3,8 @@
 
 /* Controller abstraction (D2). One mechanism per detected controller: each
  * type supplies an ops vtable; the factory picks the right ops for a device.
- *
- * STAGE 1 (scaffold, this commit): the interface + classification (matches) +
- * the factory. The shared byte pump in controller_common.c and the wiring into
- * plug_in_item are STAGE 2 — until then these ops do not yet drive live
- * sessions; the proven tv_bridge_worker / ctm_hidraw_bridge paths still run.
+ * The shared byte pump in controller_common.c runs every live session through
+ * these ops; the older bridge paths they replaced are gone.
  *
  * The layer is UI-independent: the app fills a neutral ctm_controller_dev_t
  * from its logical_device_t, so controllers/ does not depend on app/ types. */
@@ -343,13 +340,6 @@ void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms);
 int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
 
-/* The same two notes for a pad that IS bridged: 0 handing over, 1 handed back,
- * 2 refused -- the values of btsig_pattern_t.
- * ⚠️ The CALLER owns the claim and the thread: a tone takes about a second
- * and the session thread carries the pad's reports.
- * ⓘ The tone switch is checked inside, so no caller needs to. */
-int ds4_signal_tone_bt(ctm_controller_t *c, int pattern);
-
 /* The same two notes on a bare node, with no session behind it: 0 handing
  * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about
  * five seconds, so this is the only way a DS4 tone reliably plays. */
@@ -362,12 +352,6 @@ int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
 
-/* The confirmation tone, Bluetooth only: pre-encoded Opus handed to the
- * report builder one frame at a time. Over a cable the tone is generated as
- * it plays and written to the audio device instead. */
-void ctm_controller_tone_start(ctm_controller_t *c);
-bool ctm_controller_tone_pending(ctm_controller_t *c);
-int  ctm_controller_tone_take(ctm_controller_t *c, uint8_t *dst, int n);
 void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_t *out);
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out);
 void ctm_controller_destroy(ctm_controller_t *c);
@@ -517,7 +501,8 @@ uint32_t controller_signal_kept(ctm_controller_t *c);
 void controller_signal_motors_done(ctm_controller_t *c);
 bool controller_signal_motors_held(ctm_controller_t *c);
 
-/* Write a line to this controller's own log (/tmp/ctm-<mac-or-kind>.log), and
+/* Write a line to this controller's own log (ctm-<mac-or-kind>.log, in the
+ * app's logs folder: $HOME/logs, or /tmp with no HOME), and
  * to the app's console sink if one is set. When: a type wants to record
  * something about its device. Cheap, but it opens a file -- do not call it per
  * report in the relay path without throttling. */
@@ -553,6 +538,9 @@ void controller_set_overlay_cb(overlay_request_cb cb);
  * Deliberately per-controller: a file-level variable here would be shared by
  * every controller's thread, which is the fault that took four sessions to
  * find in the capture path. */
+/* ⓘ Three. The DS4's two diagnostic counters sat in slots 3 and 4 and so
+ * never counted, and the only code that read them was signal code nothing
+ * called; both went together (code review, 2026-10-05). */
 #define CTM_TYPE_STATE_SLOTS 3
 uint64_t ctm_controller_type_state(const ctm_controller_t *c, int slot);
 void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v);

@@ -237,15 +237,17 @@ extern bool g_log_dirty;              /* set by log_append, cleared by ctm_ui_lo
  * ⓘ Falls back to /tmp when HOME is unset (desktop builds and the unit tests),
  * where /tmp is writable and this restriction does not apply.
  *
- * ⚠️ ctm_log_path() returns a SHARED STATIC BUFFER. Use it and be done with it;
- * do not hold it across another call, and never use two in one expression. */
+ * ⚠️ ctm_log_path() returns a buffer of the calling thread's own
+ * (log_path.inl), so another thread cannot change it under you (code review,
+ * 2026-10-05: it was one buffer for the whole process, and a line could land in
+ * another thread's file). Use it and be done with it: this thread's next call
+ * reuses the buffer, so never use two in one expression. */
 const char *ctm_log_path(const char *name);
 FILE *ctm_log_open(const char *name, const char *mode);
 
 void log_append(const char *fmt, ...);
 int count_dir_entries(const char *path);
 int read_text_file(const char *path, char *out, size_t out_len);
-void join_path(char *out, size_t out_len, const char *a, const char *b);
 bool starts_with(const char *text, const char *prefix);
 char ascii_lower(char c);
 bool contains_ci(const char *text, const char *needle);
@@ -269,7 +271,6 @@ bool is_gulikit_named_device(const char *name);
 bool is_xpad_input_only_candidate(const char *bus, const char *vid, const char *pid,
                                   const char *name, const char *usb_busid,
                                   const char *driver);
-void steam_root_from_phys(const char *phys, char *out, size_t out_len);
 void logical_key_for_device(const device_info_t *dev, char *out, size_t out_len);
 void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len);
 /* Is this device bridged right now? Answered from the session table -- there
@@ -329,7 +330,5 @@ const char *item_type_label(const logical_device_t *item);
 /* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
  * refresh after the device list is rebuilt. Once-per-key per process run. */
 void ctm_autoplug_tick(void);
-bool plug_in_node(logical_device_t *item, int scan_index);   /* bridge ONE chosen hidraw */
-void node_session_key(const logical_device_t *item, int scan_index, char *out, size_t out_len);
 
 #endif /* CTM_STATE_H */

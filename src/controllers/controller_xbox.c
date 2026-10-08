@@ -1,7 +1,8 @@
 /* Xbox controller, BT only (works-ish; GIP translation is Windows-side). USB
- * Xbox is the blocked usbip/input-only path and never reaches here. STAGE 1:
- * classification only; on_plug_init reserved for a TV-side BT handshake if one
- * proves necessary. */
+ * Xbox is the blocked usbip/input-only path and never reaches here. It
+ * classifies the pad and reads its input reports (the chord and the overlay's
+ * blanking); on_plug_init is reserved for a TV-side BT handshake if one proves
+ * necessary. */
 
 #define _GNU_SOURCE
 
