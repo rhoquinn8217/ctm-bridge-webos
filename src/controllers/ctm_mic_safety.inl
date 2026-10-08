@@ -90,25 +90,6 @@ static void micsafe_log(const char *fmt, ...)
 #define MICSAFE_PKT_LEN   142
 #define MICSAFE_CRC_AT    138
 
-static uint32_t micsafe_crc32(const uint8_t *p, size_t n)
-{
-    static uint32_t table[256];
-    static int built = 0;
-    if (!built) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k)
-                c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
-        }
-        built = 1;
-    }
-    uint32_t crc = 0xffffffffu;
-    for (size_t i = 0; i < n; ++i)
-        crc = table[(crc ^ p[i]) & 0xff] ^ (crc >> 8);
-    return crc ^ 0xffffffffu;
-}
-
 /* A DualSense or a DualSense Edge, the only pads this report means anything to.
  * ⓘ Through a DS5 dongle the node still carries the pad's own ids. */
 static bool micsafe_is_dualsense(unsigned vid, unsigned pid)
@@ -159,14 +140,8 @@ static int micsafe_disarm_node(const char *node)
     pkt[3] = 1;                     /* one byte of payload */
     pkt[4] = MICSAFE_FLAG_MIC_AUDIO;/* bit 1 only -- microphone OFF */
 
-    uint8_t seeded[1 + MICSAFE_CRC_AT];
-    seeded[0] = 0xa2;
-    memcpy(&seeded[1], pkt, MICSAFE_CRC_AT);
-    uint32_t crc = micsafe_crc32(seeded, sizeof(seeded));
-    pkt[MICSAFE_CRC_AT + 0] = (uint8_t)(crc & 0xff);
-    pkt[MICSAFE_CRC_AT + 1] = (uint8_t)((crc >> 8) & 0xff);
-    pkt[MICSAFE_CRC_AT + 2] = (uint8_t)((crc >> 16) & 0xff);
-    pkt[MICSAFE_CRC_AT + 3] = (uint8_t)((crc >> 24) & 0xff);
+    /* The checksum, as on every Bluetooth output report: bt_sign.inl. */
+    bt_sign_output(pkt, MICSAFE_CRC_AT + 4);
 
     ssize_t rc = write(fd, pkt, sizeof(pkt));
     close(fd);

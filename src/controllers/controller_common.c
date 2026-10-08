@@ -175,10 +175,14 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #define DS5_SPEAKER_VOLUME_MAX         0x64  /* 100 -- what games, the kernel driver and
                                               * dualsensectl all use */
 
+/* The Bluetooth output reports' checksum, the one copy of it (code review,
+ * 2026-10-05). Before the microphone safety, which signs its packet with it. */
+#include "bt_sign.inl"
+
 /* Microphone safety. ⚠️ INCLUDED HERE, NEAR THE TOP, DELIBERATELY -- the input
  * relay calls into it and an include further down would be after its own
- * caller. It needs nothing from this file, only the standard headers above.
- * Fork-only. */
+ * caller. It needs nothing from this file but the checksum just above and the
+ * standard headers. Fork-only. */
 #include "ctm_mic_safety.inl"
 
 #define MAX_REPORT 4096
@@ -952,8 +956,8 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
          *
          * A caller holding a controller still gets a file, `c->log`. A caller
          * without one -- the Bluetooth refusal is the only one today -- had
-         * nowhere to go: `c->log` needs a controller, and `g_log_sink` is set
-         * ONLY by the standalone UI app (`ui_app.c`). aurora-tv never sets it,
+         * nowhere to go: `c->log` needs a controller, and `g_log_sink` was set
+         * only by the standalone UI app, removed from this repo on 2026-10-07. aurora-tv never sets it,
          * so on a TV the line reached `fprintf(stderr, ...)` and nothing else,
          * and stderr is not captured into the app's log files.
          *
@@ -1721,30 +1725,12 @@ static void probe_pairing_info(ctm_controller_t *c, int fd)
     adopt_pad_mac(c, pad, "feature 0x09");
 }
 
-/* CRC32 (reflected, poly 0xedb88320) step. When: ctm_bt_sign_output only. */
-static uint32_t crc32_step(uint32_t crc, const uint8_t *data, size_t len)
-{
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
-        }
-    }
-    return crc;
-}
-
 /* Append the Sony BT HID output-report CRC32 (seed 0xa2) into the trailing 4
- * bytes. When: a DS patch_output hook, after rewriting a report. */
+ * bytes. When: a DS patch_output hook, after rewriting a report. The checksum
+ * itself is bt_sign.inl's. */
 void ctm_bt_sign_output(uint8_t *data, size_t len)
 {
-    if (!data || len < 8) return;
-    uint8_t seed = 0xa2;
-    uint32_t crc = crc32_step(0xffffffffu, &seed, 1);
-    crc = ~crc32_step(crc, data, len - 4);
-    data[len - 4] = (uint8_t)(crc & 0xffu);
-    data[len - 3] = (uint8_t)((crc >> 8) & 0xffu);
-    data[len - 2] = (uint8_t)((crc >> 16) & 0xffu);
-    data[len - 1] = (uint8_t)((crc >> 24) & 0xffu);
+    bt_sign_output(data, len);
 }
 
 /* A report descriptor into the controller's log, 32 bytes a line, so a pad seen
@@ -2516,6 +2502,10 @@ static int send_keepalive(ctm_controller_t *c)
     return 0;
 }
 
+/* How long the loop below may sleep: until the keepalive is due, 20 ms at
+ * most. It was 1 ms for every device (code review, 2026-10-05). */
+#include "input_wait.inl"
+
 static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
@@ -2524,7 +2514,7 @@ static void *input_thread_main(void *arg)
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
-        int pr = poll(pfds, 2, 1);
+        int pr = poll(pfds, 2, input_wait_ms(now_us(), c->last_input_us, c->ops->keepalive_ms));
         if (pr < 0) { if (errno == EINTR) continue; break; }
         if (pr == 0) {
             /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
@@ -2857,6 +2847,10 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c);
  * matching (whose playback open it uses). Fork-only. */
 #include "ctm_signal_wired.inl"
 
+/* Which way a DualSense's signal goes. Before the feedback file, which asks it,
+ * and the plug-time speaker wake, which asks it too. */
+#include "signal_route.inl"
+
 #include "ctm_feedback.inl"
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
@@ -2887,6 +2881,18 @@ static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         if (c->stop) return -1;
         if (c->xport.kind == CTM_TRANSPORT_ENET) {
             if (ctm_transport_service(&c->xport, 50) < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+        } else {
+            /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
+             * 2026-10-05), so the 5 s below could never fire: a listener that
+             * accepted and said nothing held this session for ever, with no
+             * host-gone. Wait for something to read, a slice at a time, and
+             * count the slices that bring nothing. */
+            int ready = ctm_transport_wait_readable(&c->xport, 50);
+            if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+            if (ready == 0) {
+                if (now_us() - start >= 5000000ull) { ctl_log(c, "host config timeout"); return -1; }
+                continue;
+            }
         }
         int got = c_recv(c, &h, &payload);
         if (got < 0) { ctl_log(c, "host config receive failed"); return -1; }
@@ -3267,8 +3273,15 @@ static void *session_main(void *arg)
          * ⓘ Wired takes the other branch: it has a real audio device, opened
          * in on_plug_init just above. */
         /* ⚠️ "No audio device" is not "Bluetooth DualSense": a keyboard has no
-         * audio device either, and was sent this 398-byte report. */
-        if (c->ops->speaks_ds5 && c->alsa_fd < 0) btsig_wake_speaker(c);
+         * audio device either, and was sent this 398-byte report. ⛔ Nor is a
+         * cabled DualSense, which has none YET: its card is opened by the card
+         * match inside the session, after this line, so every cabled bridge
+         * was sent the Bluetooth report too (code review, 2026-10-05). The bus
+         * decides: signal_route.inl. */
+        if (c->ops->speaks_ds5 &&
+            signal_route_for(c->dev.bus, c->alsa_fd >= 0) == SIGNAL_ROUTE_BLUETOOTH) {
+            btsig_wake_speaker(c);
+        }
 
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
@@ -3564,10 +3577,15 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
         pthread_join(c->session_thread, NULL);
         c->session_started = 0;
     }
+    /* ⛔ THE MICROPHONE THREAD FIRST, THEN ITS TRANSPORT (code review,
+     * 2026-10-05). It sends each capture on c->xport, and it was joined AFTER
+     * the transport was destroyed, so a capture in flight at a release could
+     * send on a transport that was gone. c->stop is set and the socket shut
+     * down above, so a send in progress returns and the thread leaves. */
+    mic_capture_stop(c);
     ctm_transport_disconnect(&c->xport);
     ctm_transport_destroy(&c->xport);
     if (c->hid_fd >= 0) { close(c->hid_fd); c->hid_fd = -1; }
-    mic_capture_stop(c);
     pthread_mutex_lock(&c->alsa_mutex);
     if (c->alsa_fd >= 0) {
         ctl_log(c, "alsa: speaker closed (plug out), fd=%d", c->alsa_fd);

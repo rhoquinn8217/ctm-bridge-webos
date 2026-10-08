@@ -67,9 +67,6 @@ same line, and this fork continues it.
   [CTM-USBIP](https://github.com/CTM-Bridge/CTM-USBIP). The bridge itself, the
   map-driven translation pipeline, the TCP protocol between the television and the
   host, and the DualSense audio work over Bluetooth are all ciprianmisaila's.
-- **[LVGL](https://github.com/lvgl/lvgl)** (MIT): the UI toolkit, bundled here.
-- **[ENet](https://github.com/lsalzman/enet)** (MIT): the optional UDP transport,
-  bundled here.
 
 ---
 

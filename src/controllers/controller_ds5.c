@@ -230,8 +230,8 @@ static int ds5_patch_output(ctm_controller_t *c, uint8_t *data, size_t *len_io)
         uint8_t auto_latency = (uint8_t)settings->latency_ms;
         uint8_t auto_speaker = ds5_volume_raw_byte(settings->speaker_volume_percent);
         /* ⛔ The 20 floor was removed 2026-08-16 so 0 can be tested. It was
-         * inherited with the slider and never explained -- see the note on the
-         * slider itself in ui_window_ds5.c. */
+         * inherited with the slider and never explained. The slider was in the
+         * standalone app's DualSense window, removed from this repo on 2026-10-07. */
         while (pos + 2 <= limit) {
             uint8_t block_id = data[pos];
             size_t payload_len = data[pos + 1];

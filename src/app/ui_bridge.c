@@ -1,6 +1,6 @@
 /* Agent control client (discovery + commands), bridge sessions, process
  * spawning, the per-device settings store, and plug-in/out orchestration.
- * Moved verbatim out of lvgl_ui.c; de-static'd and prototyped in ui_common.h. */
+ * Moved verbatim out of lvgl_ui.c; de-static'd and prototyped in ctm_state.h. */
 
 #define _GNU_SOURCE
 
@@ -9,6 +9,7 @@
 #include "ctm_hostmouse.h"
 #include "agent_address.inl"
 #include "agent_endpoint.inl"
+#include "agent_reply.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -287,8 +288,8 @@ void ctm_bridge_set_agent_host(const char *host, int port)
  * run: a stream sets the address as it starts, and the function returned
  * before opening the socket whenever an address was known. So the probe read
  * as live code for weeks while being unreachable, which is the whole reason
- * this clean-up exists. The headless ui_app is told its address now, so
- * nothing anywhere is left to discover.
+ * this clean-up exists. The standalone app, which never set one, was
+ * removed from this repo on 2026-10-07, so nothing anywhere is left to discover.
  *
  * ⓘ Knowing the address is NOT evidence that anything is listening there. The
  * worker asks every few seconds on its own thread and leaves the answer here,
@@ -345,15 +346,16 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_probed = true;
         /* -2, not -1: the listener was not REACHED, which one lost packet can
          * cause, so a caller may try again; -1 is every other failure. Callers
-         * that only ask "did it work" compare with 0 and are unaffected. */
-        return -2;
+         * that only ask "did it work" compare with 0 and are unaffected. The
+         * whole contract is agent_reply.inl's, with its test. */
+        return agent_command_rc(false, false, 0, NULL);
     }
 
     char line[512];
     snprintf(line, sizeof(line), "%s\n", command);
     if (send(fd, line, strlen(line), 0) < 0) {
         close(fd);
-        return -1;
+        return agent_command_rc(true, false, 0, NULL);
     }
     ssize_t n = recv(fd, response, response_len > 0 ? response_len - 1 : 0, 0);
     close(fd);
@@ -373,7 +375,7 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_online = true;
         g_agent_probed = true;
     }
-    return n > 0 && response && starts_with(response, "OK") ? 0 : -1;
+    return agent_command_rc(true, true, n, response);
 }
 
 static int session_index_locked(const char *key)
@@ -608,7 +610,11 @@ void stop_session(const char *key)
 
 bool ctm_tv_pointer_plug(void)
 {
-    if (g_tv_pointer_active) return true;
+    if (g_tv_pointer_active) {
+        if (!ctm_hostmouse_host_gone()) return true;
+        /* Its session gave up on the host: end that one before a new one. */
+        ctm_tv_pointer_unplug();
+    }
     /* ⓘ Said as a controller's plug says it, so the app can try once more on
      * a listener that was not reached (code review, 2026-10-05). */
     g_last_plug_unreachable = false;
@@ -659,7 +665,10 @@ void ctm_tv_pointer_unplug(void)
 
 bool ctm_tv_pointer_active(void)
 {
-    return g_tv_pointer_active;
+    /* ⓘ Not once its session has given up on the host (code review,
+     * 2026-10-05): the remote's pointer goes back to the TV, and the panel
+     * shows it released. */
+    return g_tv_pointer_active && !ctm_hostmouse_host_gone();
 }
 
 /* ⭐ EVERY SESSION, AT THE END OF A STREAM OR OF THE APP.
@@ -985,6 +994,12 @@ bool item_is_tv_remote(const logical_device_t *item)
  * logical row's Plug button. */
 bool plug_in_item(logical_device_t *item)
 {
+    /* ⛔ SAID ON EVERY PATH, NOT ONLY ONCE THE LISTENER IS ASKED (code
+     * review, 2026-10-05). Each way out before the request left the last
+     * plug's answer standing, so a stale "not reached" could schedule a
+     * pointless retry, hold a refusal back two seconds, or leave a pad lit
+     * as if it were being bridged. */
+    g_last_plug_unreachable = false;
     if (!item) {
         return false;
     }

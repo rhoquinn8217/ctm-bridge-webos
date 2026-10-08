@@ -1,6 +1,6 @@
 /* Device enumeration, classification, and the logical-device model for the
  * app. Moved verbatim out of lvgl_ui.c; functions de-static'd and prototyped
- * in ui_common.h. Pure relocation, no behavior change. */
+ * in ctm_state.h. Pure relocation, no behavior change. */
 
 #define _GNU_SOURCE
 
@@ -832,7 +832,11 @@ void enumerate_devices(scan_result_t *result)
 
     for (int i = 0; i < result->count; ++i) {
         device_info_t *dev = &result->devices[i];
-        inspect_hidraw(dev);
+        /* ⛔ Not a hidraw node again (code review, 2026-10-05): the loop
+         * above has just opened every one, and a second look opened it again
+         * only to fill fields already full. An input-only device is looked at
+         * here for the first time, as before. */
+        if (!dev->hidraw[0]) inspect_hidraw(dev);
         /* ⭐ A HID device's identity is its uniq, read last because
          * inspect_hidraw() may only just have filled it: the USB serial number
          * on a cable, which the HID driver copies in, and the MAC over

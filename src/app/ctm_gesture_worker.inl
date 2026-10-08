@@ -286,6 +286,12 @@ void ctm_bridge_gesture_init(void)
  * scan is still found. */
 bool plug_in_by_node(const char *node)
 {
+    /* ⛔ SAID ON EVERY PATH, NOT ONLY ONCE THE LISTENER IS ASKED (code
+     * review, 2026-10-05). Each way out before the request left the last
+     * plug's answer standing, so a stale "not reached" could schedule a
+     * pointless retry, hold a refusal back two seconds, or leave a pad lit
+     * as if it were being bridged. */
+    g_last_plug_unreachable = false;
     if (!node || !node[0]) {
         return false;
     }

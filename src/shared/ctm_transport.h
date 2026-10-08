@@ -70,6 +70,12 @@ int ctm_transport_recv_msg(ctm_transport_t *t, ctmb_header_t *h, uint8_t **paylo
  * no-op returning 0. Returns -1 if the ENet link dropped. */
 int ctm_transport_service(ctm_transport_t *t, unsigned int timeout_ms);
 
+/* TCP: wait up to timeout_ms for something to read. Returns 1 (a read will not
+ * block), 0 (nothing yet), -1 (no socket). ENet answers 1 at once: its service
+ * call above is its wait. ⓘ For loops with a deadline, which a blocking recv
+ * alone cannot honour (src/shared/wait_readable.inl). */
+int ctm_transport_wait_readable(ctm_transport_t *t, unsigned int timeout_ms);
+
 /* 1 if connected (TCP fd open / ENet peer up), else 0. */
 int ctm_transport_connected(const ctm_transport_t *t);
 

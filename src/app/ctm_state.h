@@ -5,8 +5,8 @@
  * Split out of ui_common.h so the enumeration/classification (ui_devices.c), the
  * agent/session/plug logic (ui_bridge.c) and the helpers below can compile and
  * link into a host app (e.g. moonlight-tv) that owns its own LVGL/SDL. The UI
- * half (display, widgets, per-controller detail windows) stays in ui_common.h,
- * which includes this header. */
+ * half (display, widgets, per-controller detail windows) was the standalone
+ * app's, removed from this repo on 2026-10-07; aurora-tv is the host now. */
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -326,9 +326,5 @@ bool item_is_mouse_or_keyboard(const logical_device_t *item);
 bool item_is_controller(const logical_device_t *item);
 /* "controller", "keyboard", "mouse", or "" -- what the device says it is. */
 const char *item_type_label(const logical_device_t *item);
-
-/* Auto-plug policy (ctm_autoplug.c, UI-free): run from the periodic device
- * refresh after the device list is rebuilt. Once-per-key per process run. */
-void ctm_autoplug_tick(void);
 
 #endif /* CTM_STATE_H */

@@ -40,7 +40,11 @@
 
 #define CLAIM_SPEAKER_VOLUME  0x20
 #define CLAIM_AUDIO_CONTROL   0x80
-#define AUDIO_SPEAKER_ON      0x30
+/* ⛔ 0x30 HERE WHILE THE CODE WROTE 0x3c (code review, 2026-10-05). The
+ * speaker route is the speaker path with echo AND noise cancel, which
+ * Bluetooth needs (controller_ds5.c, DS5_BT_AUDIO_SPEAKER_ON). The guard at the
+ * end now reads both numbers out of the shipped source. */
+#define AUDIO_SPEAKER_ON      (0x30 | 0x0c)
 
 /* Returns 1 if the report was changed. `data` is the block, starting at its id. */
 static int apply_auto(uint8_t *data, size_t pos, int host_audio_set,
@@ -63,6 +67,27 @@ static int apply_auto(uint8_t *data, size_t pos, int host_audio_set,
         return 1;
     }
     return 0;
+}
+
+/* ── the guard on the mirror ─────────────────────────────────────────────── */
+
+static int source_has(const char *a, const char *b)
+{
+    const char *paths[] = {
+        "src/controllers/controller_ds5.c",
+        "../src/controllers/controller_ds5.c",
+    };
+    FILE *fp = NULL;
+    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]) && !fp; ++i)
+        fp = fopen(paths[i], "r");
+    if (!fp) return -1;
+    char line[512];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), fp)) {
+        if (strstr(line, a) && (!b || strstr(line, b))) found = 1;
+    }
+    fclose(fp);
+    return found;
 }
 
 /* ── harness ─────────────────────────────────────────────────────────────── */
@@ -141,6 +166,19 @@ int main(void)
     check(b[9] == 0x00, "a configured volume does not change the audio route");
     check((b[2] & CLAIM_AUDIO_CONTROL) == 0,
           "and does not claim a byte it did not write");
+
+    /* ⭐ THE MIRROR STILL MATCHES. Every number and line copied above, read
+     * out of the shipped source, so a change there fails here. */
+    check(source_has("#define DS5_BT_AUDIO_OUT_PATH_SPEAKER", "0x30") == 1,
+          "the speaker path is still 0x30 (run from the repo root)");
+    check(source_has("#define DS5_BT_AUDIO_ECHO_NOISE_CANCEL", "0x0c") == 1,
+          "echo and noise cancel are still 0x0c, so the route is 0x3c");
+    check(source_has("data[pos + 9] = DS5_BT_AUDIO_SPEAKER_ON;", NULL) == 1,
+          "the fallback still writes that route");
+    check(source_has("if (data[pos + 7] == 0 && data[pos + 9] == 0)", NULL) == 1,
+          "the fallback still fires only on a blank volume and route");
+    check(source_has("(uint8_t)(data[pos + 2] | 0x20u)", NULL) == 1,
+          "a configured volume still claims 0x20 and nothing else");
 
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

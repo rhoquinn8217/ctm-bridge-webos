@@ -111,27 +111,6 @@
 
 #define BTSIG_PACE_US      10000  /* one report per frame of audio */
 
-/* CRC32 over 0xa2 followed by the report's first 394 bytes, little-endian at
- * the end. Reproduced a captured report's checksum exactly. */
-static uint32_t btsig_crc32(const uint8_t *p, size_t n)
-{
-    static uint32_t table[256];
-    static int built = 0;
-    if (!built) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k)
-                c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
-        }
-        built = 1;
-    }
-    uint32_t crc = 0xffffffffu;
-    for (size_t i = 0; i < n; ++i)
-        crc = table[(crc ^ p[i]) & 0xff] ^ (crc >> 8);
-    return crc ^ 0xffffffffu;
-}
-
 typedef struct {
     const uint8_t *audio;      /* one Opus frame, or NULL for the silence one */
     int            seq;        /* report number; drives BOTH sequence fields */
@@ -235,14 +214,10 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
         }
     }
 
-    uint8_t seeded[1 + BTSIG_CRC_AT];
-    seeded[0] = 0xa2;
-    memcpy(&seeded[1], out, BTSIG_CRC_AT);
-    uint32_t crc = btsig_crc32(seeded, sizeof(seeded));
-    out[BTSIG_CRC_AT + 0] = (uint8_t)(crc & 0xff);
-    out[BTSIG_CRC_AT + 1] = (uint8_t)((crc >> 8) & 0xff);
-    out[BTSIG_CRC_AT + 2] = (uint8_t)((crc >> 16) & 0xff);
-    out[BTSIG_CRC_AT + 3] = (uint8_t)((crc >> 24) & 0xff);
+    /* CRC32 over 0xa2 followed by the report's first 394 bytes, little-endian
+     * at the end. Reproduced a captured report's checksum exactly. The one
+     * copy is bt_sign.inl's (code review, 2026-10-05). */
+    bt_sign_output(out, BTSIG_CRC_AT + 4);
 }
 
 /* The two signals, as the light shows them.
