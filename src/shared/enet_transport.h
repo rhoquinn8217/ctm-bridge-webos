@@ -11,6 +11,11 @@
  * does NOT call into this module directly -- it hands reports to a thread-safe
  * outbox (enet_client_queue_output) that the session loop drains via
  * enet_client_service().
+ *
+ * ⓘ THE CLIENT ITSELF IS NOT IN THIS REPO ANY MORE. enet_transport.c and the
+ * vendored ENet went with the standalone app, removed from this repo on 2026-10-07.
+ * Whatever embeds the core supplies these functions: aurora-tv's enet_stub.c
+ * answers that there is no ENet, so the transport stays on TCP.
  */
 #ifndef CTM_ENET_TRANSPORT_H
 #define CTM_ENET_TRANSPORT_H

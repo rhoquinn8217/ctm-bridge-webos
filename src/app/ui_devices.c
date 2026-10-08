@@ -1,6 +1,6 @@
 /* Device enumeration, classification, and the logical-device model for the
  * app. Moved verbatim out of lvgl_ui.c; functions de-static'd and prototyped
- * in ui_common.h. Pure relocation, no behavior change. */
+ * in ctm_state.h. Pure relocation, no behavior change. */
 
 #define _GNU_SOURCE
 

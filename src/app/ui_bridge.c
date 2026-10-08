@@ -1,6 +1,6 @@
 /* Agent control client (discovery + commands), bridge sessions, process
  * spawning, the per-device settings store, and plug-in/out orchestration.
- * Moved verbatim out of lvgl_ui.c; de-static'd and prototyped in ui_common.h. */
+ * Moved verbatim out of lvgl_ui.c; de-static'd and prototyped in ctm_state.h. */
 
 #define _GNU_SOURCE
 
@@ -288,8 +288,8 @@ void ctm_bridge_set_agent_host(const char *host, int port)
  * run: a stream sets the address as it starts, and the function returned
  * before opening the socket whenever an address was known. So the probe read
  * as live code for weeks while being unreachable, which is the whole reason
- * this clean-up exists. The headless ui_app is told its address now, so
- * nothing anywhere is left to discover.
+ * this clean-up exists. The standalone app, which never set one, was
+ * removed from this repo on 2026-10-07, so nothing anywhere is left to discover.
  *
  * ⓘ Knowing the address is NOT evidence that anything is listening there. The
  * worker asks every few seconds on its own thread and leaves the answer here,

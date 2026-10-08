@@ -1,7 +1,8 @@
 /* Headless definition unit for the CTM bridge core: shared global state plus the
  * log sink and generic string/file helpers. Split out of ui_common.c so the core
  * (enumeration, agent/session/plug, controllers, monitor) links into a host app
- * without LVGL/SDL. The UI half stays in ui_common.c. No LVGL/SDL here. */
+ * without LVGL/SDL. The UI half was the standalone app's, removed from this repo on 2026-10-07;
+ * aurora-tv is the host now. No LVGL/SDL here. */
 
 #include "ctm_state.h"
 #include "name_list.inl"

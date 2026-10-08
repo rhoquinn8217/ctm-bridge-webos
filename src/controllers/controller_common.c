@@ -956,8 +956,8 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
          *
          * A caller holding a controller still gets a file, `c->log`. A caller
          * without one -- the Bluetooth refusal is the only one today -- had
-         * nowhere to go: `c->log` needs a controller, and `g_log_sink` is set
-         * ONLY by the standalone UI app (`ui_app.c`). aurora-tv never sets it,
+         * nowhere to go: `c->log` needs a controller, and `g_log_sink` was set
+         * only by the standalone UI app, removed from this repo on 2026-10-07. aurora-tv never sets it,
          * so on a TV the line reached `fprintf(stderr, ...)` and nothing else,
          * and stderr is not captured into the app's log files.
          *
