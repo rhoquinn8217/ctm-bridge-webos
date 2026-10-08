@@ -305,6 +305,15 @@ void ctm_bridge_gesture_init(void);
 bool plug_in_by_node(const char *node);
 bool agent_is_known(void);
 int send_agent_command(const char *command, char *response, size_t response_len);
+/* ⭐ The app's signer for the pairing proof a bridge command carries
+ * (shared/agent_proof.inl): signs `message` with the key this TV paired with
+ * the PC's streaming host, filling `fingerprint` (32 hex and a NUL: the first
+ * 16 bytes of the SHA-256 of its certificate) and `signature` (RSA PKCS#1
+ * v1.5 over SHA-256, in base64, NUL-ended). False when it has no key; the
+ * command then goes plainly. The core never sees a key. */
+typedef bool (*ctm_proof_signer_fn)(const unsigned char *message, size_t len,
+                                    char *fingerprint, char *signature, size_t signature_len);
+void ctm_bridge_set_proof_signer(ctm_proof_signer_fn signer);
 int session_index_for_key(const char *key);
 int next_bridge_port(void);
 int first_scan_index_for_item(const logical_device_t *item);
