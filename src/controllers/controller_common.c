@@ -262,6 +262,10 @@ struct ctm_controller {
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
+    /* A send on this connection failed, so the session loop ends the
+     * connection (code review, 2026-10-05): input_link_lost(). Cleared when
+     * a connection starts. */
+    volatile int link_send_failed;
 
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
@@ -2477,13 +2481,30 @@ static void open_composite_siblings(ctm_controller_t *c)
     closedir(d);
 }
 
+/* ⛔⛔ A FAILED SEND IS A LOST LINK, NOT A STOP (code review, 2026-10-05).
+ * The input thread set `stop` when a report or a keepalive would not send.
+ * That ended the session for good and said nothing: no "link lost", no
+ * reconnect, and neither host gone nor device gone, so the app never
+ * released the row, which stayed "bridged" with nothing reaching the PC
+ * until Release or the end of the stream. ➡️ Now the session loop ends the
+ * connection, as it does when a receive fails: the reconnect runs, and if
+ * the PC does not answer within CTM_HOST_GONE_MS it raises host gone, which
+ * the app releases. When: the input thread and the sibling readers. */
+static void input_link_lost(ctm_controller_t *c, const char *what)
+{
+    if (!c->link_send_failed) {
+        ctl_log(c, "link lost: the %s would not send (errno=%d)", what, errno);
+    }
+    c->link_send_failed = 1;
+}
+
 /* Sibling reader: poll one interface's hidraw, forward input tagged with its IN
  * endpoint. When: one thread per sibling, while comp_run. */
 static void *composite_reader_main(void *arg)
 {
     comp_iface_t *ci = (comp_iface_t *)arg;
     ctm_controller_t *c = ci->c;
-    while (c->comp_run && !c->stop) {
+    while (c->comp_run && !c->stop && !c->link_send_failed) {
         struct pollfd pfd; pfd.fd = ci->fd; pfd.events = POLLIN; pfd.revents = 0;
         int pr = poll(&pfd, 1, 50);
         if (pr < 0) { if (errno == EINTR) continue; break; }
@@ -2494,7 +2515,10 @@ static void *composite_reader_main(void *arg)
             uint8_t buf[MAX_REPORT];
             ssize_t n = read(ci->fd, buf, sizeof(buf));
             if (n > 0) {
-                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, ci->in_ep, buf, (size_t)n) != 0) break;
+                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, ci->in_ep, buf, (size_t)n) != 0) {
+                    input_link_lost(c, "sibling's report");
+                    break;
+                }
                 c->st_reports_in++;
                 continue;
             }
@@ -2555,7 +2579,7 @@ static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
     c->last_input_us = 0;
-    while (!c->stop) {
+    while (!c->stop && !c->link_send_failed) {
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
@@ -2564,7 +2588,7 @@ static void *input_thread_main(void *arg)
         if (pr == 0) {
             /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
             kbd_sync_hold(c);
-            if (send_keepalive(c) != 0) { c->stop = 1; break; }
+            if (send_keepalive(c) != 0) { input_link_lost(c, "keepalive"); break; }
             continue;
         }
         if (pfds[1].revents & POLLIN) break;
@@ -2668,7 +2692,7 @@ static void *input_thread_main(void *arg)
                     blank_held_report(c, buf, (size_t)n);
                 }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
-                    c->stop = 1;
+                    input_link_lost(c, "input report");
                     break;
                 }
                 c->st_reports_in++;
@@ -2989,6 +3013,7 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * the host saw audio where it expected a hello, and EVERY SESSION DIED
      * (host config receive failed / bridge hello failed). The handshake above
      * has returned by this point, so the link is up. */
+    c->link_send_failed = 0;
     c->input_thread_started = 0;
     if (pthread_create(&c->input_thread, NULL, input_thread_main, c) == 0) {
         c->input_thread_started = 1;
@@ -3082,7 +3107,8 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     pthread_mutex_unlock(&c->status_mutex);
 
     int link_alive = 1;
-    while (!c->stop && link_alive) {
+    /* ⓘ A failed send ends the connection too: input_link_lost(). */
+    while (!c->stop && link_alive && !c->link_send_failed) {
         drain_paced(c, paced_q, &paced_head, &paced_count, &next_paced_us, host_cfg.bt_pace_us);
         int timeout_ms = 50;
         if (paced_count > 0 && next_paced_us != 0) {
