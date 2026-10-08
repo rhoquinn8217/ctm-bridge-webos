@@ -8,7 +8,7 @@ This is a fork of [ciprianmisaila's
 ctm-bridge-webos](https://github.com/CTM-Bridge/ctm-bridge-webos). It is the
 bridge core [rhoquinn8217/aurora-tv](https://github.com/rhoquinn8217/aurora-tv)
 is built with, and it connects DualSense controllers on a webOS TV to
-[DS5-USBIP](https://github.com/rhoquinn8217/CTM-USBIP) running on a Windows host.
+[DS5-USBIP](https://github.com/rhoquinn8217/DS5-USBIP) running on a Windows host.
 The core is a static library and has been expanded to include DualSense specific
 features.
 
