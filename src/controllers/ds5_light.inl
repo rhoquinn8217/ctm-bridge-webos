@@ -48,7 +48,13 @@
  * ➡️ So the bridge sends it itself (ctm_bt_signal.inl, controller_ds5.c), and
  * the app does for its own colours (ctm_ds5_bt_paint). Harmless after SDL has
  * sent it. The pad's clock is in its input report; SDL's figure for the end
- * of the animation is kept, in the clock's own units. */
+ * of the animation is kept, in the clock's own units.
+ * ⚠️ THAT CLOCK RUNS AT 3 MHz, NOT 1 (the C3, 2026-10-09: 629,356,040 ticks in
+ * the 210.0 s between two bridges of one connection; SDL's own sensor code
+ * says a third of a microsecond). So the figure is 3.4 s after the pad
+ * switched on, and the pad had been on about 1.3 s when the TV first saw it.
+ * Read as 10.2 s, it held the app's own colours back 11 s, and a pad bridged
+ * as it connected showed no magenta. */
 #define DS5L_FLAG1_LED_RESET 0x08   /* claim panel 2, bit 3: take the light over */
 #define DS5L_INPUT_CLOCK     28     /* the pad's clock, 4 bytes little-endian, in a cable's 0x01 */
 #define DS5L_BT_INPUT_ID     0x31   /* Bluetooth's input report, one byte further along */
@@ -115,6 +121,16 @@ static inline bool ds5_input_clock(const uint8_t *d, size_t len, uint32_t *clock
     *clock = (uint32_t)d[at] | ((uint32_t)d[at + 1] << 8) |
              ((uint32_t)d[at + 2] << 16) | ((uint32_t)d[at + 3] << 24);
     return true;
+}
+
+/* What one input report says about the pad's connection animation: 1 over,
+ * 0 not yet, -1 when the report does not carry the clock -- Bluetooth's
+ * reduced report, before a host asks for the full one, does not. */
+static inline int ds5_report_animation_over(const uint8_t *d, size_t len)
+{
+    uint32_t clock;
+    if (!ds5_input_clock(d, len, &clock)) return -1;
+    return clock >= DS5L_ANIMATION_DONE ? 1 : 0;
 }
 
 /* Does this report from the PC set the lightbar? ⓘ Only the claim counts: a

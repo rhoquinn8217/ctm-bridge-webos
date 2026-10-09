@@ -145,6 +145,19 @@ int main(void)
     r[0] = 0x36;
     ok(!ds5_input_clock(r, 398, &clock) && !ds5_input_clock(NULL, 78, &clock), "nor any other report, or none");
 
+    printf("\nwhat one report says about the animation, for the app's hold before a bridge\n");
+    memset(r, 0, sizeof(r));
+    r[0] = 0x31;
+    r[29] = 0x40; r[30] = 0x9f; r[31] = 0x9b;                 /* 10198848 */
+    ok(ds5_report_animation_over(r, 78) == 0, "a clock short of the end: not over");
+    r[29] = 0xc0; r[30] = 0xa3; r[31] = 0x9b;                 /* 10200000, the end itself */
+    ok(ds5_report_animation_over(r, 78) == 1, "the end itself: over");
+    ok(ds5_report_animation_over(r, 77) == -1 && ds5_report_animation_over(NULL, 78) == -1,
+       "a short report, or none, says nothing");
+    r[0] = 0x01;
+    ok(ds5_report_animation_over(r, 10) == -1,
+       "nor does Bluetooth's reduced report, before the full one is asked for");
+
     printf("\nwhere the takeover is sent\n");
     char *sig = load("src/controllers/ctm_bt_signal.inl");
     char *ds5 = load("src/controllers/controller_ds5.c");
@@ -167,6 +180,10 @@ int main(void)
     ok(when && strstr(when, "clock < DS5L_ANIMATION_DONE") != NULL &&
        strstr(when, "ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 1)") != NULL,
        "and send it once a bridge, when the animation is over");
+    char *over = between(sig, "int ctm_ds5_animation_over(", "\n}");
+    ok(over && strstr(over, "ds5_report_animation_over(") != NULL && strstr(over, "read(fd") != NULL &&
+       strstr(over, "poll(") == NULL && strstr(over, "sleep") == NULL,
+       "the app's question reads every waiting report and never waits for one");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

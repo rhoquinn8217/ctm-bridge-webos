@@ -833,6 +833,27 @@ int ctm_ds5_bt_paint(const char *node, uint8_t r, uint8_t g, uint8_t b, int take
     return rc;
 }
 
+/* ⭐ HAS A BLUETOOTH DUALSENSE FINISHED ITS CONNECTION ANIMATION? (ds5_light.inl)
+ * For the app, which holds a bridge until the pad will show its colours
+ * (rhoquinn8217, 2026-10-09: a pad is bridged the moment it connects). Read off
+ * the pad's own clock in the reports waiting on `fd`: its hidraw node, opened
+ * O_RDONLY | O_NONBLOCK and kept open by the caller, so every report since the
+ * last call is there. Reads them all and never waits for one. 1 over, 0 not
+ * yet, -1 when no report carrying the clock was waiting. */
+int ctm_ds5_animation_over(int fd)
+{
+    uint8_t rep[128];
+    int answer = -1;
+    if (fd < 0) return -1;
+    for (int i = 0; i < 128; ++i) {
+        const ssize_t n = read(fd, rep, sizeof rep);
+        if (n <= 0) break;
+        const int says = ds5_report_animation_over(rep, (size_t)n);
+        if (says >= 0) answer = says;
+    }
+    return answer;
+}
+
 /* ⭐ The DS4's own tone, kept in its own file and included HERE rather than
  * earlier: it borrows ctl_log and ctm_bt_sign_output, and both are in scope by
  * this point. ⛔ Nothing above this line is DS4-aware, deliberately -- the
