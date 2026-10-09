@@ -10,7 +10,11 @@
  * whole stream, with the row "bridged" and nothing reaching the PC.
  * ➡️ The clock now starts at the first failure of any kind since the listener
  * last answered a greeting, and only an answered greeting stops it. Its own
- * file so a test can pin it. */
+ * file so a test can pin it.
+ *
+ * ⭐ AND NO REDIAL WAITS PAST THE GIVE-UP (2026-10-08): link_trouble_left_ms
+ * is what the next connect may wait, so the pad goes back at the give-up and
+ * not a whole connect after it. */
 
 #include <stdint.h>
 
@@ -37,4 +41,12 @@ static inline long link_trouble_ms(const link_trouble_t *t, uint64_t now_us)
 {
     if (t->since_us == 0 || now_us <= t->since_us) return 0;
     return (long)((now_us - t->since_us) / 1000u);
+}
+
+/* What is left of gone_ms before the pad goes back, in ms; 0 = nothing left,
+ * give up. */
+static inline long link_trouble_left_ms(const link_trouble_t *t, uint64_t now_us, long gone_ms)
+{
+    const long left = gone_ms - link_trouble_ms(t, now_us);
+    return left > 0 ? left : 0;
 }

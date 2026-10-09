@@ -2819,9 +2819,9 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
  * (hidraw ioctl + reply), HOST_CONFIG (pacing params). When: per message
  * decoded in the session loop. */
 /* ⭐ How long the reconnect loop tries before deciding the host is gone.
- * ⭐⭐ FIFTEEN SECONDS BECAUSE THE LISTENER USES FIFTEEN. Not a guess -- see the
- * note at the give-up itself in session_main. */
-#define CTM_HOST_GONE_MS 15000
+ * ⭐⭐ THREE SECONDS, AND THE LISTENER WAITS FIVE. Read off the logs, not
+ * guessed -- see the note at the give-up itself in session_main. */
+#define CTM_HOST_GONE_MS 3000
 /* How long a connection waits for the listener to answer its greeting. */
 #define CTM_HOST_ANSWER_US 5000000ull
 
@@ -3342,76 +3342,78 @@ static void *session_main(void *arg)
         int attempts = 0;
         struct timespec w0;
         clock_gettime(CLOCK_MONOTONIC, &w0);
-        while (!c->stop &&
-               ctm_transport_connect_once(&c->xport, c->host, c->port, 400) != 0) {
-            ++attempts;
-            for (int slept = 0; slept < 500 && !c->stop; slept += 50) usleep(50000);
-
-            /* ⭐⭐ GIVE UP AFTER FIFTEEN SECONDS. T-127, 2026-08-23.
+        for (;;) {
+            if (c->stop) break;
+            /* ⭐⭐ GIVE UP AFTER THREE SECONDS (2026-10-08; fifteen until then).
              *
-             * ⛔ THE FAULT: this loop used to retry FOREVER. Close the
-             * listener's window and the controller stayed claimed by a host that
-             * no longer exists -- no speaker, no triggers, no microphone, and
-             * nothing on screen saying why. ⚠️ **The user's only way out was to
-             * know to press Release.**
+             * ⛔ THE FIRST FAULT (2026-08-23): this loop retried FOREVER. Close
+             * the listener's window and the controller stayed claimed by a host
+             * that no longer existed -- no speaker, no triggers, no microphone,
+             * and nothing on screen saying why. ⚠️ The user's only way out was
+             * to know to press Release.
              *
-             * ⭐⭐⭐ FIFTEEN SECONDS, BECAUSE THAT IS THE LISTENER'S OWN
-             * WINDOW. Read out of CTM-USBIP 2026-08-23, and it is the reason
-             * this number is not a guess.
+             * ⛔ THE SECOND: FIFTEEN SECONDS WAS A FAULT OF ITS OWN. Quit the
+             * listener with a pad bridged and the pad answered NOTHING, on the
+             * PC or the TV, for sixteen seconds. Fifteen was the listener's
+             * reconnect grace, matched on purpose; what the logs say that grace
+             * protected (2026-10-08):
+             * - In every listener log on the PC, a bridge that dropped and came
+             *   back did so within half a second (twice: 0.2 s and 0.5 s).
+             * - The C1 held 46 give-ups, every one after the whole wait, and
+             *   not one link that came back late.
+             * ➡️ So three seconds, six times the longest recovery seen, and the
+             * listener's grace went to five, so it still holds the port for the
+             * last of these redials (agent.inl, set_session_timeouts). ⭐ The
+             * two move together: a TV that dials for longer than the listener
+             * holds the port is waiting for nothing.
              *
-             * ⛔ THIS LOOP REDIALS THE BRIDGE SESSION PORT (48055), NOT THE
-             * AGENT (48054). The agent is always listening; the session port
-             * exists only while a bridge is running, and the agent creates it
-             * when the TV asks. ➡️ **A freshly restarted listener has NOTHING on
-             * 48055 -- nothing has asked it to bridge yet -- so the reconnect
-             * can never succeed after a restart, however long it waits.**
+             * ⭐ AND ONLY TIME TELLS "THE LISTENER QUIT" FROM "THE NETWORK
+             * BLINKED". Each of those 46 made 6 attempts in 15 s, two seconds
+             * each: the PC never refused a redial, it dropped it in silence
+             * (Windows' firewall, with nothing listening on the port). A refusal
+             * would have said "gone" at once; that PC never gives one.
              *
-             * ⭐ SO THE ONLY THING THE WAIT PROTECTS IS A DROP WHERE THE
-             * LISTENER PROCESS SURVIVES and its session port stays open -- a
-             * WiFi hiccup or a router blip, with both ends perfectly healthy.
+             * ⛔ THIS LOOP REDIALS THE BRIDGE SESSION PORT, NOT THE AGENT. The
+             * agent is always listening; the session port exists only while a
+             * bridge is running, and the agent creates it when the TV asks.
+             * ➡️ A restarted listener has nothing on it, so a redial after a
+             * restart can never succeed, however long it waits.
              *
-             * ⭐⭐⭐ AND THE LISTENER HOLDS THAT PORT FOR EXACTLY FIFTEEN
-             * SECONDS. `agent.inl`: `set_session_timeouts(30000, 15000)` -- an
-             * initial connect must arrive within thirty, a RECONNECT gets a
-             * fifteen-second grace, after which the session declares itself dead
-             * and unplugs the device. ⓘ Its own comment gives the reason: *"a
-             * parked listener is what produced zombie devices and stole the next
-             * plug's handshake."*
+             * ➡️ The cost of being wrong is small: the controller returns to
+             * Moonlight's own path and still works, just without the extras,
+             * and re-bridging is one gesture.
              *
-             * ➡️ **SO WE GIVE UP WHEN THEY GIVE UP, AND NOT BEFORE.** Stopping
-             * earlier abandons a session that was still recoverable, and the
-             * listener would have unplugged it moments later anyway.
-             *
-             * ⛔ IT WAS BRIEFLY 5000, ON THE REASONING THAT ONLY A MILLISECOND
-             * BLIP COULD EVER RECOVER. ⚠️ That was wrong by omission -- it never
-             * checked what the other side does, and the other side waits fifteen
-             * seconds. ⭐ **The number stopped being a judgement call the moment
-             * that was read.**
-             *
-             * ⓘ For scale: one attempt costs up to ~2.9s -- 400ms of ENet
-             * timeout, a 500ms sleep, and up to 2s of bounded TCP -- so fifteen
-             * seconds is about six attempts.
-             *
-             * ➡️ **The cost of being wrong is small either way: the controller
-             * returns to Moonlight's own path and still works, just without the
-             * extras, and re-bridging is one gesture.**
-             *
-             * ⛔ THIS IS NOT WHAT CAUSED THE HANG. That was the LENGTH of a
-             * single connect -- a dead host drops packets, so connect() waited
-             * out the kernel's SYN timeout. Bounded to two seconds in the commit
-             * before this one. ⓘ The loop always checked `stop` between
-             * attempts; it simply could not while parked inside one. */
-            /* ⓘ Timed by the trouble clock, not from this round of connects:
-             * a connect that succeeds into a greeting nobody answers must not
+             * ⓘ Timed by the trouble clock, not from this round of connects: a
+             * connect that succeeds into a greeting nobody answers must not
              * start the count again (link_trouble.inl). */
-            const long waited_ms = link_trouble_ms(&trouble, now_us());
-            if (waited_ms >= CTM_HOST_GONE_MS) {
+            const long left_ms = link_trouble_left_ms(&trouble, now_us(), CTM_HOST_GONE_MS);
+            if (left_ms == 0) {
+                const long waited_ms = link_trouble_ms(&trouble, now_us());
                 ctl_log(c, "host gone: no answer for %ldms over %d attempt(s) -- giving up",
                         waited_ms, attempts);
                 pthread_mutex_lock(&c->status_mutex);
                 c->st_host_gone = 1;
                 pthread_mutex_unlock(&c->status_mutex);
                 c->stop = 1;
+                break;
+            }
+            /* ⭐ NO ATTEMPT WAITS PAST THE GIVE-UP. A PC that drops a connect
+             * holds it for the transport's whole two seconds, so a second one
+             * begun at two carried the give-up to four or five. ⓘ The hang on
+             * Release that a dead PC once caused was the length of ONE connect,
+             * bounded in ctm_transport.c, and not this loop. */
+            const uint64_t tried_us = now_us();
+            if (ctm_transport_connect_within(&c->xport, c->host, c->port, 400,
+                                             (unsigned int)left_ms) == 0) {
+                break;
+            }
+            ++attempts;
+            /* ⓘ One attempt each half second at most, counting the attempt's
+             * own wait: a refused connect is not tried again at once, and one
+             * that waited out its time goes again straight away. */
+            while (!c->stop && now_us() - tried_us < 500000ull &&
+                   link_trouble_left_ms(&trouble, now_us(), CTM_HOST_GONE_MS) > 0) {
+                usleep(50000);
             }
         }
         if (c->stop) break;
