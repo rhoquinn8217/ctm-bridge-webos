@@ -388,6 +388,12 @@ static int send_agent_line(const char *command, char *response, size_t response_
  * a bridge command. NULL: every command goes plainly, as before. */
 static ctm_proof_signer_fn g_proof_signer;
 
+/* ⭐ This TV's pairing fingerprint, as the signer last gave it: what tells this
+ * TV's remote pointer from another TV's (ctm_tv_pointer_plug). Empty until a
+ * command has been signed. */
+static pthread_mutex_t g_tv_fingerprint_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_tv_fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+
 void ctm_bridge_set_proof_signer(ctm_proof_signer_fn signer)
 {
     g_proof_signer = signer;
@@ -423,6 +429,9 @@ int send_agent_command(const char *command, char *response, size_t response_len)
             if (text_len > 0 &&
                 signer((const unsigned char *)text, text_len, fingerprint, signature, sizeof(signature)) &&
                 agent_proof_line(command, nonce, fingerprint, signature, line, sizeof(line)) > 0) {
+                pthread_mutex_lock(&g_tv_fingerprint_mutex);
+                snprintf(g_tv_fingerprint, sizeof(g_tv_fingerprint), "%s", fingerprint);
+                pthread_mutex_unlock(&g_tv_fingerprint_mutex);
                 return send_agent_line(line, response, response_len);
             }
             ctm_gesture_log(NULL, "pairing proof: could not sign \"%s\"; sending it without one", command);
@@ -756,6 +765,17 @@ bool ctm_tv_pointer_plug(void)
             (void)send_agent_command(cmd, response, sizeof(response));
         }
         return false;
+    }
+    /* ⭐ Its serial is this TV's own, from the fingerprint the command above
+     * was signed with (session_name.inl, tv_pointer_serial). */
+    {
+        char fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+        char serial[64];
+        pthread_mutex_lock(&g_tv_fingerprint_mutex);
+        snprintf(fingerprint, sizeof(fingerprint), "%s", g_tv_fingerprint);
+        pthread_mutex_unlock(&g_tv_fingerprint_mutex);
+        tv_pointer_serial(serial, sizeof(serial), fingerprint);
+        ctm_hostmouse_set_serial(serial);
     }
     if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
         log_append("TV pointer: synthesizer start failed");

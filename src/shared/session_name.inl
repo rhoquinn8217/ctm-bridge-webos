@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define SESSION_RUN_TAG_LEN 6
 
@@ -33,4 +34,23 @@ static void session_name_make(char *out, size_t out_len, const char *kind,
                               unsigned seq, const char *run_tag)
 {
     snprintf(out, out_len, "ctm-%s-%u-%s", kind, seq, run_tag);
+}
+
+/* ⭐⭐ THE REMOTE POINTER'S SERIAL, ONE PER TV (rhoquinn8217, 2026-10-08: two
+ * TVs streaming at once). Every TV's pointer told the listener the serial
+ * "ctm-tv-pointer", so with two TVs bridged the second pointer retired the
+ * first as the same device come back (code review, 2026-10-05). It now ends
+ * with the first SESSION_TV_ID_LEN characters of the fingerprint of the key
+ * this TV paired with the PC (agent_proof.inl): the same on every run of this
+ * TV, different on another. A TV with no key has no fingerprint, and keeps
+ * the plain name. */
+#define SESSION_TV_ID_LEN 8
+
+static void tv_pointer_serial(char *out, size_t out_len, const char *fingerprint)
+{
+    if (fingerprint == NULL || strlen(fingerprint) < SESSION_TV_ID_LEN) {
+        snprintf(out, out_len, "ctm-tv-pointer");
+        return;
+    }
+    snprintf(out, out_len, "ctm-tv-pointer-%.*s", SESSION_TV_ID_LEN, fingerprint);
 }

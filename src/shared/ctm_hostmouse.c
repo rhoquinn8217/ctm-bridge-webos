@@ -116,6 +116,16 @@ static void hm_log(const char *fmt, ...)
     fprintf(stderr, "hostmouse: %s\n", line);
 }
 
+/* The serial this TV's pointer goes by: ctm_hostmouse_set_serial. Written
+ * before the session thread starts, and read only by it. */
+static char g_hm_serial[64] = "ctm-tv-pointer";
+
+void ctm_hostmouse_set_serial(const char *serial)
+{
+    snprintf(g_hm_serial, sizeof(g_hm_serial), "%s",
+             (serial && serial[0]) ? serial : "ctm-tv-pointer");
+}
+
 static int hm_send_hello(void)
 {
     ctmb_device_caps_t caps;
@@ -131,7 +141,7 @@ static int hm_send_hello(void)
     caps.output_report_len = 0;
     caps.feature_report_len = 0;
     snprintf(caps.path, sizeof(caps.path), "virtual");
-    snprintf(caps.serial, sizeof(caps.serial), "ctm-tv-pointer");
+    snprintf(caps.serial, sizeof(caps.serial), "%s", g_hm_serial);
     snprintf(caps.product, sizeof(caps.product), "CTM TV Pointer");
     snprintf(caps.manufacturer, sizeof(caps.manufacturer), "CTM");
 

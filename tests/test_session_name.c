@@ -53,6 +53,19 @@ int main(void)
     ok(strlen(name) <= 31 && strcmp(name + strlen(name) - SESSION_RUN_TAG_LEN, tag) == 0,
        "the longest kind with the largest count fits the listener's 31, tag whole");
 
+    printf("\nthe remote pointer's serial, one per TV\n");
+    char serial[64], other_serial[64];
+    tv_pointer_serial(serial, sizeof(serial), "0123456789abcdef0123456789abcdef");
+    tv_pointer_serial(other_serial, sizeof(other_serial), "fedcba9876543210fedcba9876543210");
+    ok(strcmp(serial, "ctm-tv-pointer-01234567") == 0, "the plain name and the first 8 of the TV's fingerprint");
+    ok(strcmp(serial, other_serial) != 0, "two TVs' pointers are two devices: neither retires the other");
+    tv_pointer_serial(other_serial, sizeof(other_serial), "0123456789abcdef0123456789abcdef");
+    ok(strcmp(serial, other_serial) == 0, "the same TV keeps its pointer's serial on every run");
+    tv_pointer_serial(serial, sizeof(serial), "");
+    tv_pointer_serial(other_serial, sizeof(other_serial), NULL);
+    ok(strcmp(serial, "ctm-tv-pointer") == 0 && strcmp(other_serial, "ctm-tv-pointer") == 0,
+       "a TV with no pairing key keeps the plain name, as before");
+
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }
