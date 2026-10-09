@@ -547,10 +547,11 @@ static void ds5_input_hook(ctm_controller_t *c, const uint8_t *data, size_t len)
     ds5_on_input_report(c, data, len);
 }
 
-/* ready_light: the bridged-and-waiting breath (ready_light_tick in
- * controller_common.c), green at `level`, in the report this pad's bus takes:
- * ds5_light.inl. */
-static int ds5_ready_light(ctm_controller_t *c, int level)
+/* paint_light: one colour, written by the TV, in the report this pad's bus
+ * takes (ds5_light.inl). The bridged-and-waiting breath paints with it, and so
+ * does a PC colour put back after the bridge's signal (ready_light_tick in
+ * controller_common.c). */
+static int ds5_paint_light(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b)
 {
     uint8_t rep[DS5L_BT_LEN];
     const char *bus = ctm_controller_bus(c);
@@ -559,12 +560,18 @@ static int ds5_ready_light(ctm_controller_t *c, int level)
     if (bt) {
         /* ⓘ A count of the TV's own light reports, wrapped at 16. */
         static unsigned s_seq;
-        n = ds5_light_bt_report(rep, sizeof rep, s_seq++, 0x00, (uint8_t)level, 0x00);
+        n = ds5_light_bt_report(rep, sizeof rep, s_seq++, r, g, b);
         if (n) ctm_bt_sign_output(rep, n);
     } else {
-        n = ds5_light_usb_report(rep, sizeof rep, 0x00, (uint8_t)level, 0x00);
+        n = ds5_light_usb_report(rep, sizeof rep, r, g, b);
     }
     return n ? ctm_controller_write_raw(c, rep, n) : -1;
+}
+
+/* ready_light: the bridged-and-waiting breath, green at `level`. */
+static int ds5_ready_light(ctm_controller_t *c, int level)
+{
+    return ds5_paint_light(c, 0x00, (uint8_t)level, 0x00);
 }
 
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
@@ -582,6 +589,8 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
     .ready_light = ds5_ready_light,
     .host_sets_light = ds5_report_sets_light,
+    .host_light_colour = ds5_report_light_colour,
+    .paint_light = ds5_paint_light,
 };
 
 /* DualSense Edge. Same behaviour as the base DualSense -- deliberately sharing
@@ -602,4 +611,6 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .set_settings = NULL,
     .ready_light = ds5_ready_light,
     .host_sets_light = ds5_report_sets_light,
+    .host_light_colour = ds5_report_light_colour,
+    .paint_light = ds5_paint_light,
 };

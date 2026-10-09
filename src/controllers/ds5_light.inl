@@ -135,21 +135,25 @@ static inline int ds5_report_animation_over(const uint8_t *d, size_t len)
 
 /* Does this report from the PC set the lightbar? ⓘ Only the claim counts: a
  * report that carries a colour without claiming it leaves the light alone. */
-static inline bool ds5_report_sets_light(const uint8_t *d, size_t len)
+/* Where a report's output block starts, and how many of its bytes the report
+ * holds (*have): a cable's 0x02, Bluetooth's 0x31, or the 0x90 block of a 0x36
+ * or 0x32 with audio. 0 when it has none. */
+static inline size_t ds5_output_block(const uint8_t *d, size_t len, size_t *have)
 {
-    if (!d || len < 3) return false;
+    *have = 0;
+    if (!d || len < 3) return 0;
     switch (d[0]) {
     case DS5L_USB_ID:
-        return len > DS5L_USB_BLOCK + DS5L_BLOCK_FLAG1 &&
-               (d[DS5L_USB_BLOCK + DS5L_BLOCK_FLAG1] & DS5L_FLAG1_LIGHT) != 0;
+        *have = len - DS5L_USB_BLOCK;
+        return DS5L_USB_BLOCK;
     case DS5L_BT_ID:
-        return len > DS5L_BT_BLOCK + DS5L_BLOCK_FLAG1 &&
-               (d[DS5L_BT_BLOCK + DS5L_BLOCK_FLAG1] & DS5L_FLAG1_LIGHT) != 0;
+        *have = len - DS5L_BT_BLOCK;
+        return DS5L_BT_BLOCK;
     case 0x36:
     case 0x32: {
         /* The same walk ds5_patch_output makes: blocks from byte 2, the
          * signature's four bytes excluded. */
-        if (len < 12) return false;
+        if (len < 12) return 0;
         const size_t limit = len - 4;
         size_t pos = 2;
         while (pos + 2 <= limit) {
@@ -158,15 +162,38 @@ static inline bool ds5_report_sets_light(const uint8_t *d, size_t len)
             if (id == 0 && payload == 0) break;
             if (payload + 2 > limit - pos) break;
             if (id == 0x90 && payload > DS5L_BLOCK_FLAG1) {
-                return (d[pos + 2 + DS5L_BLOCK_FLAG1] & DS5L_FLAG1_LIGHT) != 0;
+                *have = payload;
+                return pos + 2;
             }
             pos += payload + 2;
         }
-        return false;
+        return 0;
     }
     default:
-        return false;
+        return 0;
     }
+}
+
+static inline bool ds5_report_sets_light(const uint8_t *d, size_t len)
+{
+    size_t have;
+    const size_t at = ds5_output_block(d, len, &have);
+    return at != 0 && have > DS5L_BLOCK_FLAG1 &&
+           (d[at + DS5L_BLOCK_FLAG1] & DS5L_FLAG1_LIGHT) != 0;
+}
+
+/* The colour a report from the PC sets the lightbar to. False when it does
+ * not set it, or is too short to hold the colour. */
+static inline bool ds5_report_light_colour(const uint8_t *d, size_t len, uint8_t rgb[3])
+{
+    size_t have;
+    if (!rgb || !ds5_report_sets_light(d, len)) return false;
+    const size_t at = ds5_output_block(d, len, &have);
+    if (have < DS5L_BLOCK_RED + 3) return false;
+    rgb[0] = d[at + DS5L_BLOCK_RED];
+    rgb[1] = d[at + DS5L_BLOCK_RED + 1];
+    rgb[2] = d[at + DS5L_BLOCK_RED + 2];
+    return true;
 }
 
 #endif

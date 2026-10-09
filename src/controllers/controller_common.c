@@ -278,6 +278,10 @@ struct ctm_controller {
     uint64_t ready_light_t0_us;       /* when it started breathing; 0 = not yet */
     uint64_t ready_light_next_us;     /* when its next step is due */
     int ready_light_failed;           /* writes in a row that did not go */
+    /* A colour the PC set while the bridge's own signal painted the pad, put
+     * back when the signal ends: ready_light_note_host. */
+    int ready_light_owed;
+    uint8_t ready_light_owed_rgb[3];
 
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
@@ -2276,8 +2280,31 @@ static bool controller_signal_busy(ctm_controller_t *c)
  * it stops, because the report that stopped it has just set the colour. */
 static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
-    if (c->ready_light_taken || !c->ops->host_sets_light) return;
+    if (!c->ops->host_sets_light) return;
+    if (c->ready_light_taken && !c->ready_light_owed) return;   /* nothing left to follow */
     if (!c->ops->host_sets_light(data, len)) return;
+    /* ⭐⭐ A COLOUR SET WHILE THE BRIDGE'S OWN SIGNAL PAINTS THE PAD IS KEPT
+     * (rhoquinn8217's C3, 2026-10-09). Steam set its colour 1.7 s into the
+     * bridge's 2.4 s green and tone; the signal's next frame covered it, the PC
+     * never sent it again, and the pad sat on solid green -- neither the PC's
+     * colour nor the breath, since the PC had "set the light". So it is kept
+     * and put back the moment the signal ends (ready_light_tick). A colour the
+     * PC sets after that is the latest, and nothing is owed. */
+    uint8_t rgb[3];
+    if (c->ops->paint_light && c->ops->host_light_colour && ctm_sig_light_on() &&
+        controller_signal_busy(c) && c->ops->host_light_colour(data, len, rgb)) {
+        if (!c->ready_light_owed) {
+            ctl_log(c, "ready light: the PC set the light to %u,%u,%u while the bridge's "
+                       "signal painted the pad; it goes back on when the signal ends",
+                    rgb[0], rgb[1], rgb[2]);
+        }
+        memcpy(c->ready_light_owed_rgb, rgb, sizeof rgb);
+        c->ready_light_owed = 1;
+    } else if (c->ready_light_owed) {
+        c->ready_light_owed = 0;
+        ctl_log(c, "ready light: the PC set the light again after the signal, so nothing is put back");
+    }
+    if (c->ready_light_taken) return;
     c->ready_light_taken = 1;
     ctl_log(c, "ready light: the PC set the light%s",
             c->ready_light_t0_us ? ", so it stops breathing" : " before it began to breathe");
@@ -2285,6 +2312,16 @@ static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size
 
 static void ready_light_tick(ctm_controller_t *c)
 {
+    /* The PC's colour, back on once the signal that covered it has ended
+     * (ready_light_note_host). Never while a signal holds the pad, so never
+     * on the way back to the TV. */
+    if (c->ready_light_owed && !controller_signal_busy(c)) {
+        c->ready_light_owed = 0;
+        const uint8_t *k = c->ready_light_owed_rgb;
+        const int rc = c->ops->paint_light(c, k[0], k[1], k[2]);
+        ctl_log(c, "ready light: the PC's colour %u,%u,%u is back on, the signal has ended (rc=%d)",
+                k[0], k[1], k[2], rc);
+    }
     if (!c->ops->ready_light || c->ready_light_taken || !ctm_sig_light_on()) return;
     const uint64_t now = now_us();
     if (c->ready_light_next_us != 0 && now < c->ready_light_next_us) return;

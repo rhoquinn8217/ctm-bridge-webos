@@ -77,6 +77,14 @@ int main(void)
        "every report from the PC is asked whether it sets the light");
     ok(tick && strstr(tick, "controller_signal_busy(c)") != NULL,
        "and the breath waits for any signal, and stops for a release");
+    char *note = between(common, "static void ready_light_note_host(", "\n}");
+    ok(note && strstr(note, "controller_signal_busy(c) && c->ops->host_light_colour(data, len, rgb)") != NULL &&
+       strstr(note, "c->ready_light_owed = 1;") != NULL,
+       "a colour the PC sets while the bridge's signal paints the pad is kept");
+    const char *owed = tick ? strstr(tick, "if (c->ready_light_owed && !controller_signal_busy(c)) {") : NULL;
+    const char *stop = tick ? strstr(tick, "if (!c->ops->ready_light || c->ready_light_taken") : NULL;
+    ok(owed && stop && owed < stop && strstr(owed, "c->ops->paint_light(c, k[0], k[1], k[2])") != NULL,
+       "and put back when the signal ends, before the breath's own test");
 
     printf("\nwhich pads breathe\n");
     char *ds4_bt = between(ds4, "const ctm_controller_ops_t ctm_controller_ds4_ops = {", "\n};");
@@ -91,6 +99,11 @@ int main(void)
        strstr(ds5_ops, ".host_sets_light = ds5_report_sets_light") != NULL, "a DualSense does, on either bus");
     ok(ds5e_ops && strstr(ds5e_ops, ".ready_light = ds5_ready_light") != NULL &&
        strstr(ds5e_ops, ".host_sets_light = ds5_report_sets_light") != NULL, "and an Edge");
+    ok(ds5_ops && strstr(ds5_ops, ".host_light_colour = ds5_report_light_colour") != NULL &&
+       strstr(ds5_ops, ".paint_light = ds5_paint_light") != NULL &&
+       ds5e_ops && strstr(ds5e_ops, ".host_light_colour = ds5_report_light_colour") != NULL &&
+       strstr(ds5e_ops, ".paint_light = ds5_paint_light") != NULL,
+       "a DualSense and an Edge get back a colour the bridge's signal covered");
 
     printf("\nan Xbox pad's one buzz each way\n");
     char *xpad_ops = between(xpad, "const ctm_controller_ops_t controller_xpad_ops = {", "\n};");

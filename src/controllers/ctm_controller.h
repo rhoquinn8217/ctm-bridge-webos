@@ -168,9 +168,18 @@ typedef struct {
      *                     Returns 0 when the report was written.
      *   host_sets_light   does this report from the PC set the lightbar?
      *                     When: every report from the PC, on the session
-     *                     thread, before anything rewrites it. */
+     *                     thread, before anything rewrites it.
+     *   host_light_colour the colour such a report sets. When: as above.
+     *   paint_light       paint the lightbar one colour. When: the session
+     *                     thread, once, to put back a colour the PC set while
+     *                     the bridge's own signal painted over it (the
+     *                     ready light's ready_light_owed). Returns 0 when the
+     *                     report was written. Both NULL for a type whose
+     *                     signal keeps the PC's colour itself, the DS4's. */
     int (*ready_light)(ctm_controller_t *c, int level);
     bool (*host_sets_light)(const uint8_t *data, size_t len);
+    bool (*host_light_colour)(const uint8_t *data, size_t len, uint8_t rgb[3]);
+    int (*paint_light)(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b);
 
     /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
      *

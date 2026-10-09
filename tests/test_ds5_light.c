@@ -111,6 +111,29 @@ int main(void)
     r[3] = 250;                       /* a block that runs off the end */
     ok(!ds5_report_sets_light(r, 141), "a block running past the end is not believed");
 
+    printf("\nthe colour a report from the PC sets, kept while the bridge's signal plays\n");
+    uint8_t rgb[3] = {0, 0, 0};
+    n = ds5_light_usb_report(r, sizeof(r), 1, 2, 3);
+    ok(ds5_report_light_colour(r, n, rgb) && rgb[0] == 1 && rgb[1] == 2 && rgb[2] == 3,
+       "a cable's report: its colour");
+    n = ds5_light_bt_report(r, sizeof(r), 0x13, 9, 8, 7);
+    ok(ds5_report_light_colour(r, n, rgb) && rgb[0] == 9 && rgb[1] == 8 && rgb[2] == 7,
+       "a Bluetooth report: its colour");
+    memset(r, 0, sizeof(r));
+    r[0] = 0x36;
+    r[2] = 0x91; r[3] = 7;            /* another block in front, as the walk goes */
+    r[11] = 0x90; r[12] = 63;
+    r[14] = 0x04;                     /* claims the light */
+    r[13 + 44] = 0x00; r[13 + 45] = 0x80; r[13 + 46] = 0x80;   /* teal */
+    ok(ds5_report_light_colour(r, 398, rgb) && rgb[0] == 0x00 && rgb[1] == 0x80 && rgb[2] == 0x80,
+       "the PC's report with audio: the colour in its output block");
+    r[14] = 0x01;                     /* the mute light only */
+    ok(!ds5_report_light_colour(r, 398, rgb), "a report that does not set the light has no colour to keep");
+    n = ds5_light_bt_takeover_report(r, sizeof(r), 0);
+    ok(!ds5_report_light_colour(r, n, rgb), "nor does the takeover");
+    n = ds5_light_usb_report(r, sizeof(r), 1, 2, 3);
+    ok(!ds5_report_light_colour(r, 40, rgb), "nor one cut short before its colour");
+
     printf("\nnot a lightbar report\n");
     ok(!ds5_report_sets_light(NULL, 0) && !ds5_report_sets_light(r, 2), "nothing, or too short");
     r[0] = 0x05; r[1] = 0x02;
