@@ -9,7 +9,10 @@
  *
  * ⭐ AND THE GIVE-UP IS THREE SECONDS NOW (2026-10-08), with no redial
  * waiting past it: a PC that drops a connect in silence held each one for
- * two seconds, so a second attempt carried three to four or five.
+ * two seconds, so a second attempt carried three to four or five. The TV
+ * pointer's own redial (src/shared/ctm_hostmouse.c) is held to the same:
+ * past the listener's five-second hold on a dropped port it could reach
+ * another session that took the port.
  *
  * ➡️ Build and run:  cc tests/test_link_trouble.c && ./a.out
  *    Or:             ./tests/run-tests.sh
@@ -198,6 +201,17 @@ int main(void)
        "and any message at all is one, for the pads whose handshake does not wait");
     ok(run && strstr(run, "now_us() >= answer_by_us") != NULL,
        "a connection whose greeting is never answered ends");
+
+    printf("\nthe TV pointer, which redials on its own\n");
+    char *pointer = load("src/shared/ctm_hostmouse.c");
+    ok(pointer != NULL, "the pointer's code can be read");
+    ok(defined_as(pointer, "#define HM_HOST_GONE_MS ") == GONE_MS,
+       "it gives up when a pad does, inside the listener's hold on a dropped port");
+    ok(near(pointer, "if (gone_ms >= HM_HOST_GONE_MS) {", "g_hm.host_gone = 1;", 200),
+       "it gives up when its time is gone");
+    ok(near(pointer, "ctm_transport_connect_within(&g_hm.xport,",
+            "(unsigned int)(HM_HOST_GONE_MS - gone_ms))", 160),
+       "and no connect of its waits past that");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

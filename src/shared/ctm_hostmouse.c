@@ -161,10 +161,18 @@ static int hm_send_hello(void)
  * half second for as long as it was plugged, so a listener that had gone kept
  * this thread knocking until the stream ended, and the remote stayed "bridged"
  * in the panel with nothing reaching the PC. After this long without a link it
- * stops and says so, the same fifteen seconds as a pad's session
- * (CTM_HOST_GONE_MS); ctm_tv_pointer_active() then reads false, so the
- * remote's pointer goes back to the TV and the panel shows it released. */
-#define HM_HOST_GONE_MS 15000
+ * stops and says so; ctm_tv_pointer_active() then reads false, so the
+ * remote's pointer goes back to the TV and the panel shows it released.
+ *
+ * ⭐ THE SAME THREE SECONDS AS A PAD'S SESSION (CTM_HOST_GONE_MS; fifteen
+ * until 2026-10-08), AND HERE IT IS MORE THAN TIDINESS. The listener holds a
+ * dropped bridge's port for five seconds and then frees it, and the port can
+ * go to the next bridge. ⛔ A pointer still dialling after that could reach
+ * ANOTHER session on its old port, from the same address, which the
+ * listener's check on the caller cannot tell apart: a pad bridged again from
+ * this TV, or another TV behind the same router. So no attempt waits past the
+ * give-up either. tests/test_link_trouble.c holds this equal to a pad's. */
+#define HM_HOST_GONE_MS 3000
 
 static uint64_t hm_now_ms(void)
 {
@@ -181,14 +189,25 @@ static void *hm_session_main(void *arg)
     (void)arg;
     uint64_t lost_at = hm_now_ms();   /* the plug, then each link that dropped */
     while (!g_hm.stop) {
-        while (!g_hm.stop &&
-               ctm_transport_connect_once(&g_hm.xport, g_hm.host, g_hm.port, 400) != 0) {
-            if (hm_now_ms() - lost_at >= HM_HOST_GONE_MS) {
+        for (;;) {
+            if (g_hm.stop) break;
+            const uint64_t gone_ms = hm_now_ms() - lost_at;
+            if (gone_ms >= HM_HOST_GONE_MS) {
                 hm_log("host gone: no link for %d s -- giving up", HM_HOST_GONE_MS / 1000);
                 g_hm.host_gone = 1;
                 break;
             }
-            usleep(500 * 1000);
+            const uint64_t tried_at = hm_now_ms();
+            if (ctm_transport_connect_within(&g_hm.xport, g_hm.host, g_hm.port, 400,
+                                             (unsigned int)(HM_HOST_GONE_MS - gone_ms)) == 0) {
+                break;
+            }
+            /* ⓘ One attempt each half second at most, counting the attempt's
+             * own wait, and never past the give-up. */
+            while (!g_hm.stop && hm_now_ms() - tried_at < 500 &&
+                   hm_now_ms() - lost_at < HM_HOST_GONE_MS) {
+                usleep(50 * 1000);
+            }
         }
         if (g_hm.stop || g_hm.host_gone) { ctm_transport_disconnect(&g_hm.xport); break; }
         /* ⓘ Each link counts its messages from the start, as it did when the
