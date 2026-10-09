@@ -338,6 +338,11 @@ void ctm_mic_safety_disarm_all(void);
 
 int ctm_signal_refused_bt(const char *node);
 
+/* A colour of the app's own on a BLUETOOTH DualSense, written past SDL, with
+ * the light's takeover first when take_over is set (ds5_light.inl says why).
+ * 0 when it went out. */
+int ctm_ds5_bt_paint(const char *node, uint8_t r, uint8_t g, uint8_t b, int take_over);
+
 /* The same thing for a BLUETOOTH DS4, which encodes its audio as SBC rather
  * than Opus and carries it in a 0x14 report rather than a 0x36. T-238.
  * ⛔ Bluetooth only -- a cabled DS4 has no sound card on the pads here. */

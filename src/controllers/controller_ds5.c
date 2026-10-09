@@ -44,6 +44,8 @@ static bool ds5_matches(const ctm_controller_dev_t *dev)
  *
  * Removing the show frees two of the three type-state slots. */
 #define DS5_SLOT_CHORD 0
+/* The light taken over on this bridge, once its clock allowed (ds5_light.inl). */
+#define DS5_SLOT_LIGHT 1
 
 /* Waiting for the host's first output report to start the clock. */
 
@@ -518,6 +520,33 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 
 #include "ctm_gesture_chord.inl"
 
+/* ⭐ THE TAKEOVER FOR A PAD BRIDGED TOO SOON (ds5_light.inl). The bridge's own
+ * signal takes the light over as it starts, and a pad still playing its
+ * connection animation ignores that. So the first Bluetooth report whose
+ * clock says the animation is over sends it once more, for this bridge. */
+static void ds5_take_light_when_ready(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    uint32_t clock = 0;
+    if (ctm_controller_type_state(c, DS5_SLOT_LIGHT) != 0) return;
+    if (!data || len == 0 || data[0] != DS5L_BT_INPUT_ID) return;
+    if (!ds5_input_clock(data, len, &clock) || clock < DS5L_ANIMATION_DONE) return;
+    ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 1);
+    static unsigned s_seq;
+    uint8_t rep[DS5L_BT_LEN];
+    const size_t n = ds5_light_bt_takeover_report(rep, sizeof rep, s_seq++);
+    if (!n) return;
+    ctm_bt_sign_output(rep, n);
+    const int rc = ctm_controller_write_raw(c, rep, n);
+    ctl_log(c, "lightbar: taken over at the pad's clock %u (rc=%d)", clock, rc);
+}
+
+/* on_input_report for a DualSense: the takeover above, then the gesture. */
+static void ds5_input_hook(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    ds5_take_light_when_ready(c, data, len);
+    ds5_on_input_report(c, data, len);
+}
+
 /* ready_light: the bridged-and-waiting breath (ready_light_tick in
  * controller_common.c), green at `level`, in the report this pad's bus takes:
  * ds5_light.inl. */
@@ -547,7 +576,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .matches = ds5_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
-    .on_input_report = ds5_on_input_report,
+    .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
@@ -567,7 +596,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .matches = ds5e_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
-    .on_input_report = ds5_on_input_report,
+    .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
