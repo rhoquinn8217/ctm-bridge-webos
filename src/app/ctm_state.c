@@ -42,6 +42,7 @@ bool g_agent_online;
  * ⓘ Cleared when the address changes (agent_endpoint.inl, code review,
  * 2026-10-05): it used to stay set from the first address ever probed. */
 bool g_agent_probed;
+volatile int g_agent_compat;
 bool g_last_plug_unreachable;
 bool g_running = true;
 pthread_t g_stop_sniff_thread;

@@ -207,6 +207,7 @@ static void *agent_probe_thread(void *arg)
     ctm_gesture_log(NULL, "agent probe thread started");
     bool said = false;          /* has a reading been logged yet */
     bool last_online = false;   /* the reading logged last */
+    int last_compat = PROTOCOL_UNKNOWN;   /* the protocol verdict logged last */
     for (;;) {
         if (g_agent_host[0]) {
             char probe[256];
@@ -231,6 +232,17 @@ static void *agent_probe_thread(void *arg)
                 ctm_gesture_log(NULL, "agent probe took %llums (online)",
                                 (unsigned long long)took_ms);
             }
+            /* ⭐ And whether the two can work together (protocol_level.inl),
+             * logged when that changes. */
+            const int compat = g_agent_online ? (int)protocol_compat(probe) : PROTOCOL_UNKNOWN;
+            if (compat != PROTOCOL_UNKNOWN && compat != last_compat) {
+                ctm_gesture_log(NULL, "agent probe: %s",
+                                compat == PROTOCOL_OK
+                                    ? "this TV app and the listener can work together"
+                                    : protocol_advice((protocol_compat_t)compat));
+            }
+            if (compat != PROTOCOL_UNKNOWN) last_compat = compat;
+            g_agent_compat = compat;
         }
         /* ⓘ Slept in short steps so a request can be answered promptly without
          * probing any harder when nobody has asked. */
