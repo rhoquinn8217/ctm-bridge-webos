@@ -16,8 +16,6 @@ features.
 This fork of ctm-bridge-webos expects DS5-USBIP running on your host PC to
 bridge controllers.
 
----
-
 ## What lives here
 
 **Existing, from ciprianmisaila's core**
@@ -31,8 +29,6 @@ bridge controllers.
 - Microphone over the TV's USB port
 - DualSense Edge support
 - DualSense bridge gestures and confirmation signals
-
----
 
 ## Build
 
@@ -51,8 +47,6 @@ build. A clone made with `--recursive` has the core; in any other checkout,
 
 The core carries its own test suite, run by `tests/run-tests.sh`.
 
----
-
 ## Clean-room
 
 **Load-bearing, not a formality.** All controller protocol here is derived from
@@ -60,16 +54,12 @@ this project's own observation (sysfs reads and on-wire captures), **not** from
 third-party or kernel driver sources. ciprianmisaila's ctm-bridge-webos holds the
 same line, and this fork continues it.
 
----
-
 ## Acknowledgements
 
 - **[ciprianmisaila](https://github.com/ciprianmisaila)**: ctm-bridge-webos and
   [CTM-USBIP](https://github.com/CTM-Bridge/CTM-USBIP). The bridge itself, the
   map-driven translation pipeline, the TCP protocol between the television and the
   host, and the DualSense audio work over Bluetooth are all ciprianmisaila's.
-
----
 
 ## License
 
