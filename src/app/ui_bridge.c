@@ -11,6 +11,7 @@
 #include "agent_endpoint.inl"
 #include "agent_reply.inl"
 #include "session_name.inl"
+#include "agent_proof.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -306,7 +307,9 @@ bool agent_is_known(void)
     return g_agent_host[0] ? g_agent_online : false;
 }
 
-int send_agent_command(const char *command, char *response, size_t response_len)
+/* One line to the listener, and its one-line answer. Everything calls
+ * send_agent_command() below, which adds the pairing proof first. */
+static int send_agent_line(const char *command, char *response, size_t response_len)
 {
     /* ⛔⛔ THE ADDRESS, NOT THE ONLINE FLAG. This is what the probe uses to ask
      * whether the agent is there, so requiring `online` here latches the answer:
@@ -352,7 +355,8 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         return agent_command_rc(false, false, 0, NULL);
     }
 
-    char line[512];
+    /* ⓘ Room for a command with its pairing proof: about 460 bytes. */
+    char line[1024];
     snprintf(line, sizeof(line), "%s\n", command);
     if (send(fd, line, strlen(line), 0) < 0) {
         close(fd);
@@ -377,6 +381,54 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_probed = true;
     }
     return agent_command_rc(true, true, n, response);
+}
+
+/* ⭐ THE APP'S SIGNER (agent_proof.inl says what it signs, and why). Set as a
+ * stream starts, before anything bridges, and read by whichever thread sends
+ * a bridge command. NULL: every command goes plainly, as before. */
+static ctm_proof_signer_fn g_proof_signer;
+
+void ctm_bridge_set_proof_signer(ctm_proof_signer_fn signer)
+{
+    g_proof_signer = signer;
+}
+
+/* ⭐⭐ A BRIDGE COMMAND GOES WITH A PROOF THAT THIS TV IS PAIRED WITH THE PC
+ * (code review, 2026-10-05). The listener requires it of a TV calling from
+ * the internet, where its port is forwarded to anyone; from the home network
+ * it only logs it.
+ * ⓘ Two connections where there was one: the challenge, then the command. An
+ * older listener refuses the challenge, and the command then goes plainly,
+ * exactly as before, so a new TV keeps working with an old listener. */
+int send_agent_command(const char *command, char *response, size_t response_len)
+{
+    const ctm_proof_signer_fn signer = g_proof_signer;
+    if (signer != NULL && agent_proof_wanted(command)) {
+        char challenge[96];
+        const int asked = send_agent_line("PROOF_CHALLENGE", challenge, sizeof(challenge));
+        if (asked == -2) {
+            /* Not reached at all: the caller's one retry is for exactly this. */
+            if (response && response_len > 0) {
+                response[0] = '\0';
+            }
+            return asked;
+        }
+        char nonce[AGENT_PROOF_NONCE_LEN + 1];
+        if (agent_proof_nonce(challenge, nonce, sizeof(nonce))) {
+            char text[512];
+            char fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+            char signature[512];
+            char line[1000];
+            const size_t text_len = agent_proof_signed_text(nonce, command, text, sizeof(text));
+            if (text_len > 0 &&
+                signer((const unsigned char *)text, text_len, fingerprint, signature, sizeof(signature)) &&
+                agent_proof_line(command, nonce, fingerprint, signature, line, sizeof(line)) > 0) {
+                return send_agent_line(line, response, response_len);
+            }
+            ctm_gesture_log(NULL, "pairing proof: could not sign \"%s\"; sending it without one", command);
+        }
+    }
+    return send_agent_line(command, response, response_len);
 }
 
 static int session_index_locked(const char *key)
