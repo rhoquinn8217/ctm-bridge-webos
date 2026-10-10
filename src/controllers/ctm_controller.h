@@ -20,6 +20,9 @@
 extern "C" {
 #endif
 
+/* switch_hold.inl's layout, which a type may fill. */
+struct swh_layout;
+
 typedef struct {
     char vid[8];
     char pid[8];
@@ -88,6 +91,17 @@ typedef struct {
      * ⚠️ Not the same question as grab_evdev or needs_host_config, which a DS4
      * also answers yes to. A DS4 speaks its own protocol, not this one. */
     bool speaks_ds5;
+
+    /* ⭐⭐ NOTHING HELD AT A SWITCH REACHES THE PC (rhoquinn8217, 2026-10-09;
+     * switch_hold.inl). The type's input report as fields, for a type that
+     * knows its own layout; NULL for one whose descriptor gives it (any other
+     * gamepad, a keyboard, a mouse). reports_steadily: its first report after
+     * a bridge is its state then -- it reports all the time, or the TV builds
+     * it from the whole state -- so nothing else is asked; otherwise its input
+     * nodes are asked what is held, so a first new press is never taken for
+     * one held over. */
+    void (*switch_layout)(struct swh_layout *out);
+    bool reports_steadily;
 
     /* Does this type claim the device? Factory tries specific types first,
      * generic last. */

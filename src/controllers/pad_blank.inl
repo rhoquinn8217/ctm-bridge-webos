@@ -76,6 +76,11 @@ typedef struct {
     uint8_t bit_size;      /* 1 to 32 */
     uint16_t bit_offset;   /* counted from the first byte after the id, if any */
     uint32_t value;        /* the resting value, already cut to bit_size */
+    /* ⓘ For switch_hold.inl: how far from rest still counts as rest (a stick's
+     * dead zone, an eighth of its range; a trigger's, a sixteenth), and whether
+     * the field is a movement, which is never "held". */
+    uint32_t slack;
+    bool relative;
 } pad_blank_field_t;
 
 typedef struct {
@@ -159,7 +164,7 @@ static inline bool pad_blank_value_for(uint32_t page, uint32_t id, bool relative
 }
 
 static inline void pad_blank_add(pad_blank_plan_t *p, uint8_t report_id, uint32_t bit,
-                                 uint8_t size, int64_t value)
+                                 uint8_t size, int64_t value, uint32_t slack, bool relative)
 {
     if (p->switch_layout && pad_blank_switch_report(report_id)) return;
     if (bit > 0xffff) return;
@@ -170,6 +175,23 @@ static inline void pad_blank_add(pad_blank_plan_t *p, uint8_t report_id, uint32_
     f->bit_size = size;
     f->bit_offset = (uint16_t)bit;
     f->value = (uint32_t)value & mask;
+    f->slack = slack;
+    f->relative = relative;
+}
+
+/* How far from rest a field may sit and still count as at rest: a stick's dead
+ * zone is an eighth of its range, a trigger's or a slider's a sixteenth, and
+ * anything else none. */
+static inline uint32_t pad_blank_slack_for(uint32_t page, uint32_t id, bool relative,
+                                           int64_t min, int64_t max)
+{
+    if (relative || max < min) return 0;
+    const uint64_t span = (uint64_t)(max - min) + 1u;
+    if (page == 0x01 && id >= 0x30 && id <= 0x35) return (uint32_t)(span / 8u);
+    if ((page == 0x01 && id >= 0x36 && id <= 0x38) || (page == 0x02 && (id == 0xc4 || id == 0xc5))) {
+        return (uint32_t)(span / 16u);
+    }
+    return 0;
 }
 
 static inline void pad_rel_add(pad_blank_plan_t *p, uint8_t report_id, uint32_t bit, uint8_t size)
@@ -289,10 +311,12 @@ static inline bool pad_blank_from_descriptor(const uint8_t *d, size_t n, uint16_
                         int64_t rest;
                         if (pad_blank_value_for(page, u & 0xffff, relative, min, max,
                                                 (uint8_t)fsize, &rest)) {
-                            pad_blank_add(out, g.report_id, at + k * fsize, (uint8_t)fsize, rest);
+                            pad_blank_add(out, g.report_id, at + k * fsize, (uint8_t)fsize, rest,
+                                          pad_blank_slack_for(page, u & 0xffff, relative, min, max),
+                                          relative);
                         }
                     } else if (g.usage_page == 0x09 || g.usage_page == 0x07 || g.usage_page == 0x0c) {
-                        pad_blank_add(out, g.report_id, at + k * fsize, (uint8_t)fsize, 0);
+                        pad_blank_add(out, g.report_id, at + k * fsize, (uint8_t)fsize, 0, 0, false);
                     }
                 }
             }

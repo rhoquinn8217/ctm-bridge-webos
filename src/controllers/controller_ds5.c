@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "switch_hold.inl"
 #include "ds5_light.inl"
 
 /* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
@@ -575,6 +576,9 @@ static int ds5_ready_light(ctm_controller_t *c, int level)
 }
 
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds5,
+    .reports_steadily = true,
     .kind = "ds5",
     .needs_host_config = true,
     .grab_evdev = true,
@@ -597,6 +601,9 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
  * its hooks rather than duplicating them -- but its own entry in the factory so
  * it is identified as itself and can diverge later without untangling. */
 const ctm_controller_ops_t ctm_controller_ds5e_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds5,
+    .reports_steadily = true,
     .kind = "ds5e",
     .needs_host_config = true,
     .grab_evdev = true,
