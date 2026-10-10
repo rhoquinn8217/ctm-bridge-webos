@@ -55,6 +55,10 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #ifndef EVIOCGRAB
 #define EVIOCGRAB _IOW('E', 0x90, int)
 #endif
+/* ⓘ The TV's toolchain carries older input headers (switch_held_now). */
+#ifndef INPUT_PROP_ACCELEROMETER
+#define INPUT_PROP_ACCELEROMETER 0x06
+#endif
 #ifndef HIDIOCGRAWPHYS
 #define HIDIOCGRAWPHYS(len) _IOC(_IOC_READ, 'H', 0x05, len)
 #endif
