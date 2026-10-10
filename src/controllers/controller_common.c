@@ -3358,8 +3358,8 @@ static void *session_main(void *arg)
     (void)fcntl(c->wake_pipe[0], F_SETFL, fcntl(c->wake_pipe[0], F_GETFL, 0) | O_NONBLOCK);
     (void)fcntl(c->wake_pipe[1], F_SETFL, fcntl(c->wake_pipe[1], F_GETFL, 0) | O_NONBLOCK);
 
-    /* ⭐ The trouble clock: from the first failure of any kind since the
-     * listener last answered a greeting (link_trouble.inl). */
+    /* ⭐ The trouble clock: from the first connect since the listener last
+     * answered a greeting (link_trouble.inl). */
     link_trouble_t trouble = {0, 0};
     while (!c->stop) {
         link_trouble_begin(&trouble, now_us());
@@ -3422,7 +3422,9 @@ static void *session_main(void *arg)
              *
              * ⓘ Timed by the trouble clock, not from this round of connects: a
              * connect that succeeds into a greeting nobody answers must not
-             * start the count again (link_trouble.inl). */
+             * start the count again (link_trouble.inl). ⚠️ It bounds the
+             * connects: one that succeeds near the end still waits out its
+             * greeting, so a hung listener that takes connections is 5 to 8 s. */
             const long left_ms = link_trouble_left_ms(&trouble, now_us(), CTM_HOST_GONE_MS);
             if (left_ms == 0) {
                 const long waited_ms = link_trouble_ms(&trouble, now_us());

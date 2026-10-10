@@ -119,6 +119,12 @@ int main(void)
        strstr(start, "\"BRIDGE_START %s %d %s level=%d\"") != NULL,
        "both ways of asking for a bridge say this TV's level");
     ok(start && strstr(start, "protocol_refused_tv(response)") != NULL, "the listener's refusal is read");
+    ok(start && strstr(start, "} else if (asked == -2) {") != NULL &&
+       strstr(start, "} else if (asked == -2) {") < strstr(start, "\"BRIDGE_START %s 0 %s level=%d\""),
+       "a listener not reached by the STATUS is not dialled again for the bridge");
+    char *sethost = between(bridge, "void ctm_bridge_set_agent_host(", "\n}");
+    ok(sethost && strstr(sethost, "g_agent_compat = PROTOCOL_UNKNOWN;") != NULL,
+       "a change of PC forgets the last PC's verdict");
     ok(strstr(worker, "protocol_compat(probe)") != NULL && strstr(worker, "g_agent_compat = compat;") != NULL,
        "every probe of the listener decides it again");
 

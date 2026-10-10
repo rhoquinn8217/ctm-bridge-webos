@@ -8,18 +8,22 @@
  * session it no longer had -- let every connect succeed: the TV sent HELLO,
  * waited out its 5 s for the host's settings, dialled again, and so on for the
  * whole stream, with the row "bridged" and nothing reaching the PC.
- * ➡️ The clock now starts at the first failure of any kind since the listener
- * last answered a greeting, and only an answered greeting stops it. Its own
- * file so a test can pin it.
+ * ➡️ The clock now starts at the first connect of each round -- a fresh
+ * bridge's first connect included -- and only an answered greeting stops it.
+ * Its own file so a test can pin it.
  *
  * ⭐ AND NO REDIAL WAITS PAST THE GIVE-UP (2026-10-08): link_trouble_left_ms
  * is what the next connect may wait, so the pad goes back at the give-up and
- * not a whole connect after it. */
+ * not a whole connect after it.
+ * ⚠️ For connects that fail (code review, 2026-10-09). A connect that
+ * succeeds near the give-up still waits out its greeting, CTM_HOST_ANSWER_US:
+ * a listener that is hung but still takes connections gets the pad back after
+ * 5 to 8 s, not 3. */
 
 #include <stdint.h>
 
 typedef struct {
-    uint64_t since_us;   /* the first failure since the last answered greeting; 0 = none */
+    uint64_t since_us;   /* the first connect since the last answered greeting; 0 = none */
     int unanswered;      /* greetings not answered in that time */
 } link_trouble_t;
 
