@@ -67,6 +67,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "hid_node_checks.inl"
 #include "device_identity.inl"
 #include "kbd_chord.inl"
+#include "pointer_layout.inl"
 #include "pad_blank.inl"
 #include "switch_hold.inl"
 
@@ -319,11 +320,15 @@ struct ctm_controller {
     int is_gamepad;
     /* ⭐ A bridged keyboard's layout, for the overlay's shortcut
      * (kbd_chord.inl); kbd.present only for a hidraw keyboard it understands.
-     * kbd_chord_down: the shortcut is held right now. kbd_handed_back: the TV's
-     * overlay holds input, so the keyboard is ungrabbed and reaches the TV. */
+     * kbd_chord_down: the shortcut is held right now. */
     kbd_layout_t kbd;
     int kbd_chord_down;
-    int kbd_handed_back;
+    /* ⭐ A bridged mouse's report (pointer_layout.inl); ptr.present only for a
+     * Mouse or Pointer collection. handed_back: the TV's overlay holds input,
+     * so the keyboard or mouse is ungrabbed and reaches the TV
+     * (handback_sync_hold). */
+    ptr_layout_t ptr;
+    int handed_back;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
      * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
@@ -1906,6 +1911,7 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
 
     memset(&c->pad_blank, 0, sizeof(c->pad_blank));
     memset(&c->pad_keep, 0, sizeof(c->pad_keep));
+    memset(&c->ptr, 0, sizeof(c->ptr));
     *report_desc_len = read_report_descriptor(fd, report_desc, MAX_REPORT_DESCRIPTOR);
     if (*report_desc_len) {
         uint16_t usage_page = 0, usage = 0;
@@ -1921,6 +1927,14 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
                     (unsigned)c->kbd.report_id, (unsigned)c->kbd.mod_offset,
                     (unsigned)c->kbd.keys_count, (unsigned)c->kbd.keys_offset,
                     (unsigned)c->kbd.report_len);
+        }
+        /* ⭐ A mouse goes to the TV while its overlay is open, as a keyboard
+         * does (handback_sync_hold, pointer_layout.inl). */
+        if (!c->is_gamepad &&
+            ptr_layout_from_descriptor(report_desc, *report_desc_len, &c->ptr)) {
+            ctl_log(c, "mouse: the TV has it while its overlay is open (report id %u, %u bytes, %s)",
+                    (unsigned)c->ptr.report_id, (unsigned)c->ptr.report_len,
+                    c->ptr.relative ? "relative" : "absolute, so no report with nothing pressed");
         }
         /* ⭐ A gamepad whose type cannot blank its reports gets a blank built
          * from its descriptor, for while the TV's overlay holds input
@@ -2168,24 +2182,35 @@ static void switch_hold_begin(ctm_controller_t *c, const uint8_t *desc, uint32_t
     }
 }
 
-/* ⭐⭐ A BRIDGED KEYBOARD GOES TO THE TV WHILE ITS OVERLAY IS OPEN, AND BACK.
- * rhoquinn8217, 2026-09-13: the shortcut "hands the keyboard back to the TV
- * while the overlay is open". The overlay holds input (ctm_input_set_held), so:
- * the host is sent one report with nothing pressed, the evdev grabs are let go
- * so the TV reads the keys, and nothing more goes to the host until the hold
- * ends and the grabs are taken again. ⓘ Keyboards only; the fds stay open.
- * When: the input thread, on each report and each idle poll. */
-static void kbd_sync_hold(ctm_controller_t *c)
+/* ⭐⭐ A BRIDGED KEYBOARD OR MOUSE GOES TO THE TV WHILE ITS OVERLAY IS OPEN, AND
+ * BACK. rhoquinn8217, 2026-09-13: the shortcut "hands the keyboard back to the
+ * TV while the overlay is open"; and 2026-10-11, of the mouse: "Mouse moves the
+ * TV cursor in the streaming overlay even when bridged". The overlay holds
+ * input (ctm_input_set_held), so: the host is sent one report with nothing
+ * pressed (a keyboard's, and a relative mouse's with no movement), the evdev
+ * grabs are let go so the TV reads the keys and moves its cursor, and nothing
+ * more goes to the host until the hold ends and the grabs are taken again.
+ * ⓘ Keyboards and mice only; the fds stay open. When: the input thread, on
+ * each report and each idle poll. */
+static void handback_sync_hold(ctm_controller_t *c)
 {
-    if (!c->kbd.present) return;
+    if (!c->kbd.present && !c->ptr.present) return;
     const int held = ctm_input_is_held();
-    if (held == c->kbd_handed_back) return;
-    if (held && c->kbd.report_len > 0 && c->kbd.report_len <= MAX_REPORT) {
+    if (held == c->handed_back) return;
+    if (held && c->kbd.present && c->kbd.report_len > 0 && c->kbd.report_len <= MAX_REPORT) {
         uint8_t released[MAX_REPORT];
         memset(released, 0, c->kbd.report_len);
         if (c->kbd.report_id) released[0] = c->kbd.report_id;
         (void)c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep,
                      released, c->kbd.report_len);
+    }
+    if (held && c->ptr.present) {
+        uint8_t released[MAX_REPORT];
+        const size_t len = ptr_released_report(&c->ptr, released, sizeof(released));
+        if (len > 0) {
+            (void)c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep,
+                         released, len);
+        }
     }
     int changed = 0;
     for (int i = 0; i < c->evdev_grab_count; ++i) {
@@ -2194,8 +2219,10 @@ static void kbd_sync_hold(ctm_controller_t *c)
             ++changed;
         }
     }
-    c->kbd_handed_back = held;
-    ctl_log(c, "keyboard: %s (%d grab(s) %s)",
+    c->handed_back = held;
+    ctl_log(c, "%s: %s (%d grab(s) %s)",
+            c->kbd.present && c->ptr.present ? "keyboard and mouse" :
+            c->kbd.present ? "keyboard" : "mouse",
             held ? "handed to the TV while its overlay is open" : "taken back from the TV",
             changed, held ? "let go" : "taken again");
 }
@@ -2784,8 +2811,8 @@ static void *composite_reader_main(void *arg)
 
 /* ⭐ What the host gets while the TV's overlay holds input: the type's own blank
  * where it has one, else the blank built from the pad's descriptor, else the
- * report as it came (a keyboard is handed back to the TV instead; see
- * kbd_sync_hold). */
+ * report as it came (a keyboard or a mouse is handed back to the TV instead;
+ * see handback_sync_hold). */
 static void blank_held_report(ctm_controller_t *c, uint8_t *buf, size_t n)
 {
     if (c->ops && c->ops->blank_input) c->ops->blank_input(buf, n);
@@ -2843,8 +2870,9 @@ static void *input_thread_main(void *arg)
         int pr = poll(pfds, 2, input_wait_ms(now_us(), c->last_input_us, c->ops->keepalive_ms));
         if (pr < 0) { if (errno == EINTR) continue; break; }
         if (pr == 0) {
-            /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
-            kbd_sync_hold(c);
+            /* ⓘ A keyboard or mouse at rest still follows the overlay opening
+             * and closing. */
+            handback_sync_hold(c);
             if (send_keepalive(c) != 0) { input_link_lost(c, "keepalive"); break; }
             continue;
         }
@@ -2907,12 +2935,15 @@ static void *input_thread_main(void *arg)
                  * app, so the shortcut is found here; the report that completes
                  * it goes to the host with nothing pressed, and so does every
                  * report while it is held. While the overlay is open the TV has
-                 * the keyboard and the host gets nothing (kbd_sync_hold). */
-                if (c->kbd.present) {
-                    kbd_sync_hold(c);
-                    if (c->kbd_handed_back) {
+                 * the keyboard, or the mouse, and the host gets nothing
+                 * (handback_sync_hold). */
+                if (c->kbd.present || c->ptr.present) {
+                    handback_sync_hold(c);
+                    if (c->handed_back) {
                         continue;
                     }
+                }
+                if (c->kbd.present) {
                     if (kbd_overlay_chord_down(&c->kbd, buf, (size_t)n)) {
                         if (!c->kbd_chord_down) {
                             c->kbd_chord_down = 1;
@@ -3646,9 +3677,9 @@ static void *session_main(void *arg)
         } else if (c->ops->grab_evdev) {
             grab_matching_evdev(c);
         }
-        /* ⓘ A fresh grab means the host has the keyboard again, whatever the
-         * last session left. */
-        c->kbd_handed_back = 0;
+        /* ⓘ A fresh grab means the host has the keyboard or mouse again,
+         * whatever the last session left. */
+        c->handed_back = 0;
         c->kbd_chord_down = 0;
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
 
