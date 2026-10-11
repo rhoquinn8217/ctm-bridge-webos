@@ -44,6 +44,14 @@ int main(void)
     ok(agent_command_rc(true, true, 1, "O") == -1, "half an OK is not OK");
     ok(agent_command_rc(true, true, 4, NULL) == -1, "no buffer is not OK");
 
+    printf("\nthe port a listener hands out\n");
+    ok(agent_reply_port("OK bridge starting port=48057\n") == 48057, "read from the answer");
+    ok(agent_reply_port("OK bridge starting\n") == 0, "none from an older listener");
+    ok(agent_reply_port("OK bridge starting port=80") == 0, "not a port under 1024");
+    ok(agent_reply_port("OK bridge starting port=480571") == 0, "not a number past 65535");
+    ok(agent_reply_port("OK bridge starting port=") == 0 && agent_reply_port(NULL) == 0,
+       "nothing from nothing");
+
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

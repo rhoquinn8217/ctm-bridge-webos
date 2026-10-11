@@ -28,6 +28,11 @@ extern "C" {
  * active or thread creation failed. */
 int ctm_hostmouse_plug(const char *host, int port);
 
+/* The serial the pointer gives the PC, set before ctm_hostmouse_plug: one per
+ * TV (session_name.inl, tv_pointer_serial). NULL or "" is the plain
+ * "ctm-tv-pointer". */
+void ctm_hostmouse_set_serial(const char *serial);
+
 /* Stop + join the session thread and drop the link. Safe when idle. */
 void ctm_hostmouse_unplug(void);
 

@@ -178,6 +178,8 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 /* The Bluetooth output reports' checksum, the one copy of it (code review,
  * 2026-10-05). Before the microphone safety, which signs its packet with it. */
 #include "bt_sign.inl"
+/* How every signal's light is shaped, and the bridged-and-waiting breath. */
+#include "signal_shape.inl"
 
 /* Microphone safety. ⚠️ INCLUDED HERE, NEAR THE TOP, DELIBERATELY -- the input
  * relay calls into it and an include further down would be after its own
@@ -262,6 +264,15 @@ struct ctm_controller {
     pthread_t input_thread;
     int input_thread_started;
     volatile int stop;
+    /* A send on this connection failed, so the session loop ends the
+     * connection (code review, 2026-10-05): input_link_lost(). Cleared when
+     * a connection starts. */
+    volatile int link_send_failed;
+    /* The bridged-and-waiting light: ready_light_tick(). */
+    volatile int ready_light_taken;   /* the PC has set the light: stop for good */
+    uint64_t ready_light_t0_us;       /* when it started breathing; 0 = not yet */
+    uint64_t ready_light_next_us;     /* when its next step is due */
+    int ready_light_failed;           /* writes in a row that did not go */
 
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
@@ -1473,20 +1484,24 @@ static void *mic_capture_thread(void *arg)
          * from this thread cannot interleave with the input reader. */
         {
             size_t bytes = (size_t)got * MIC_CAP_CHANNELS * sizeof(int16_t);
-            /* Belt and braces with the start point. Sending before the
-             * session's opening exchange has finished puts audio on the wire
-             * where the host expects a hello, and the session dies -- see the
-             * comment at mic_capture_start()'s call site. The thread now
-             * starts after the link is up, so this should never be false;
-             * it is here because that race hid for two days and would hide
-             * again. */
-            if (!ctm_transport_connected(&c->xport)) {
-                continue;
-            }
-            if (bytes > 0 && c_send(c, CTMB_MSG_MIC_AUDIO, CTMB_FLAG_OK, 0, buf, bytes) != 0) {
-                sends_failed++;
-            } else {
-                sends_ok++;
+            /* ⛔⛔ ONLY ONCE THE CONNECTION'S OPENING EXCHANGE IS DONE (code
+             * review, 2026-10-05). Audio sent before HELLO lands where the
+             * listener expects a hello, and it closes the connection. This
+             * asked whether the link was CONNECTED, which a reconnect makes
+             * true before its hello, and this thread runs across reconnects:
+             * a cabled DualSense's reconnect was closed by its own
+             * microphone, redialled, and closed again until the give-up. The
+             * transport now holds audio back until the session marks the
+             * exchange done, and stops it before a connection ends. A chunk
+             * it holds back (1) is dropped, as a failed one is. */
+            if (bytes > 0) {
+                const int rc = ctm_transport_send_when_ready(&c->xport, CTMB_MSG_MIC_AUDIO,
+                                                             CTMB_FLAG_OK, 0, buf, bytes);
+                if (rc < 0) {
+                    sends_failed++;
+                } else if (rc == 0) {
+                    sends_ok++;
+                }
             }
         }
         for (long i = 0; i < got; i++) {
@@ -2230,6 +2245,61 @@ bool controller_signal_host_report(ctm_controller_t *c, bool keep, uint32_t valu
     return held;
 }
 
+/* Is a signal painting this pad, or is the pad on its way back to the TV?
+ * Either way its light is not the ready light's to touch. */
+static bool controller_signal_busy(ctm_controller_t *c)
+{
+    pthread_mutex_lock(&c->signal_mutex);
+    const bool busy = c->signal_running || c->signal_closed;
+    pthread_mutex_unlock(&c->signal_mutex);
+    return busy;
+}
+
+/* --- the bridged-and-waiting light ----------------------------------------
+ *
+ * ⭐⭐ A BRIDGED PAD BREATHES GREEN UNTIL THE PC TAKES ITS LIGHT. rhoquinn8217,
+ * 2026-10-08: "I want a continuous breathing to show that it's ready and allow
+ * anything to take it, most likely steam. But I want it to signify it's
+ * already bridge but nothing has taken it yet."
+ *
+ * ⓘ On the session thread, which writes the PC's reports anyway: one light
+ * report every SIGNAL_READY_STEP_MS, from when the bridge's own signal has
+ * finished -- it ends on solid green, where the breath starts -- and never
+ * while a signal holds the pad or the pad is going back to the TV. The PC's
+ * first report that sets the light ends it for the rest of the session, a
+ * reconnect included: the PC still has the pad then. Nothing is restored when
+ * it stops, because the report that stopped it has just set the colour. */
+static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    if (c->ready_light_taken || !c->ops->host_sets_light) return;
+    if (!c->ops->host_sets_light(data, len)) return;
+    c->ready_light_taken = 1;
+    ctl_log(c, "ready light: the PC set the light%s",
+            c->ready_light_t0_us ? ", so it stops breathing" : " before it began to breathe");
+}
+
+static void ready_light_tick(ctm_controller_t *c)
+{
+    if (!c->ops->ready_light || c->ready_light_taken || !ctm_sig_light_on()) return;
+    const uint64_t now = now_us();
+    if (c->ready_light_next_us != 0 && now < c->ready_light_next_us) return;
+    c->ready_light_next_us = now + (uint64_t)SIGNAL_READY_STEP_MS * 1000u;
+    if (controller_signal_busy(c)) return;
+    if (c->ready_light_t0_us == 0) {
+        c->ready_light_t0_us = now;
+        ctl_log(c, "ready light: breathing green until the PC sets the light");
+    }
+    const int level = signal_ready_level((long)((now - c->ready_light_t0_us) / 1000u));
+    if (c->ops->ready_light(c, level) == 0) {
+        c->ready_light_failed = 0;
+    } else if (++c->ready_light_failed == 20) {
+        /* ⓘ A pad that refused a second of these refuses the rest: stop
+         * asking, rather than writing into nothing for the whole session. */
+        c->ready_light_taken = 1;
+        ctl_log(c, "ready light: 20 writes in a row failed, so it stops");
+    }
+}
+
 uint32_t controller_signal_kept(ctm_controller_t *c)
 {
     if (!c) return 0;
@@ -2473,13 +2543,30 @@ static void open_composite_siblings(ctm_controller_t *c)
     closedir(d);
 }
 
+/* ⛔⛔ A FAILED SEND IS A LOST LINK, NOT A STOP (code review, 2026-10-05).
+ * The input thread set `stop` when a report or a keepalive would not send.
+ * That ended the session for good and said nothing: no "link lost", no
+ * reconnect, and neither host gone nor device gone, so the app never
+ * released the row, which stayed "bridged" with nothing reaching the PC
+ * until Release or the end of the stream. ➡️ Now the session loop ends the
+ * connection, as it does when a receive fails: the reconnect runs, and if
+ * the PC does not answer within CTM_HOST_GONE_MS it raises host gone, which
+ * the app releases. When: the input thread and the sibling readers. */
+static void input_link_lost(ctm_controller_t *c, const char *what)
+{
+    if (!c->link_send_failed) {
+        ctl_log(c, "link lost: the %s would not send (errno=%d)", what, errno);
+    }
+    c->link_send_failed = 1;
+}
+
 /* Sibling reader: poll one interface's hidraw, forward input tagged with its IN
  * endpoint. When: one thread per sibling, while comp_run. */
 static void *composite_reader_main(void *arg)
 {
     comp_iface_t *ci = (comp_iface_t *)arg;
     ctm_controller_t *c = ci->c;
-    while (c->comp_run && !c->stop) {
+    while (c->comp_run && !c->stop && !c->link_send_failed) {
         struct pollfd pfd; pfd.fd = ci->fd; pfd.events = POLLIN; pfd.revents = 0;
         int pr = poll(&pfd, 1, 50);
         if (pr < 0) { if (errno == EINTR) continue; break; }
@@ -2490,7 +2577,10 @@ static void *composite_reader_main(void *arg)
             uint8_t buf[MAX_REPORT];
             ssize_t n = read(ci->fd, buf, sizeof(buf));
             if (n > 0) {
-                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, ci->in_ep, buf, (size_t)n) != 0) break;
+                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, ci->in_ep, buf, (size_t)n) != 0) {
+                    input_link_lost(c, "sibling's report");
+                    break;
+                }
                 c->st_reports_in++;
                 continue;
             }
@@ -2551,7 +2641,7 @@ static void *input_thread_main(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
     c->last_input_us = 0;
-    while (!c->stop) {
+    while (!c->stop && !c->link_send_failed) {
         struct pollfd pfds[2];
         pfds[0].fd = c->hid_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = c->wake_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
@@ -2560,7 +2650,7 @@ static void *input_thread_main(void *arg)
         if (pr == 0) {
             /* ⓘ A keyboard at rest still follows the overlay opening and closing. */
             kbd_sync_hold(c);
-            if (send_keepalive(c) != 0) { c->stop = 1; break; }
+            if (send_keepalive(c) != 0) { input_link_lost(c, "keepalive"); break; }
             continue;
         }
         if (pfds[1].revents & POLLIN) break;
@@ -2664,7 +2754,7 @@ static void *input_thread_main(void *arg)
                     blank_held_report(c, buf, (size_t)n);
                 }
                 if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
-                    c->stop = 1;
+                    input_link_lost(c, "input report");
                     break;
                 }
                 c->st_reports_in++;
@@ -2731,6 +2821,9 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                            const ctmb_header_t *h, uint8_t *payload)
 {
     if (h->type == CTMB_MSG_OUTPUT_REPORT) {
+        /* ⓘ Before anything rewrites it: the PC setting the light ends the
+         * ready light (ready_light_note_host). */
+        ready_light_note_host(c, payload, h->payload_len);
         if (c->ops && c->ops->composite) {
             /* Route the host's OUT write to the interface that owns the OUT
              * endpoint it addressed (request_id = endpoint). Verbatim; pacing is
@@ -2968,6 +3061,9 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     memset(paced_q, 0, sizeof(paced_q));
 
     if (handshake(c, caps, report_desc, report_desc_len, &host_cfg) != 0) return;
+    /* The opening exchange is done: the microphone may speak (code review,
+     * 2026-10-05; see ctm_transport_send_when_ready). */
+    ctm_transport_set_ready(&c->xport, 1);
 
     { uint8_t drain[64]; while (read(c->wake_pipe[0], drain, sizeof(drain)) > 0) { /* discard */ } }
 
@@ -2982,6 +3078,7 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * the host saw audio where it expected a hello, and EVERY SESSION DIED
      * (host config receive failed / bridge hello failed). The handshake above
      * has returned by this point, so the link is up. */
+    c->link_send_failed = 0;
     c->input_thread_started = 0;
     if (pthread_create(&c->input_thread, NULL, input_thread_main, c) == 0) {
         c->input_thread_started = 1;
@@ -3075,8 +3172,11 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     pthread_mutex_unlock(&c->status_mutex);
 
     int link_alive = 1;
-    while (!c->stop && link_alive) {
+    /* ⓘ A failed send ends the connection too: input_link_lost(). */
+    while (!c->stop && link_alive && !c->link_send_failed) {
         drain_paced(c, paced_q, &paced_head, &paced_count, &next_paced_us, host_cfg.bt_pace_us);
+        /* The bridged-and-waiting light: ready_light_tick. */
+        ready_light_tick(c);
         int timeout_ms = 50;
         if (paced_count > 0 && next_paced_us != 0) {
             uint64_t now = now_us();
@@ -3119,6 +3219,8 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         }
     }
 
+    /* Nothing more from the microphone on this connection. */
+    ctm_transport_set_ready(&c->xport, 0);
     pthread_mutex_lock(&c->status_mutex);
     c->st_connected = 0;
     pthread_mutex_unlock(&c->status_mutex);

@@ -158,6 +158,20 @@ typedef struct {
     void (*signal_connected)(ctm_controller_t *c);
     void (*signal_unplugging)(ctm_controller_t *c, ctm_unplug_reason_t why);
 
+    /* ⭐⭐ THE BRIDGED-AND-WAITING LIGHT (rhoquinn8217, 2026-10-08): a bridged
+     * pad breathes green until the PC first sets its light. NULL for a type
+     * whose light the TV cannot drive from the session -- a Bluetooth DS4
+     * among them, where a write to a bridged pad can block for seconds.
+     *
+     *   ready_light       paint the lightbar green at `level` (0-255). When:
+     *                     the session thread, every SIGNAL_READY_STEP_MS.
+     *                     Returns 0 when the report was written.
+     *   host_sets_light   does this report from the PC set the lightbar?
+     *                     When: every report from the PC, on the session
+     *                     thread, before anything rewrites it. */
+    int (*ready_light)(ctm_controller_t *c, int level);
+    bool (*host_sets_light)(const uint8_t *data, size_t len);
+
     /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
      *
      * A wired Xbox pad under xpad has no hidraw node, so there are no reports
@@ -339,6 +353,9 @@ int ds4_signal_refused_bt(const char *node);
 void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms);
 int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
+/* The light's brightness `at_ms` into a DS4 signal: 0 bridged, 1 handed
+ * back, 2 refused, as ds4_signal_shape_of numbers them. */
+int  ds4_signal_level(int pattern, long at_ms);
 
 /* The same two notes on a bare node, with no session behind it: 0 handing
  * over, 1 handed back, 2 refused. ⛔ On a BRIDGED pad a write blocks for about

@@ -29,6 +29,7 @@
  * See bt-tv-side-reports.md for the byte map and how each part was proved. */
 
 #include "ctm_bt_signal_data.inl"
+#include "signal_shape.inl"
 
 /* The report, as parsed from one the host actually sent.
  *
@@ -240,11 +241,9 @@ static int btsig_level(btsig_pattern_t p, int i, int n)
 {
     if (n <= 0) return 0;
     if (p == BTSIG_HANDED_BACK || p == BTSIG_REFUSED) {
-        /* Three flashes: on for a third of each slot, off for the rest, so
-         * they read as three distinct events rather than a flicker. */
-        int slot = (n + 2) / 3;
-        int within = i % slot;
-        return (within < (slot / 2)) ? 255 : 0;
+        /* Three quick flashes, as every pad draws them: signal_shape.inl. */
+        const long frame_ms = BTSIG_PACE_US / 1000;
+        return signal_flash_level((long)i * frame_ms, (long)n * frame_ms, SIGNAL_FLASHES);
     }
     /* Handing over: SOLID, not pulsing.
      *
@@ -532,7 +531,14 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
      * still be going when you looked down. Doubling the pulse solved that on
      * its own -- there is no need for the light to outlast a buzz that is
      * already long enough to notice. */
-    const int LIT   = (pattern == BTSIG_REFUSED) ? VOICE * 2 : VOICE;
+    /* ⭐⭐ THREE QUICK FLASHES, THE SAME ON EVERY PAD (rhoquinn8217,
+     * 2026-10-08). A release and a refusal light for SIGNAL_FLASH_MS, past the
+     * tone, where they were 320 ms of very fast flashes and 640 ms of slower
+     * ones. The buzz keeps the length it had, and a bridge is solid for the
+     * tone. */
+    const int LIT   = (pattern == BTSIG_HANDING_OVER) ? VOICE
+                                                      : (int)(SIGNAL_FLASH_MS / (BTSIG_PACE_US / 1000));
+    const int BUZZ  = (pattern == BTSIG_REFUSED) ? VOICE * 2 : VOICE;
 
     for (int i = 0; i < VOICE; ++i) {
         /* THE VOICE IS NEVER CUT INTO, only skipped before it starts.
@@ -566,7 +572,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         int lvl = btsig_level(pattern, i, LIT);
         f.audio = tone_on ? note : NULL;   /* silence when the tone is off */
         f.seq = seq++;
-        f.haptics = ctm_sig_rumble_on(); f.haptic_n = hn; hn += 32;
+        f.haptics = ctm_sig_rumble_on() && i < BUZZ; f.haptic_n = hn; hn += 32;
         /* ⭐⭐ THE LIGHT IS OURS ONLY ON THE WAY BACK. Settled 2026-08-19 after
          * getting it wrong in both directions.
          *
@@ -632,7 +638,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         /* The pulse carries on past the sound, for the same reason the light
          * does: it is what makes you look down in the first place. */
         f.audio = NULL; f.seq = seq++;
-        f.haptics = ctm_sig_rumble_on(); f.haptic_n = hn; hn += 32;
+        f.haptics = ctm_sig_rumble_on() && i < BUZZ; f.haptic_n = hn; hn += 32;
         /* Ours only on the way back -- see the note on the first of these. */
         /* ⭐ The user's switches. ⓘ Turning the light off does not stop the
          * report going out -- the tone and the felt pulse ride in the same one

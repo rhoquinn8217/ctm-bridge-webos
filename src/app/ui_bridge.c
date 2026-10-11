@@ -10,6 +10,8 @@
 #include "agent_address.inl"
 #include "agent_endpoint.inl"
 #include "agent_reply.inl"
+#include "session_name.inl"
+#include "agent_proof.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -305,7 +307,9 @@ bool agent_is_known(void)
     return g_agent_host[0] ? g_agent_online : false;
 }
 
-int send_agent_command(const char *command, char *response, size_t response_len)
+/* One line to the listener, and its one-line answer. Everything calls
+ * send_agent_command() below, which adds the pairing proof first. */
+static int send_agent_line(const char *command, char *response, size_t response_len)
 {
     /* ⛔⛔ THE ADDRESS, NOT THE ONLINE FLAG. This is what the probe uses to ask
      * whether the agent is there, so requiring `online` here latches the answer:
@@ -351,7 +355,8 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         return agent_command_rc(false, false, 0, NULL);
     }
 
-    char line[512];
+    /* ⓘ Room for a command with its pairing proof: about 460 bytes. */
+    char line[1024];
     snprintf(line, sizeof(line), "%s\n", command);
     if (send(fd, line, strlen(line), 0) < 0) {
         close(fd);
@@ -376,6 +381,63 @@ int send_agent_command(const char *command, char *response, size_t response_len)
         g_agent_probed = true;
     }
     return agent_command_rc(true, true, n, response);
+}
+
+/* ⭐ THE APP'S SIGNER (agent_proof.inl says what it signs, and why). Set as a
+ * stream starts, before anything bridges, and read by whichever thread sends
+ * a bridge command. NULL: every command goes plainly, as before. */
+static ctm_proof_signer_fn g_proof_signer;
+
+/* ⭐ This TV's pairing fingerprint, as the signer last gave it: what tells this
+ * TV's remote pointer from another TV's (ctm_tv_pointer_plug). Empty until a
+ * command has been signed. */
+static pthread_mutex_t g_tv_fingerprint_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_tv_fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+
+void ctm_bridge_set_proof_signer(ctm_proof_signer_fn signer)
+{
+    g_proof_signer = signer;
+}
+
+/* ⭐⭐ A BRIDGE COMMAND GOES WITH A PROOF THAT THIS TV IS PAIRED WITH THE PC
+ * (code review, 2026-10-05). The listener requires it of a TV calling from
+ * the internet, where its port is forwarded to anyone; from the home network
+ * it only logs it.
+ * ⓘ Two connections where there was one: the challenge, then the command. An
+ * older listener refuses the challenge, and the command then goes plainly,
+ * exactly as before, so a new TV keeps working with an old listener. */
+int send_agent_command(const char *command, char *response, size_t response_len)
+{
+    const ctm_proof_signer_fn signer = g_proof_signer;
+    if (signer != NULL && agent_proof_wanted(command)) {
+        char challenge[96];
+        const int asked = send_agent_line("PROOF_CHALLENGE", challenge, sizeof(challenge));
+        if (asked == -2) {
+            /* Not reached at all: the caller's one retry is for exactly this. */
+            if (response && response_len > 0) {
+                response[0] = '\0';
+            }
+            return asked;
+        }
+        char nonce[AGENT_PROOF_NONCE_LEN + 1];
+        if (agent_proof_nonce(challenge, nonce, sizeof(nonce))) {
+            char text[512];
+            char fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+            char signature[512];
+            char line[1000];
+            const size_t text_len = agent_proof_signed_text(nonce, command, text, sizeof(text));
+            if (text_len > 0 &&
+                signer((const unsigned char *)text, text_len, fingerprint, signature, sizeof(signature)) &&
+                agent_proof_line(command, nonce, fingerprint, signature, line, sizeof(line)) > 0) {
+                pthread_mutex_lock(&g_tv_fingerprint_mutex);
+                snprintf(g_tv_fingerprint, sizeof(g_tv_fingerprint), "%s", fingerprint);
+                pthread_mutex_unlock(&g_tv_fingerprint_mutex);
+                return send_agent_line(line, response, response_len);
+            }
+            ctm_gesture_log(NULL, "pairing proof: could not sign \"%s\"; sending it without one", command);
+        }
+    }
+    return send_agent_line(command, response, response_len);
 }
 
 static int session_index_locked(const char *key)
@@ -439,11 +501,74 @@ int first_scan_index_for_item(const logical_device_t *item)
     return index >= 0 && index < g_scan.count ? index : -1;
 }
 
+/* ⭐⭐ ASK THE LISTENER FOR THE PORT (rhoquinn8217, 2026-10-08: two TVs streaming
+ * from one PC, each bridging its own pads). Every TV chose 48055 for its first
+ * pad, so a second TV took the first one's port. Now the TV sends port 0 and
+ * the listener hands one out of its range, in its answer ("OK bridge starting
+ * port=N"). ⓘ A listener that does not know port 0 refuses it as "ERR bad
+ * bridge args", and the TV then chooses its own, as before.
+ * Returns what send_agent_command returns; *port is the port to dial. */
+static int bridge_start_command(const char *kind, const char *busid, int *port,
+                                char *response, size_t response_len)
+{
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s 0 %s", kind, busid);
+    int rc = send_agent_command(cmd, response, response_len);
+    if (rc == 0) {
+        const int given = agent_reply_port(response);
+        if (given > 0) {
+            *port = given;
+            return 0;
+        }
+        /* ⓘ An OK naming no port: the session may exist on a port this TV
+         * cannot know, so it is stopped, and the bridge fails. */
+        char stop[96], stop_reply[128];
+        snprintf(stop, sizeof(stop), "BRIDGE_STOP %s", busid);
+        (void)send_agent_command(stop, stop_reply, sizeof(stop_reply));
+        snprintf(response, response_len, "the listener named no port");
+        return -1;
+    }
+    if (rc == -1 && strncmp(response, "ERR bad bridge args", 19) == 0) {
+        *port = next_bridge_port();
+        snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, *port, busid);
+        rc = send_agent_command(cmd, response, response_len);
+    }
+    return rc;
+}
+
+/* This run's tag, which ends every session name: session_name.inl. Made once,
+ * from the kernel's random numbers, or the clock and the process id when
+ * those cannot be read. */
+static char g_session_run_tag[SESSION_RUN_TAG_LEN + 1];
+static pthread_once_t g_session_run_tag_once = PTHREAD_ONCE_INIT;
+
+static void session_run_tag_init(void)
+{
+    uint32_t seed = 0;
+    const int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        if (read(fd, &seed, sizeof(seed)) != (ssize_t)sizeof(seed)) seed = 0;
+        close(fd);
+    }
+    if (seed == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        seed = (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec ^ ((uint32_t)getpid() << 12);
+    }
+    session_run_tag_from(seed, g_session_run_tag);
+}
+
+static const char *session_run_tag(void)
+{
+    pthread_once(&g_session_run_tag_once, session_run_tag_init);
+    return g_session_run_tag;
+}
+
 void make_bridge_busid(const logical_device_t *item, char *out, size_t out_len)
 {
     static unsigned seq;
     const char *kind = bridge_kind_for_item(item);
-    snprintf(out, out_len, "ctm-%s-%u", kind, ++seq);
+    session_name_make(out, out_len, kind, ++seq, session_run_tag());
 }
 
 /* ⭐⭐ A NEW SESSION, OR A NEW CONTROLLER FOR ONE ALREADY IN THE TABLE.
@@ -624,11 +749,12 @@ bool ctm_tv_pointer_plug(void)
         return false;
     }
     static unsigned seq;
-    int port = next_bridge_port();
-    snprintf(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "ctm-mouse-%u", ++seq);
+    int port = 0;
+    session_name_make(g_tv_pointer_busid, sizeof(g_tv_pointer_busid), "mouse", ++seq,
+                      session_run_tag());
     char cmd[160], response[256];
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START hid %d %s", port, g_tv_pointer_busid);
-    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    const int start_rc = bridge_start_command("hid", g_tv_pointer_busid, &port,
+                                              response, sizeof(response));
     if (start_rc != 0) {
         log_append("TV pointer: agent bridge start failed: %s", response);
         g_last_plug_unreachable = start_rc == -2;
@@ -639,6 +765,17 @@ bool ctm_tv_pointer_plug(void)
             (void)send_agent_command(cmd, response, sizeof(response));
         }
         return false;
+    }
+    /* ⭐ Its serial is this TV's own, from the fingerprint the command above
+     * was signed with (session_name.inl, tv_pointer_serial). */
+    {
+        char fingerprint[AGENT_PROOF_FINGERPRINT_LEN + 1];
+        char serial[64];
+        pthread_mutex_lock(&g_tv_fingerprint_mutex);
+        snprintf(fingerprint, sizeof(fingerprint), "%s", g_tv_fingerprint);
+        pthread_mutex_unlock(&g_tv_fingerprint_mutex);
+        tv_pointer_serial(serial, sizeof(serial), fingerprint);
+        ctm_hostmouse_set_serial(serial);
     }
     if (ctm_hostmouse_plug(g_agent_host, port) != 0) {
         log_append("TV pointer: synthesizer start failed");
@@ -872,12 +1009,11 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
     }
 
     char response[512];
-    int port = next_bridge_port();
+    int port = 0;
     char cmd[256];
     char busid[32];
     make_bridge_busid(item, busid, sizeof(busid));
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, port, busid);
-    const int start_rc = send_agent_command(cmd, response, sizeof(response));
+    const int start_rc = bridge_start_command(kind, busid, &port, response, sizeof(response));
     if (start_rc != 0) {
         log_append("agent bridge start failed: %s", start_rc == -2 ? "listener not reached" : response);
         /* ⭐ IN THE LOG THAT CAN BE READ (code review, 2026-10-05). log_append

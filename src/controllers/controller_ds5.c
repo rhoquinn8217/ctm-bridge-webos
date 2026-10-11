@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "ds5_light.inl"
 
 /* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
  * arriving through some other header until a 2026-08-19 upstream merge changed
@@ -517,6 +518,26 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 
 #include "ctm_gesture_chord.inl"
 
+/* ready_light: the bridged-and-waiting breath (ready_light_tick in
+ * controller_common.c), green at `level`, in the report this pad's bus takes:
+ * ds5_light.inl. */
+static int ds5_ready_light(ctm_controller_t *c, int level)
+{
+    uint8_t rep[DS5L_BT_LEN];
+    const char *bus = ctm_controller_bus(c);
+    const bool bt = bus != NULL && (bus[0] == 'B' || bus[0] == 'b');
+    size_t n;
+    if (bt) {
+        /* ⓘ A count of the TV's own light reports, wrapped at 16. */
+        static unsigned s_seq;
+        n = ds5_light_bt_report(rep, sizeof rep, s_seq++, 0x00, (uint8_t)level, 0x00);
+        if (n) ctm_bt_sign_output(rep, n);
+    } else {
+        n = ds5_light_usb_report(rep, sizeof rep, 0x00, (uint8_t)level, 0x00);
+    }
+    return n ? ctm_controller_write_raw(c, rep, n) : -1;
+}
+
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .kind = "ds5",
     .needs_host_config = true,
@@ -530,6 +551,8 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
+    .ready_light = ds5_ready_light,
+    .host_sets_light = ds5_report_sets_light,
 };
 
 /* DualSense Edge. Same behaviour as the base DualSense -- deliberately sharing
@@ -548,4 +571,6 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
+    .ready_light = ds5_ready_light,
+    .host_sets_light = ds5_report_sets_light,
 };
