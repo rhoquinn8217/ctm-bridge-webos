@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "switch_hold.inl"
 #include "ds5_light.inl"
 
 /* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
@@ -44,6 +45,8 @@ static bool ds5_matches(const ctm_controller_dev_t *dev)
  *
  * Removing the show frees two of the three type-state slots. */
 #define DS5_SLOT_CHORD 0
+/* The light taken over on this bridge, once its clock allowed (ds5_light.inl). */
+#define DS5_SLOT_LIGHT 1
 
 /* Waiting for the host's first output report to start the clock. */
 
@@ -518,10 +521,38 @@ static int ds5_on_plug_init(ctm_controller_t *c, ctm_transport_t *t)
 
 #include "ctm_gesture_chord.inl"
 
-/* ready_light: the bridged-and-waiting breath (ready_light_tick in
- * controller_common.c), green at `level`, in the report this pad's bus takes:
- * ds5_light.inl. */
-static int ds5_ready_light(ctm_controller_t *c, int level)
+/* ⭐ THE TAKEOVER FOR A PAD BRIDGED TOO SOON (ds5_light.inl). The bridge's own
+ * signal takes the light over as it starts, and a pad still playing its
+ * connection animation ignores that. So the first Bluetooth report whose
+ * clock says the animation is over sends it once more, for this bridge. */
+static void ds5_take_light_when_ready(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    uint32_t clock = 0;
+    if (ctm_controller_type_state(c, DS5_SLOT_LIGHT) != 0) return;
+    if (!data || len == 0 || data[0] != DS5L_BT_INPUT_ID) return;
+    if (!ds5_input_clock(data, len, &clock) || clock < DS5L_ANIMATION_DONE) return;
+    ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 1);
+    static unsigned s_seq;
+    uint8_t rep[DS5L_BT_LEN];
+    const size_t n = ds5_light_bt_takeover_report(rep, sizeof rep, s_seq++);
+    if (!n) return;
+    ctm_bt_sign_output(rep, n);
+    const int rc = ctm_controller_write_raw(c, rep, n);
+    ctl_log(c, "lightbar: taken over at the pad's clock %u (rc=%d)", clock, rc);
+}
+
+/* on_input_report for a DualSense: the takeover above, then the gesture. */
+static void ds5_input_hook(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    ds5_take_light_when_ready(c, data, len);
+    ds5_on_input_report(c, data, len);
+}
+
+/* paint_light: one colour, written by the TV, in the report this pad's bus
+ * takes (ds5_light.inl). The bridged-and-waiting breath paints with it, and so
+ * does a PC colour put back after the bridge's signal (ready_light_tick in
+ * controller_common.c). */
+static int ds5_paint_light(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b)
 {
     uint8_t rep[DS5L_BT_LEN];
     const char *bus = ctm_controller_bus(c);
@@ -530,15 +561,24 @@ static int ds5_ready_light(ctm_controller_t *c, int level)
     if (bt) {
         /* ⓘ A count of the TV's own light reports, wrapped at 16. */
         static unsigned s_seq;
-        n = ds5_light_bt_report(rep, sizeof rep, s_seq++, 0x00, (uint8_t)level, 0x00);
+        n = ds5_light_bt_report(rep, sizeof rep, s_seq++, r, g, b);
         if (n) ctm_bt_sign_output(rep, n);
     } else {
-        n = ds5_light_usb_report(rep, sizeof rep, 0x00, (uint8_t)level, 0x00);
+        n = ds5_light_usb_report(rep, sizeof rep, r, g, b);
     }
     return n ? ctm_controller_write_raw(c, rep, n) : -1;
 }
 
+/* ready_light: the bridged-and-waiting breath, green at `level`. */
+static int ds5_ready_light(ctm_controller_t *c, int level)
+{
+    return ds5_paint_light(c, 0x00, (uint8_t)level, 0x00);
+}
+
 const ctm_controller_ops_t ctm_controller_ds5_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds5,
+    .reports_steadily = true,
     .kind = "ds5",
     .needs_host_config = true,
     .grab_evdev = true,
@@ -547,18 +587,23 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .matches = ds5_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
-    .on_input_report = ds5_on_input_report,
+    .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
     .ready_light = ds5_ready_light,
     .host_sets_light = ds5_report_sets_light,
+    .host_light_colour = ds5_report_light_colour,
+    .paint_light = ds5_paint_light,
 };
 
 /* DualSense Edge. Same behaviour as the base DualSense -- deliberately sharing
  * its hooks rather than duplicating them -- but its own entry in the factory so
  * it is identified as itself and can diverge later without untangling. */
 const ctm_controller_ops_t ctm_controller_ds5e_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds5,
+    .reports_steadily = true,
     .kind = "ds5e",
     .needs_host_config = true,
     .grab_evdev = true,
@@ -567,10 +612,12 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .matches = ds5e_matches,
     .select_node = NULL,
     .on_plug_init = ds5_on_plug_init,
-    .on_input_report = ds5_on_input_report,
+    .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
     .ready_light = ds5_ready_light,
     .host_sets_light = ds5_report_sets_light,
+    .host_light_colour = ds5_report_light_colour,
+    .paint_light = ds5_paint_light,
 };

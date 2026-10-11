@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "switch_hold.inl"
 #include "xbox_bt_report.inl"
 
 #include <stdlib.h>
@@ -57,6 +58,10 @@ static int xbox_current_report(ctm_controller_t *c, uint8_t *report, size_t cap)
 }
 
 const ctm_controller_ops_t ctm_controller_xbox_ops = {
+    /* What a bridge keeps released: switch_hold.inl. ⓘ Over Bluetooth this pad
+     * reports only on a change, so its input nodes are asked. */
+    .switch_layout = swh_layout_xbox,
+    .reports_steadily = false,
     .kind = "xbox",
     /* ⛔ Not grabbed: SDL may read a Bluetooth Xbox pad through evdev, and the
      * overlay combo must keep working while it is bridged -- see

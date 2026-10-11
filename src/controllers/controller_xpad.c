@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "switch_hold.inl"
 #include "device_identity.inl"
 #include "xpad_report.inl"
 
@@ -406,6 +407,9 @@ static void xpad_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 }
 
 const ctm_controller_ops_t controller_xpad_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_xbox,
+    .reports_steadily = true,
     .kind = "xpad",
     /* ⛔ NOT GRABBED. SDL reads this pad through the same event node, and
      * rhoquinn8217, 2026-09-13: "Bridging a controller shouldn't stop the

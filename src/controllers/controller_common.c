@@ -55,6 +55,10 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #ifndef EVIOCGRAB
 #define EVIOCGRAB _IOW('E', 0x90, int)
 #endif
+/* ⓘ The TV's toolchain carries older input headers (switch_held_now). */
+#ifndef INPUT_PROP_ACCELEROMETER
+#define INPUT_PROP_ACCELEROMETER 0x06
+#endif
 #ifndef HIDIOCGRAWPHYS
 #define HIDIOCGRAWPHYS(len) _IOC(_IOC_READ, 'H', 0x05, len)
 #endif
@@ -64,6 +68,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "device_identity.inl"
 #include "kbd_chord.inl"
 #include "pad_blank.inl"
+#include "switch_hold.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -278,6 +283,10 @@ struct ctm_controller {
     uint64_t ready_light_t0_us;       /* when it started breathing; 0 = not yet */
     uint64_t ready_light_next_us;     /* when its next step is due */
     int ready_light_failed;           /* writes in a row that did not go */
+    /* A colour the PC set while the bridge's own signal painted the pad, put
+     * back when the signal ends: ready_light_note_host. */
+    int ready_light_owed;
+    uint8_t ready_light_owed_rgb[3];
 
     /* Set by a type's on_input_report to ask the app to unplug this
      * controller. Read and cleared by the app, never by the input thread. */
@@ -291,6 +300,12 @@ struct ctm_controller {
 
     evdev_grab_t evdev_grabs[MAX_EVDEV_GRABS];
     int evdev_grab_count;
+    /* What a bridge keeps released until it is let go (switch_hold.inl): the
+     * layout, built once a bridge by session_main, and what was held. Read
+     * and written by the input thread after that. */
+    swh_layout_t swh_layout;
+    swh_state_t swh;
+    bool swh_told;
     /* What tells this device's input nodes from anyone else's -- see
      * hid_node_checks.inl. ⛔ kernel_uniq is copied at create, BEFORE the
      * pairing probe can fill dev.mac: an input node carries the kernel's
@@ -2015,6 +2030,144 @@ static void grab_matching_evdev(ctm_controller_t *c)
             c->hid_phys, c->kernel_uniq);
 }
 
+/* ⭐ IS ANYTHING HELD ON ONE INPUT NODE RIGHT NOW? A key or button down, a
+ * stick off its centre, a trigger above its rest or a hat off it, by an
+ * eighth of the range. ⓘ A motion node is skipped -- gravity is not a held
+ * stick -- and so are a touchpad's axes, which say where the last finger was:
+ * a finger on it is BTN_TOUCH, a key. ABS_Z and ABS_RZ are a stick on some
+ * pads and a trigger on others, so they count only off centre AND above rest.
+ * `what` names what was found. */
+static bool evdev_node_held(int fd, char *what, size_t what_len)
+{
+    uint8_t props[(INPUT_PROP_MAX + 8) / 8];
+    memset(props, 0, sizeof(props));
+    const bool have_props = ioctl(fd, EVIOCGPROP(sizeof(props)), props) >= 0;
+    if (have_props && (props[INPUT_PROP_ACCELEROMETER / 8] & (1u << (INPUT_PROP_ACCELEROMETER % 8)))) {
+        return false;
+    }
+    uint8_t keys[(KEY_MAX + 8) / 8];
+    memset(keys, 0, sizeof(keys));
+    if (ioctl(fd, EVIOCGKEY(sizeof(keys)), keys) >= 0) {
+        for (size_t i = 0; i < sizeof(keys); ++i) {
+            if (keys[i]) {
+                snprintf(what, what_len, "a key or a button");
+                return true;
+            }
+        }
+    }
+    if (have_props && ((props[INPUT_PROP_POINTER / 8] & (1u << (INPUT_PROP_POINTER % 8))) ||
+                       (props[INPUT_PROP_BUTTONPAD / 8] & (1u << (INPUT_PROP_BUTTONPAD % 8))))) {
+        return false;
+    }
+    uint8_t abs_bits[(ABS_MAX + 8) / 8];
+    memset(abs_bits, 0, sizeof(abs_bits));
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) < 0) return false;
+    static const struct { int code; char kind; } axes[] = {
+        { ABS_X, 's' }, { ABS_Y, 's' }, { ABS_RX, 's' }, { ABS_RY, 's' },
+        { ABS_Z, 'e' }, { ABS_RZ, 'e' },
+        { ABS_GAS, 't' }, { ABS_BRAKE, 't' }, { ABS_THROTTLE, 't' },
+        { ABS_HAT0X, 'h' }, { ABS_HAT0Y, 'h' }, { ABS_HAT1X, 'h' }, { ABS_HAT1Y, 'h' },
+    };
+    for (size_t i = 0; i < sizeof(axes) / sizeof(axes[0]); ++i) {
+        const int code = axes[i].code;
+        if (!(abs_bits[code / 8] & (1u << (code % 8)))) continue;
+        struct input_absinfo ai;
+        if (ioctl(fd, EVIOCGABS(code), &ai) < 0) continue;
+        const long range = (long)ai.maximum - (long)ai.minimum;
+        const long eighth = range / 8;
+        const bool off_centre = labs(2L * ai.value - ((long)ai.minimum + (long)ai.maximum)) > 2L * eighth;
+        const bool above_rest = (long)ai.value > (long)ai.minimum + eighth;
+        const char kind = axes[i].kind;
+        if ((kind == 's' && off_centre) || (kind == 'e' && off_centre && above_rest) ||
+            (kind == 't' && above_rest) || (kind == 'h' && ai.value != 0)) {
+            snprintf(what, what_len, "%s", kind == 'h' ? "the d-pad" : kind == 't' ? "a trigger"
+                                                                     : "a stick or a trigger");
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ⭐ IS ANYTHING HELD ON THIS DEVICE RIGHT NOW? Asked of every one of its input
+ * nodes, found as the grab finds them, for a device that reports only when
+ * something changes (switch_hold.inl). ⓘ An ioctl, so a grab -- ours or
+ * anyone's -- does not stand in the way. */
+static bool switch_held_now(ctm_controller_t *c, char *what, size_t what_len)
+{
+    if (what_len) what[0] = '\0';
+    DIR *dir = opendir("/sys/class/input");
+    if (!dir) return false;
+    bool held = false;
+    struct dirent *ent;
+    while (!held && (ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "input", 5) != 0) continue;
+        char attr[160], vendor[32] = {0}, product[32] = {0}, phys[96] = {0}, uniq[96] = {0};
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/vendor", ent->d_name);
+        if (read_text_file(attr, vendor, sizeof(vendor)) != 0) continue;
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/id/product", ent->d_name);
+        if (read_text_file(attr, product, sizeof(product)) != 0) continue;
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/phys", ent->d_name);
+        (void)read_text_file(attr, phys, sizeof(phys));
+        snprintf(attr, sizeof(attr), "/sys/class/input/%s/uniq", ent->d_name);
+        (void)read_text_file(attr, uniq, sizeof(uniq));
+        if (evdev_input_belongs(c->vid_num, c->pid_num, c->hid_phys, c->kernel_uniq,
+                                vendor, product, phys, uniq) == EVDEV_NOT_OURS) {
+            continue;
+        }
+        char input_dir[160];
+        snprintf(input_dir, sizeof(input_dir), "/sys/class/input/%s", ent->d_name);
+        DIR *input = opendir(input_dir);
+        if (!input) continue;
+        struct dirent *child;
+        while (!held && (child = readdir(input)) != NULL) {
+            if (strncmp(child->d_name, "event", 5) != 0) continue;
+            char dev_path[64];
+            snprintf(dev_path, sizeof(dev_path), "/dev/input/%s", child->d_name);
+            const int fd = open(dev_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0) continue;
+            held = evdev_node_held(fd, what, what_len);
+            close(fd);
+        }
+        closedir(input);
+    }
+    closedir(dir);
+    return held;
+}
+
+/* ⭐⭐ A BRIDGE IS A SWITCH (rhoquinn8217, 2026-10-09: "if you bridge while
+ * hold anything down should automatically cancel every input"). What is held
+ * as it starts reaches the PC released until it is let go: switch_hold.inl.
+ * ⓘ Once a bridge, not at a reconnect, through which the PC keeps the same
+ * device. When: session_main, after the device is open and described. */
+static void switch_hold_begin(ctm_controller_t *c, const uint8_t *desc, uint32_t desc_len)
+{
+    if (c->ops->switch_layout) {
+        c->ops->switch_layout(&c->swh_layout);
+    } else if (c->kbd.present) {
+        swh_layout_keyboard(&c->swh_layout, c->kbd.report_id, c->kbd.mod_offset,
+                            c->kbd.keys_offset, c->kbd.keys_count);
+    } else if (c->is_gamepad) {
+        swh_layout_from_pad_blank(&c->swh_layout, &c->pad_blank);
+    } else {
+        swh_layout_buttons_from_descriptor(&c->swh_layout, desc, desc_len);
+    }
+    memset(&c->swh, 0, sizeof(c->swh));
+    c->swh_told = false;
+    if (c->swh_layout.count == 0 && !c->swh_layout.keys) {
+        ctl_log(c, "switch: nothing in this device's reports is followed");
+        return;
+    }
+    if (c->ops->reports_steadily) {
+        swh_arm(&c->swh);   /* its first report is its state now */
+        return;
+    }
+    char what[48];
+    if (switch_held_now(c, what, sizeof(what))) {
+        swh_arm(&c->swh);
+        ctl_log(c, "switch: %s is held as the bridge starts; its first report says which", what);
+    }
+}
+
 /* ⭐⭐ A BRIDGED KEYBOARD GOES TO THE TV WHILE ITS OVERLAY IS OPEN, AND BACK.
  * rhoquinn8217, 2026-09-13: the shortcut "hands the keyboard back to the TV
  * while the overlay is open". The overlay holds input (ctm_input_set_held), so:
@@ -2276,8 +2429,31 @@ static bool controller_signal_busy(ctm_controller_t *c)
  * it stops, because the report that stopped it has just set the colour. */
 static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size_t len)
 {
-    if (c->ready_light_taken || !c->ops->host_sets_light) return;
+    if (!c->ops->host_sets_light) return;
+    if (c->ready_light_taken && !c->ready_light_owed) return;   /* nothing left to follow */
     if (!c->ops->host_sets_light(data, len)) return;
+    /* ⭐⭐ A COLOUR SET WHILE THE BRIDGE'S OWN SIGNAL PAINTS THE PAD IS KEPT
+     * (rhoquinn8217's C3, 2026-10-09). Steam set its colour 1.7 s into the
+     * bridge's 2.4 s green and tone; the signal's next frame covered it, the PC
+     * never sent it again, and the pad sat on solid green -- neither the PC's
+     * colour nor the breath, since the PC had "set the light". So it is kept
+     * and put back the moment the signal ends (ready_light_tick). A colour the
+     * PC sets after that is the latest, and nothing is owed. */
+    uint8_t rgb[3];
+    if (c->ops->paint_light && c->ops->host_light_colour && ctm_sig_light_on() &&
+        controller_signal_busy(c) && c->ops->host_light_colour(data, len, rgb)) {
+        if (!c->ready_light_owed) {
+            ctl_log(c, "ready light: the PC set the light to %u,%u,%u while the bridge's "
+                       "signal painted the pad; it goes back on when the signal ends",
+                    rgb[0], rgb[1], rgb[2]);
+        }
+        memcpy(c->ready_light_owed_rgb, rgb, sizeof rgb);
+        c->ready_light_owed = 1;
+    } else if (c->ready_light_owed) {
+        c->ready_light_owed = 0;
+        ctl_log(c, "ready light: the PC set the light again after the signal, so nothing is put back");
+    }
+    if (c->ready_light_taken) return;
     c->ready_light_taken = 1;
     ctl_log(c, "ready light: the PC set the light%s",
             c->ready_light_t0_us ? ", so it stops breathing" : " before it began to breathe");
@@ -2285,6 +2461,16 @@ static void ready_light_note_host(ctm_controller_t *c, const uint8_t *data, size
 
 static void ready_light_tick(ctm_controller_t *c)
 {
+    /* The PC's colour, back on once the signal that covered it has ended
+     * (ready_light_note_host). Never while a signal holds the pad, so never
+     * on the way back to the TV. */
+    if (c->ready_light_owed && !controller_signal_busy(c)) {
+        c->ready_light_owed = 0;
+        const uint8_t *k = c->ready_light_owed_rgb;
+        const int rc = c->ops->paint_light(c, k[0], k[1], k[2]);
+        ctl_log(c, "ready light: the PC's colour %u,%u,%u is back on, the signal has ended (rc=%d)",
+                k[0], k[1], k[2], rc);
+    }
     if (!c->ops->ready_light || c->ready_light_taken || !ctm_sig_light_on()) return;
     const uint64_t now = now_us();
     if (c->ready_light_next_us != 0 && now < c->ready_light_next_us) return;
@@ -2630,6 +2816,8 @@ static int send_keepalive(ctm_controller_t *c)
     int n = c->ops->current_report ? c->ops->current_report(c, buf, sizeof(buf)) : 0;
     if (n <= 0) n = (int)pad_keep_current(&c->pad_keep, &c->pad_blank, buf, sizeof(buf));
     if (n <= 0) return 0;
+    /* ⓘ Kept at rest as the pad's own reports are (switch_hold.inl). */
+    if (swh_active(&c->swh)) swh_apply(&c->swh_layout, &c->swh, buf, (size_t)n);
     if (ctm_input_is_held()) blank_held_report(c, buf, (size_t)n);
     if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
         return -1;
@@ -2757,10 +2945,32 @@ static void *input_thread_main(void *arg)
                 if (c->ops->keepalive_ms && !c->ops->current_report) {
                     pad_keep_update(&c->pad_keep, &c->pad_blank, buf, (size_t)n);
                 }
-                if (held) {
-                    blank_held_report(c, buf, (size_t)n);
+                /* ⭐⭐ NOTHING HELD AT THE SWITCH REACHES THE PC (switch_hold.inl):
+                 * the first report says what is held, and the copy the PC is
+                 * sent keeps each at rest until it is let go. ⓘ The type reads
+                 * the real report, below: the unbridge chord lives in it. */
+                uint8_t *to_host = buf;
+                uint8_t released[MAX_REPORT];
+                if (c->swh.armed) {
+                    const int found = swh_note(&c->swh_layout, &c->swh, buf, (size_t)n);
+                    if (found > 0) {
+                        c->swh_told = true;
+                        ctl_log(c, "switch: %d input(s) held as the bridge started, sent as released until let go",
+                                found);
+                    }
+                    if (swh_active(&c->swh)) {
+                        memcpy(released, buf, (size_t)n);
+                        swh_apply(&c->swh_layout, &c->swh, released, (size_t)n);
+                        to_host = released;
+                    } else if (c->swh_told) {
+                        c->swh_told = false;
+                        ctl_log(c, "switch: everything held as the bridge started has been let go");
+                    }
                 }
-                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, buf, (size_t)n) != 0) {
+                if (held) {
+                    blank_held_report(c, to_host, (size_t)n);
+                }
+                if (c_send(c, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK, c->primary_in_ep, to_host, (size_t)n) != 0) {
                     input_link_lost(c, "input report");
                     break;
                 }
@@ -3308,6 +3518,8 @@ static void *session_main(void *arg)
         c->stop = 1;
         return NULL;
     }
+    /* ⭐ A bridge is a switch: switch_hold_begin. */
+    switch_hold_begin(c, report_desc, report_desc_len);
     /* Composite primary endpoints are resolved in open_composite_siblings()
      * (reliable /sys/class/input path), at run_session start. */
     if (pipe(c->wake_pipe) != 0) {
@@ -3321,8 +3533,8 @@ static void *session_main(void *arg)
     (void)fcntl(c->wake_pipe[0], F_SETFL, fcntl(c->wake_pipe[0], F_GETFL, 0) | O_NONBLOCK);
     (void)fcntl(c->wake_pipe[1], F_SETFL, fcntl(c->wake_pipe[1], F_GETFL, 0) | O_NONBLOCK);
 
-    /* ⭐ The trouble clock: from the first failure of any kind since the
-     * listener last answered a greeting (link_trouble.inl). */
+    /* ⭐ The trouble clock: from the first connect since the listener last
+     * answered a greeting (link_trouble.inl). */
     link_trouble_t trouble = {0, 0};
     while (!c->stop) {
         link_trouble_begin(&trouble, now_us());
@@ -3385,7 +3597,9 @@ static void *session_main(void *arg)
              *
              * ⓘ Timed by the trouble clock, not from this round of connects: a
              * connect that succeeds into a greeting nobody answers must not
-             * start the count again (link_trouble.inl). */
+             * start the count again (link_trouble.inl). ⚠️ It bounds the
+             * connects: one that succeeds near the end still waits out its
+             * greeting, so a hung listener that takes connections is 5 to 8 s. */
             const long left_ms = link_trouble_left_ms(&trouble, now_us(), CTM_HOST_GONE_MS);
             if (left_ms == 0) {
                 const long waited_ms = link_trouble_ms(&trouble, now_us());

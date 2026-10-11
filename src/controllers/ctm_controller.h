@@ -20,6 +20,9 @@
 extern "C" {
 #endif
 
+/* switch_hold.inl's layout, which a type may fill. */
+struct swh_layout;
+
 typedef struct {
     char vid[8];
     char pid[8];
@@ -88,6 +91,17 @@ typedef struct {
      * ⚠️ Not the same question as grab_evdev or needs_host_config, which a DS4
      * also answers yes to. A DS4 speaks its own protocol, not this one. */
     bool speaks_ds5;
+
+    /* ⭐⭐ NOTHING HELD AT A SWITCH REACHES THE PC (rhoquinn8217, 2026-10-09;
+     * switch_hold.inl). The type's input report as fields, for a type that
+     * knows its own layout; NULL for one whose descriptor gives it (any other
+     * gamepad, a keyboard, a mouse). reports_steadily: its first report after
+     * a bridge is its state then -- it reports all the time, or the TV builds
+     * it from the whole state -- so nothing else is asked; otherwise its input
+     * nodes are asked what is held, so a first new press is never taken for
+     * one held over. */
+    void (*switch_layout)(struct swh_layout *out);
+    bool reports_steadily;
 
     /* Does this type claim the device? Factory tries specific types first,
      * generic last. */
@@ -168,9 +182,18 @@ typedef struct {
      *                     Returns 0 when the report was written.
      *   host_sets_light   does this report from the PC set the lightbar?
      *                     When: every report from the PC, on the session
-     *                     thread, before anything rewrites it. */
+     *                     thread, before anything rewrites it.
+     *   host_light_colour the colour such a report sets. When: as above.
+     *   paint_light       paint the lightbar one colour. When: the session
+     *                     thread, once, to put back a colour the PC set while
+     *                     the bridge's own signal painted over it (the
+     *                     ready light's ready_light_owed). Returns 0 when the
+     *                     report was written. Both NULL for a type whose
+     *                     signal keeps the PC's colour itself, the DS4's. */
     int (*ready_light)(ctm_controller_t *c, int level);
     bool (*host_sets_light)(const uint8_t *data, size_t len);
+    bool (*host_light_colour)(const uint8_t *data, size_t len, uint8_t rgb[3]);
+    int (*paint_light)(ctm_controller_t *c, uint8_t r, uint8_t g, uint8_t b);
 
     /* ⭐⭐ A DEVICE THE KERNEL GIVES ONLY AS AN INPUT DEVICE, NOT HID.
      *
@@ -337,6 +360,17 @@ void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload
 void ctm_mic_safety_disarm_all(void);
 
 int ctm_signal_refused_bt(const char *node);
+
+/* A colour of the app's own on a BLUETOOTH DualSense, written past SDL, with
+ * the light's takeover first when take_over is set (ds5_light.inl says why).
+ * 0 when it went out. */
+int ctm_ds5_bt_paint(const char *node, uint8_t r, uint8_t g, uint8_t b, int take_over);
+
+/* Has a Bluetooth DualSense finished its connection animation, so that it will
+ * take a colour? From the reports waiting on `fd`, its hidraw node opened
+ * O_RDONLY | O_NONBLOCK by the caller. Never blocks. 1 over, 0 not yet, -1
+ * nothing to read yet (ds5_light.inl). */
+int ctm_ds5_animation_over(int fd);
 
 /* The same thing for a BLUETOOTH DS4, which encodes its audio as SBC rather
  * than Opus and carries it in a 0x14 report rather than a 0x36. T-238.

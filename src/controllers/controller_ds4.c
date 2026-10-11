@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "ctm_controller.h"
+#include "switch_hold.inl"
 #include "ds4_report.inl"
 #include "signal_shape.inl"
 
@@ -297,6 +298,9 @@ static void ds4_signal_connected(ctm_controller_t *c);
 static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why);
 
 const ctm_controller_ops_t ctm_controller_ds4_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds4,
+    .reports_steadily = true,
     .kind = "ds4",
     .needs_host_config = true,
     .grab_evdev = true,
@@ -876,6 +880,9 @@ static bool ds4_usb_host_sets_light(const uint8_t *data, size_t len)
  * Bluetooth type's: its chord lines in ctm-gesture.log are the untested ones,
  * and a line has to say which of the two wrote it. */
 const ctm_controller_ops_t controller_ds4_usb_ops = {
+    /* What a bridge keeps released: switch_hold.inl. */
+    .switch_layout = swh_layout_ds4,
+    .reports_steadily = true,
     .kind = "ds4_usb",
     .needs_host_config = false,
     .grab_evdev = true,

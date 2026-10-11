@@ -275,7 +275,12 @@ void ctm_bridge_set_agent_host(const char *host, int port)
      * than up to ten seconds later. */
     bool online = g_agent_online;
     bool probed = g_agent_probed;
-    agent_endpoint_set(old_host, old_port, g_agent_host, g_agent_port, &online, &probed);
+    if (agent_endpoint_set(old_host, old_port, g_agent_host, g_agent_port, &online, &probed)) {
+        /* ⭐ A NEW PC'S VERDICT IS ITS OWN (code review, 2026-10-09). The last
+         * PC's "update" advice, or its OK, decided the first bridges to this
+         * one before it had answered: Auto Bridge runs before the probe. */
+        g_agent_compat = PROTOCOL_UNKNOWN;
+    }
     g_agent_online = online;
     g_agent_probed = probed;
     if (g_agent_host[0]) {
@@ -519,8 +524,19 @@ static int bridge_start_command(const char *kind, const char *busid, int *port,
         /* ⓘ Not known yet: a stream's first bridge can come before the first
          * probe of its listener. Asked once, here. */
         char status[256];
-        if (send_agent_command("STATUS", status, sizeof(status)) == 0) {
+        const int asked = send_agent_command("STATUS", status, sizeof(status));
+        if (asked == 0) {
             g_agent_compat = protocol_compat(status);
+        } else if (asked == -2) {
+            /* ⭐ NOT REACHED: SAID AT ONCE (code review, 2026-10-09). The
+             * command would be a second connect, of about a second, to a PC
+             * just found unreachable. A direct plug waits for it on the main
+             * loop, and its one more try doubles that: the interface froze
+             * about 4 s where it had been 2. */
+            if (response && response_len > 0) {
+                response[0] = '\0';
+            }
+            return asked;
         }
     }
     const protocol_compat_t compat = (protocol_compat_t)g_agent_compat;
