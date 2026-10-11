@@ -60,6 +60,12 @@ void ctm_transport_attach_tcp(ctm_transport_t *t, int fd);
 int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
                                unsigned int enet_timeout_ms);
 
+/* The same attempt, waiting no longer than most_ms in all: for a caller with
+ * a deadline of its own, the session's give-up. ⓘ TCP never waits longer
+ * than the transport's own two seconds, whatever most_ms says. */
+int ctm_transport_connect_within(ctm_transport_t *t, const char *host, int port,
+                                 unsigned int enet_timeout_ms, unsigned int most_ms);
+
 /* Send one framed message (header + payload). Thread-safe. Returns 0/-1. */
 int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
                            uint32_t request_id, const void *payload, size_t len);

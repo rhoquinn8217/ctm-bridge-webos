@@ -124,7 +124,7 @@ static int connect_with_deadline(int fd, const struct sockaddr *addr,
     return 0;
 }
 
-static int connect_tcp(const char *host, int port)
+static int connect_tcp(const char *host, int port, int timeout_ms)
 {
     char port_text[16];
     struct addrinfo hints;
@@ -140,8 +140,7 @@ static int connect_tcp(const char *host, int port)
     for (struct addrinfo *rp = result; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
-        if (connect_with_deadline(fd, rp->ai_addr, rp->ai_addrlen,
-                                  CTM_CONNECT_TIMEOUT_MS) == 0) break;
+        if (connect_with_deadline(fd, rp->ai_addr, rp->ai_addrlen, timeout_ms) == 0) break;
         close(fd);
         fd = -1;
     }
@@ -179,18 +178,35 @@ void ctm_transport_attach_tcp(ctm_transport_t *t, int fd)
 int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
                                unsigned int enet_timeout_ms)
 {
+    /* ⓘ The whole of both tries, as it always was: ENet's own wait, then
+     * TCP's full one. */
+    return ctm_transport_connect_within(t, host, port, enet_timeout_ms,
+                                        enet_timeout_ms + CTM_CONNECT_TIMEOUT_MS);
+}
+
+int ctm_transport_connect_within(ctm_transport_t *t, const char *host, int port,
+                                 unsigned int enet_timeout_ms, unsigned int most_ms)
+{
     if (!t) return -1;
     ctm_transport_set_ready(t, 0);
+    if (most_ms == 0) return -1;
+    const uint64_t began_us = ctm_now_us();
 
-    /* 1) ENet first, brief timeout. */
-    if (t->enet && enet_client_connect(t->enet, host, port, enet_timeout_ms) == 0) {
+    /* 1) ENet first, brief timeout, and never past the caller's limit. */
+    if (t->enet && enet_client_connect(t->enet, host, port,
+                                       enet_timeout_ms < most_ms ? enet_timeout_ms : most_ms) == 0) {
         t->kind = CTM_TRANSPORT_ENET;
         t->fd = -1;
         return 0;
     }
 
-    /* 2) Fall back to TCP. */
-    int fd = connect_tcp(host, port);
+    /* 2) Fall back to TCP, for what is left, and never longer than the
+     * transport's own limit. */
+    const uint64_t spent_ms = (ctm_now_us() - began_us) / 1000u;
+    if (spent_ms >= most_ms) return -1;
+    unsigned int tcp_ms = most_ms - (unsigned int)spent_ms;
+    if (tcp_ms > CTM_CONNECT_TIMEOUT_MS) tcp_ms = CTM_CONNECT_TIMEOUT_MS;
+    int fd = connect_tcp(host, port, (int)tcp_ms);
     if (fd >= 0) {
         t->kind = CTM_TRANSPORT_TCP;
         t->fd = fd;
