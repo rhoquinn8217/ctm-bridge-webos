@@ -372,6 +372,89 @@ static void alsa_log(const char *tag, const char *fmt, ...)
     fclose(f);
 }
 
+/* The speaker's hardware parameters, set on an open playback handle: four
+ * channels of S16_LE at 48000, and a buffer capped at 4800 frames with the
+ * unbounded request as the fallback. Returns what HW_PARAMS returned, its
+ * errno in `*out_errno`, and what the kernel chose in `*out`.
+ *
+ * ⛔⛔ ONE COPY FOR BOTH SPEAKER OPENERS (code review, 2026-10-05). The
+ * opener that moves a speaker to its pad's own card (ctm_cardmatch.inl) set
+ * these through a hand copy made before the cap, so a speaker moved there
+ * got the second-long buffer back. tests/test_speaker_buffer_cap.c fails if
+ * a playback open sets them any other way. */
+static int ds5_playback_hw_params(int fd, int card, struct snd_pcm_hw_params *out,
+                                  int *out_errno)
+{
+    struct snd_pcm_hw_params hw;
+    memset(&hw, 0, sizeof(hw));
+    /* Init all intervals to full range ("any"), then constrain */
+    for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
+        hw.intervals[i].min = 0;
+        hw.intervals[i].max = 0xFFFFFFFFU;
+    }
+    /* Init all masks to full range */
+    for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
+        memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
+    /* ACCESS: RW_INTERLEAVED(3) only */
+    memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
+    hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
+    /* FORMAT: S16_LE(2) only */
+    memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
+    hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
+    /* CHANNELS: exactly 4 */
+    hw.intervals[2].min = hw.intervals[2].max = 4;
+    hw.intervals[2].integer = 1;
+    /* RATE: exactly 48000 */
+    hw.intervals[3].min = hw.intervals[3].max = 48000;
+    hw.intervals[3].integer = 1;
+    /* PERIOD_SIZE: let the kernel choose what suits the hardware.
+     * A hardcoded 48-frame period once mismatched the host's 480-frame
+     * chunks and contributed to underruns. */
+    /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
+     * host's chunks.
+     *
+     * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
+     * upper bound, and the kernel is free to take what suits the hardware:
+     * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
+     * **49152 frames = 1.024 SECONDS**, which is exactly the delay
+     * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
+     * stayed on time.
+     * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
+     * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
+     * the same second-long buffer. The fault was never device-specific; it
+     * was an unbounded parameter on both, and the cap is needed on both.
+     *
+     * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
+     * five times the floor, so there is still room for jitter. ⛔ A tighter
+     * cap risks underruns, which are worse than lag -- see the self-heal
+     * this file already carries for them.
+     *
+     * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
+     * fails and we would open no audio at all -- a SILENT speaker, worse than
+     * a late one. So the unbounded request is retried on failure. */
+    hw.intervals[9].min = 960;
+    hw.intervals[9].max = 4800;
+    hw.intervals[9].integer = 0;
+    /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
+    struct snd_pcm_hw_params hw_unbounded = hw;
+    hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
+    int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+    int hw_errno = (hw_rc < 0) ? errno : 0;
+    if (hw_rc < 0) {
+        hw = hw_unbounded;
+        hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
+        if (hw_rc >= 0) {
+            alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
+                     card, hw_errno);
+        } else {
+            hw_errno = errno;
+        }
+    }
+    *out = hw;
+    *out_errno = hw_errno;
+    return hw_rc;
+}
+
 /* Open the DualSense's own USB audio playback device for wired ISO passthrough.
  * Scans ALSA cards for one named "DualSense", opens pcmC{n}D0p, configures
  * S16_LE 4ch 48kHz. Returns fd on success, -1 on failure.
@@ -465,70 +548,8 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
             continue;
         }
         struct snd_pcm_hw_params hw;
-        memset(&hw, 0, sizeof(hw));
-        /* Init all intervals to full range ("any"), then constrain */
-        for (int i = 0; i < (int)(sizeof(hw.intervals)/sizeof(hw.intervals[0])); i++) {
-            hw.intervals[i].min = 0;
-            hw.intervals[i].max = 0xFFFFFFFFU;
-        }
-        /* Init all masks to full range */
-        for (int i = 0; i < (int)(sizeof(hw.masks)/sizeof(hw.masks[0])); i++)
-            memset(&hw.masks[i], 0xFF, sizeof(hw.masks[i]));
-        /* ACCESS: RW_INTERLEAVED(3) only */
-        memset(&hw.masks[0], 0, sizeof(hw.masks[0]));
-        hw.masks[0].bits[3 / 32] = 1u << (3 % 32);
-        /* FORMAT: S16_LE(2) only */
-        memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
-        hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
-        /* CHANNELS: exactly 4 */
-        hw.intervals[2].min = hw.intervals[2].max = 4;
-        hw.intervals[2].integer = 1;
-        /* RATE: exactly 48000 */
-        hw.intervals[3].min = hw.intervals[3].max = 48000;
-        hw.intervals[3].integer = 1;
-        /* PERIOD_SIZE: let the kernel choose what suits the hardware.
-         * A hardcoded 48-frame period once mismatched the host's 480-frame
-         * chunks and contributed to underruns. */
-        /* BUFFER_SIZE: at least 960 frames (~20ms) to bridge gaps between the
-         * host's chunks.
-         *
-         * ⛔⛔ AND A CEILING, BECAUSE THE BUFFER *IS* THE LATENCY. This had no
-         * upper bound, and the kernel is free to take what suits the hardware:
-         * measured on the U5s (webOS 26, kernel 6.12, xhci) it chose
-         * **49152 frames = 1.024 SECONDS**, which is exactly the delay
-         * rhoquinn8217 heard on the pad's speaker while the monitor's own audio
-         * stayed on time.
-         * ⛔ THIS ONCE SAID "the C1 does not do this". IT DOES. Measured on the
-         * C1 2026-09-14 with the cap removed (build 313): buffer_frames=49152,
-         * the same second-long buffer. The fault was never device-specific; it
-         * was an unbounded parameter on both, and the cap is needed on both.
-         *
-         * ⚠️ 4800 frames is 100 ms: ten times the host's 480-frame chunks and
-         * five times the floor, so there is still room for jitter. ⛔ A tighter
-         * cap risks underruns, which are worse than lag -- see the self-heal
-         * this file already carries for them.
-         *
-         * ➡️ AND IT FALLS BACK. If the hardware cannot satisfy the cap, HW_PARAMS
-         * fails and we would open no audio at all -- a SILENT speaker, worse than
-         * a late one. So the unbounded request is retried on failure. */
-        hw.intervals[9].min = 960;
-        hw.intervals[9].max = 4800;
-        hw.intervals[9].integer = 0;
-        /* Kept before the ioctl: HW_PARAMS rewrites `hw` with what it chose. */
-        struct snd_pcm_hw_params hw_unbounded = hw;
-        hw_unbounded.intervals[9].max = 0xFFFFFFFFU;
-        int hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
-        int hw_errno = (hw_rc < 0) ? errno : 0;
-        if (hw_rc < 0) {
-            hw = hw_unbounded;
-            hw_rc = ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw);
-            if (hw_rc >= 0) {
-                alsa_log("[alsa-hwparams]", "card=%d buffer cap refused (errno=%d), reopened unbounded",
-                         card, hw_errno);
-            } else {
-                hw_errno = errno;
-            }
-        }
+        int hw_errno = 0;
+        int hw_rc = ds5_playback_hw_params(fd, card, &hw, &hw_errno);
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
         int prep_errno = (hw_rc >= 0 && prep_rc < 0) ? errno : 0;
         if (hw_rc < 0 || prep_rc < 0) {
@@ -1175,6 +1196,10 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
  * card the probe identified rather than scanning for one. */
 static int cardmatch_open_card(int card);
 
+/* When the capture recovers and how long it waits first: mic_recover.inl
+ * (code review, 2026-10-05). */
+#include "mic_recover.inl"
+
 static void *mic_capture_thread(void *arg)
 {
     ctm_controller_t *c = (ctm_controller_t *)arg;
@@ -1258,7 +1283,7 @@ static void *mic_capture_thread(void *arg)
      * No capture failure has ever been observed here -- a million reads across
      * several sessions, none failed -- so there is nothing to tune them
      * against. They are a starting point. */
-    int consec_fail = 0, retry_streak = 0;
+    mic_recover_t rec = {0, 0};
     uint64_t heals = 0;
 
     mic_cap_log("%s card=%d thread running fd=%d", node, mic_card, fd);
@@ -1283,62 +1308,80 @@ static void *mic_capture_thread(void *arg)
             mic_cap_log("poll failed errno=%d, stopping", errno);
             break;
         }
-        if (pfd.revents & (POLLERR | POLLNVAL)) {
+        int read_errno = 0;
+        const char *why = NULL;
+        if (pfd.revents & (POLLERR | POLLNVAL | POLLHUP)) {
             /* Overrun or the device went away. Re-prepare and carry on; the
-             * read below reports anything that is still wrong. */
+             * read below reports anything that is still wrong.
+             * ⛔ COUNTED AND WAITED ON (code review, 2026-10-05). A pulled
+             * cable fails every poll at once, and this went straight back to
+             * poll: a core spun until the pad was released. */
             ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
             ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-            continue;
+            int wait_ms = 0;
+            const mic_action_t act = mic_recover_error(&rec, MIC_ERR_POLL, &wait_ms);
+            struct timespec ts = {0, (long)wait_ms * 1000000L};
+            nanosleep(&ts, NULL);
+            if (act == MIC_RETRY) {
+                continue;
+            }
+            why = "poll error";
         }
 
         struct snd_xferi xfer;
         memset(&xfer, 0, sizeof(xfer));
         xfer.buf = buf;
         xfer.frames = MIC_CAP_FRAMES;
-        int rc = ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
-        if (rc < 0) {
-            const int read_errno = errno;
+        int rc = why ? -1 : ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
+        if (rc < 0 && !why) {
+            read_errno = errno;
             reads_failed++;
-            consec_fail++;
-            int fatal = 0;
+            mic_err_t kind;
             if (read_errno == EPIPE) {
                 /* overrun: the stream ran ahead of us. Re-prepare and restart. */
                 ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL);
                 ioctl(fd, SNDRV_PCM_IOCTL_START, NULL);
-                retry_streak++;
+                kind = MIC_ERR_OVERRUN;
             } else if (read_errno == EAGAIN) {
-                struct timespec ts = {0, 1000000};   /* 1 ms */
-                nanosleep(&ts, NULL);
-                retry_streak++;
+                kind = MIC_ERR_AGAIN;
             } else {
                 /* Anything else means the device itself is gone or broken.
                  * This used to log and exit, which left the microphone dead
                  * for the rest of the session with nothing said about it --
                  * while the PLAYBACK side of the same USB audio device has
                  * recovered from exactly this for months. */
-                fatal = 1;
+                kind = MIC_ERR_GONE;
             }
 
             /* Two triggers, mirroring playback: failing outright, or needing
              * recovery over and over. The second fires before anything is
-             * audible, which is the point of having it. */
-            const char *why = NULL;
-            if (fatal) why = "read error";
-            else if (consec_fail >= 20) why = "consecutive-fail";
-            else if (retry_streak >= 5) why = "retry-streak";
-            if (!why) {
+             * audible, which is the point of having it. mic_recover.inl
+             * holds both, and the waits. */
+            int wait_ms = 0;
+            const mic_action_t act = mic_recover_error(&rec, kind, &wait_ms);
+            if (wait_ms > 0) {
+                struct timespec ts = {0, (long)wait_ms * 1000000L};
+                nanosleep(&ts, NULL);
+            }
+            if (act == MIC_RETRY) {
                 continue;
             }
-
-            /* Reopen. The scan runs again from scratch, because the card
-             * index drifts across a re-enumeration and a remembered one would
-             * reopen the wrong node. */
+            why = (kind == MIC_ERR_GONE) ? "read error"
+                : (rec.consec_fail >= MIC_RECOVER_FAILS) ? "consecutive-fail" : "retry-streak";
+        }
+        if (why) {
+            /* ⛔⛔ REOPEN THIS PAD'S OWN CARD, NEVER A SCAN (code review,
+             * 2026-10-05). This scanned for the first free DualSense card,
+             * and with a second DualSense on a cable and not bridged, that is
+             * the other pad's microphone, sent to the PC as this one's. The
+             * card the capture was using is this pad's; if it will not open,
+             * the pad has gone, and the capture stops. */
             mic_cap_log("%s card=%d self-heal: %s errno=%d consec=%d retry=%d, reopening",
-                        node, mic_card, why, read_errno, consec_fail, retry_streak);
+                        node, mic_card, why, read_errno, rec.consec_fail, rec.retry_streak);
             close(fd);
-            fd = open_ds5_alsa_capture(&mic_card, node);
+            fd = mic_card >= 0 ? cardmatch_open_card(mic_card) : -1;
             if (fd < 0) {
-                mic_cap_log("%s self-heal: reopen FAILED, thread stopping", node);
+                mic_cap_log("%s self-heal: reopen of card=%d FAILED, thread stopping", node, mic_card);
                 break;
             }
             if (ioctl(fd, SNDRV_PCM_IOCTL_START, NULL) < 0) {
@@ -1346,13 +1389,11 @@ static void *mic_capture_thread(void *arg)
                             node, errno);
             }
             heals++;
-            consec_fail = 0;
-            retry_streak = 0;
+            mic_recover_ok(&rec);
             mic_cap_log("%s self-healed: reopened card=%d fd=%d", node, mic_card, fd);
             continue;
         }
-        consec_fail = 0;
-        retry_streak = 0;
+        mic_recover_ok(&rec);
         /* HOW MANY FRAMES WE ACTUALLY GOT IS xfer.result, NOT xfer.frames.
          * frames is what we ASKED for and the kernel leaves it alone; result
          * is what it delivered. The device hands over 48-frame periods (see
@@ -3124,15 +3165,27 @@ static void *session_main(void *arg)
     ctl_log(c, "open_hid took %ldms",
             (long)((oh1.tv_sec - oh0.tv_sec) * 1000 +
                    (oh1.tv_nsec - oh0.tv_nsec) / 1000000));
+    /* ⛔ A SESSION THAT CANNOT START SAYS SO (code review, 2026-10-05). These
+     * two exits set only `stop`, which no one outside reads: the app releases
+     * a session when it sees host gone or device gone, so the row stayed
+     * "bridged" over a session that had ended. Device gone is the flag the
+     * app's sweep acts on for a session that cannot use its device; the line
+     * above it in the log says why. */
     if (c->hid_fd < 0) {
-        ctl_log(c, "hid open failed path=%s errno=%d", c->dev.path, errno);
+        ctl_log(c, "hid open failed path=%s errno=%d -- the session cannot start", c->dev.path, errno);
+        pthread_mutex_lock(&c->status_mutex);
+        c->st_device_gone = 1;
+        pthread_mutex_unlock(&c->status_mutex);
         c->stop = 1;
         return NULL;
     }
     /* Composite primary endpoints are resolved in open_composite_siblings()
      * (reliable /sys/class/input path), at run_session start. */
     if (pipe(c->wake_pipe) != 0) {
-        ctl_log(c, "wake pipe failed errno=%d", errno);
+        ctl_log(c, "wake pipe failed errno=%d -- the session cannot start", errno);
+        pthread_mutex_lock(&c->status_mutex);
+        c->st_device_gone = 1;
+        pthread_mutex_unlock(&c->status_mutex);
         c->stop = 1;
         return NULL;
     }

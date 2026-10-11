@@ -151,6 +151,25 @@ static int xpad_apply_event(xpad_state_t *s, unsigned int type, unsigned int cod
     return 0;
 }
 
+/* ⭐ THE D-PAD FROM A FULL READ OF THE DEVICE, after the kernel dropped events
+ * (code review, 2026-10-05). A pad reports its d-pad one way only: as a hat's
+ * two axes, or as four buttons under xpad's dpad_to_buttons, and the way it
+ * does not use reads 0. ⛔ The read applied the hat and then the four buttons,
+ * so on a hat pad the buttons, all up, cleared a d-pad held through the
+ * resync. The other order would clear a button pad's instead, as its hat reads
+ * 0. ➡️ So both go in at once: either one held is held. */
+static uint8_t xpad_dpad_read(int hat_x, int hat_y, int left, int right, int up, int down)
+{
+    uint8_t d = 0;
+    xpad_dpad_axis(&d, XPAD_DPAD_LEFT, XPAD_DPAD_RIGHT, hat_x);
+    xpad_dpad_axis(&d, XPAD_DPAD_UP, XPAD_DPAD_DOWN, hat_y);
+    if (left)  d |= XPAD_DPAD_LEFT;
+    if (right) d |= XPAD_DPAD_RIGHT;
+    if (up)    d |= XPAD_DPAD_UP;
+    if (down)  d |= XPAD_DPAD_DOWN;
+    return d;
+}
+
 /* The hat ordinal the map's hat8.to_dpad_bits reads: 1 up, clockwise to 8. A
  * direction and its opposite together cancel, as on a real pad. */
 static uint8_t xpad_hat_ordinal(uint8_t dpad)

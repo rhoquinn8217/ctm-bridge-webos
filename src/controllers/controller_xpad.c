@@ -168,22 +168,30 @@ static void xpad_read_state(int fd, xpad_state_t *s)
             s->trigger[i] = ai.value;
         }
     }
-    if (ioctl(fd, EVIOCGABS(ABS_HAT0X), &ai) == 0) xpad_apply_event(s, EV_ABS, ABS_HAT0X, ai.value);
-    if (ioctl(fd, EVIOCGABS(ABS_HAT0Y), &ai) == 0) xpad_apply_event(s, EV_ABS, ABS_HAT0Y, ai.value);
+    int hat_x = 0, hat_y = 0;
+    if (ioctl(fd, EVIOCGABS(ABS_HAT0X), &ai) == 0) hat_x = ai.value;
+    if (ioctl(fd, EVIOCGABS(ABS_HAT0Y), &ai) == 0) hat_y = ai.value;
 
     unsigned char keys[(KEY_MAX / 8) + 1];
     memset(keys, 0, sizeof(keys));
     if (ioctl(fd, EVIOCGKEY(sizeof(keys)), keys) >= 0) {
         static const unsigned codes[] = {
             BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START,
-            BTN_THUMBL, BTN_THUMBR, BTN_TRIGGER_HAPPY1, BTN_TRIGGER_HAPPY2,
-            BTN_TRIGGER_HAPPY3, BTN_TRIGGER_HAPPY4,
+            BTN_THUMBL, BTN_THUMBR,
         };
         for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
             const int down = (keys[codes[i] / 8] >> (codes[i] % 8)) & 1;
             xpad_apply_event(s, EV_KEY, codes[i], down);
         }
     }
+    /* The d-pad from the hat and the four d-pad buttons together, so a held
+     * direction survives the read whichever way the pad reports it
+     * (xpad_dpad_read). */
+#define XPAD_KEY_DOWN(code) ((keys[(code) / 8] >> ((code) % 8)) & 1)
+    s->dpad = xpad_dpad_read(hat_x, hat_y,
+                             XPAD_KEY_DOWN(BTN_TRIGGER_HAPPY1), XPAD_KEY_DOWN(BTN_TRIGGER_HAPPY2),
+                             XPAD_KEY_DOWN(BTN_TRIGGER_HAPPY3), XPAD_KEY_DOWN(BTN_TRIGGER_HAPPY4));
+#undef XPAD_KEY_DOWN
 }
 
 static int xpad_open_input(ctm_controller_t *c, const ctm_controller_dev_t *dev,
