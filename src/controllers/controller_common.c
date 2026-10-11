@@ -268,6 +268,11 @@ struct ctm_controller {
      * connection (code review, 2026-10-05): input_link_lost(). Cleared when
      * a connection starts. */
     volatile int link_send_failed;
+    /* The listener has answered this connection's greeting: its HOST_CONFIG
+     * in handshake(), or for a relay type, which does not wait for that, any
+     * first message. session_main's trouble clock stops on it
+     * (link_trouble.inl). Cleared before each connection's session. */
+    volatile int host_answered;
     /* The bridged-and-waiting light: ready_light_tick(). */
     volatile int ready_light_taken;   /* the PC has set the light: stop for good */
     uint64_t ready_light_t0_us;       /* when it started breathing; 0 = not yet */
@@ -2636,6 +2641,8 @@ static int send_keepalive(ctm_controller_t *c)
 /* How long the loop below may sleep: until the keepalive is due, 20 ms at
  * most. It was 1 ms for every device (code review, 2026-10-05). */
 #include "input_wait.inl"
+/* When a link in trouble gives its pad back: link_trouble.inl. */
+#include "link_trouble.inl"
 
 static void *input_thread_main(void *arg)
 {
@@ -2815,11 +2822,15 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
  * ⭐⭐ FIFTEEN SECONDS BECAUSE THE LISTENER USES FIFTEEN. Not a guess -- see the
  * note at the give-up itself in session_main. */
 #define CTM_HOST_GONE_MS 15000
+/* How long a connection waits for the listener to answer its greeting. */
+#define CTM_HOST_ANSWER_US 5000000ull
 
 static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                            queued_report_t *paced_q, int *paced_head, int *paced_count,
                            const ctmb_header_t *h, uint8_t *payload)
 {
+    /* Anything at all from the listener answers the greeting. */
+    c->host_answered = 1;
     if (h->type == CTMB_MSG_OUTPUT_REPORT) {
         /* ⓘ Before anything rewrites it: the PC setting the light ends the
          * ready light (ready_light_note_host). */
@@ -3024,14 +3035,14 @@ static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
             int ready = ctm_transport_wait_readable(&c->xport, 50);
             if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
             if (ready == 0) {
-                if (now_us() - start >= 5000000ull) { ctl_log(c, "host config timeout"); return -1; }
+                if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
                 continue;
             }
         }
         int got = c_recv(c, &h, &payload);
         if (got < 0) { ctl_log(c, "host config receive failed"); return -1; }
         if (got == 0) {
-            if (now_us() - start >= 5000000ull) { ctl_log(c, "host config timeout"); return -1; }
+            if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
             continue;
         }
         if (h.type != CTMB_MSG_HOST_CONFIG || h.payload_len < sizeof(*host_cfg)) {
@@ -3061,6 +3072,9 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     memset(paced_q, 0, sizeof(paced_q));
 
     if (handshake(c, caps, report_desc, report_desc_len, &host_cfg) != 0) return;
+    /* A DualSense's handshake waited for the listener's answer; a relay
+     * type's did not, and its first message counts (handle_message). */
+    if (c->ops->needs_host_config) c->host_answered = 1;
     /* The opening exchange is done: the microphone may speak (code review,
      * 2026-10-05; see ctm_transport_send_when_ready). */
     ctm_transport_set_ready(&c->xport, 1);
@@ -3172,8 +3186,21 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     pthread_mutex_unlock(&c->status_mutex);
 
     int link_alive = 1;
+    /* ⛔ A RELAY TYPE'S GREETING IS NOT WAITED FOR: handshake() returns once
+     * HELLO is out. So a listener that never answered it -- a port that took
+     * the connection with nothing behind it -- held this connection for ever,
+     * the pad "bridged" for the whole stream (code review, 2026-10-05). Every
+     * listener answers HELLO with HOST_CONFIG at once, for every kind, as it
+     * has since the first import: nothing at all for as long as a DualSense's
+     * handshake waits ends the connection, and session_main counts it. */
+    const uint64_t answer_by_us = c->host_answered ? 0 : now_us() + CTM_HOST_ANSWER_US;
     /* ⓘ A failed send ends the connection too: input_link_lost(). */
     while (!c->stop && link_alive && !c->link_send_failed) {
+        if (answer_by_us != 0 && !c->host_answered && now_us() >= answer_by_us) {
+            ctl_log(c, "host never answered the greeting in %llums -- ending this connection",
+                    (unsigned long long)(CTM_HOST_ANSWER_US / 1000u));
+            break;
+        }
         drain_paced(c, paced_q, &paced_head, &paced_count, &next_paced_us, host_cfg.bt_pace_us);
         /* The bridged-and-waiting light: ready_light_tick. */
         ready_light_tick(c);
@@ -3294,7 +3321,11 @@ static void *session_main(void *arg)
     (void)fcntl(c->wake_pipe[0], F_SETFL, fcntl(c->wake_pipe[0], F_GETFL, 0) | O_NONBLOCK);
     (void)fcntl(c->wake_pipe[1], F_SETFL, fcntl(c->wake_pipe[1], F_GETFL, 0) | O_NONBLOCK);
 
+    /* ⭐ The trouble clock: from the first failure of any kind since the
+     * listener last answered a greeting (link_trouble.inl). */
+    link_trouble_t trouble = {0, 0};
     while (!c->stop) {
+        link_trouble_begin(&trouble, now_us());
         /* ⛔⛔ THIS LOOP IS WHERE A SLOW BRIDGE GOES, AND IT LOGGED NOTHING.
          *
          * Measured 2026-08-18: the TV finished its side of a Bluetooth bridge
@@ -3370,10 +3401,10 @@ static void *session_main(void *arg)
              * out the kernel's SYN timeout. Bounded to two seconds in the commit
              * before this one. ⓘ The loop always checked `stop` between
              * attempts; it simply could not while parked inside one. */
-            struct timespec wn;
-            clock_gettime(CLOCK_MONOTONIC, &wn);
-            const long waited_ms = (long)((wn.tv_sec - w0.tv_sec) * 1000 +
-                                          (wn.tv_nsec - w0.tv_nsec) / 1000000);
+            /* ⓘ Timed by the trouble clock, not from this round of connects:
+             * a connect that succeeds into a greeting nobody answers must not
+             * start the count again (link_trouble.inl). */
+            const long waited_ms = link_trouble_ms(&trouble, now_us());
             if (waited_ms >= CTM_HOST_GONE_MS) {
                 ctl_log(c, "host gone: no answer for %ldms over %d attempt(s) -- giving up",
                         waited_ms, attempts);
@@ -3438,10 +3469,33 @@ static void *session_main(void *arg)
             btsig_wake_speaker(c);
         }
 
+        c->host_answered = 0;
         run_session(c, &caps, report_desc, report_desc_len);
         release_evdev_grabs(c);
 
         ctm_transport_disconnect(&c->xport);
+        if (c->host_answered) {
+            link_trouble_clear(&trouble);
+        } else if (!c->stop) {
+            /* ⛔ THE GREETING WAS NOT ANSWERED: the listener took the
+             * connection and turned it down, or said nothing. That is trouble,
+             * as a failed connect is, and the pad goes back to the TV when it
+             * has lasted as long (link_trouble.inl). */
+            ++trouble.unanswered;
+            const long troubled_ms = link_trouble_ms(&trouble, now_us());
+            if (troubled_ms >= CTM_HOST_GONE_MS) {
+                ctl_log(c, "host gone: no greeting answered for %ldms over %d connection(s) -- giving up",
+                        troubled_ms, trouble.unanswered);
+                pthread_mutex_lock(&c->status_mutex);
+                c->st_host_gone = 1;
+                pthread_mutex_unlock(&c->status_mutex);
+                c->stop = 1;
+            } else {
+                /* Not straight back: a listener that turns every greeting down
+                 * would be asked again as fast as it could answer. */
+                for (int slept = 0; slept < 500 && !c->stop; slept += 50) usleep(50000);
+            }
+        }
         if (!c->stop) ctl_log(c, "link lost; retrying probe loop");
     }
     c->stop = 1;

@@ -12,6 +12,7 @@
 #include "agent_reply.inl"
 #include "session_name.inl"
 #include "agent_proof.inl"
+#include "protocol_level.inl"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -511,9 +512,31 @@ int first_scan_index_for_item(const logical_device_t *item)
 static int bridge_start_command(const char *kind, const char *busid, int *port,
                                 char *response, size_t response_len)
 {
+    /* ⭐⭐ WHEN THE TWO CANNOT WORK TOGETHER, REFUSE AND SAY WHICH SIDE TO
+     * UPDATE (rhoquinn8217, 2026-10-08; protocol_level.inl). The refusal is
+     * the caller's, as for any refused bridge: three red flashes. */
+    if (g_agent_compat == PROTOCOL_UNKNOWN) {
+        /* ⓘ Not known yet: a stream's first bridge can come before the first
+         * probe of its listener. Asked once, here. */
+        char status[256];
+        if (send_agent_command("STATUS", status, sizeof(status)) == 0) {
+            g_agent_compat = protocol_compat(status);
+        }
+    }
+    const protocol_compat_t compat = (protocol_compat_t)g_agent_compat;
+    if (compat == PROTOCOL_UPDATE_PC || compat == PROTOCOL_UPDATE_TV) {
+        snprintf(response, response_len, "%s", protocol_advice(compat));
+        return -1;
+    }
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s 0 %s", kind, busid);
+    /* ⓘ "level=" says which protocol this TV speaks. A listener reads the
+     * three words before it and has never looked further. */
+    snprintf(cmd, sizeof(cmd), "BRIDGE_START %s 0 %s level=%d", kind, busid, CTM_PROTOCOL_LEVEL);
     int rc = send_agent_command(cmd, response, response_len);
+    if (rc == -1 && protocol_refused_tv(response)) {
+        g_agent_compat = PROTOCOL_UPDATE_TV;   /* the panel says so until the next probe */
+        return rc;
+    }
     if (rc == 0) {
         const int given = agent_reply_port(response);
         if (given > 0) {
@@ -530,7 +553,8 @@ static int bridge_start_command(const char *kind, const char *busid, int *port,
     }
     if (rc == -1 && strncmp(response, "ERR bad bridge args", 19) == 0) {
         *port = next_bridge_port();
-        snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s", kind, *port, busid);
+        snprintf(cmd, sizeof(cmd), "BRIDGE_START %s %d %s level=%d", kind, *port, busid,
+                 CTM_PROTOCOL_LEVEL);
         rc = send_agent_command(cmd, response, response_len);
     }
     return rc;
