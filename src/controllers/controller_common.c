@@ -4131,6 +4131,10 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     pthread_mutex_unlock(&c->status_mutex);
     out->reports_in = c->st_reports_in;
     out->reports_out = c->st_reports_out;
+    /* ⓘ Advisory as the counters are: set once by the plug and once by the
+     * input thread. */
+    out->pointer = c->ptr.present ? true : false;
+    out->pointer_used = c->ptr_used ? true : false;
 }
 
 /* Free an idle (already plugged-out) controller. When: the device is removed

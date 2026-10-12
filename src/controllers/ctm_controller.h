@@ -270,6 +270,16 @@ typedef struct {
      * session through its own path. ⓘ Unlike a host outage there is nothing
      * to put back when the stream reconnects: the device is not there. */
     bool device_gone;
+
+    /* ⭐ A MOUSE, AND WHETHER IT HAS BEEN USED SINCE ITS BRIDGE (2026-10-11).
+     * `pointer`: the device's report is a Mouse or Pointer collection
+     * (pointer_layout.inl). `pointer_used`: a report of it has said something
+     * since the bridge, as the app is told once through pointer_used_cb.
+     * ⓘ What tells a real mouse from a receiver's mouse part with nothing
+     * behind it, which is a pointer that is never used: the app keeps the
+     * TV's cursor off while a real mouse is bridged. */
+    bool pointer;
+    bool pointer_used;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
