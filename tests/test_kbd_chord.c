@@ -84,6 +84,26 @@ int main(void)
     ok(!kbd_overlay_chord_down(&l, other, sizeof(other)), "not O any more, nor any other letter");
     ok(!kbd_overlay_chord_down(&l, r, 2), "not a report too short for the keys");
 
+    /* The app's other shortcuts, A, M and N (2026-10-11), and S among them. */
+    ok(kbd_shortcut_letter(&l, r, sizeof(r)) == 'S', "the letter: S");
+    uint8_t ka[8] = {0x07, 0, 0x04, 0, 0, 0, 0, 0};
+    ok(kbd_shortcut_letter(&l, ka, sizeof(ka)) == 'A', "the letter: A, the TV cursor's Align bar");
+    uint8_t km[8] = {0x70, 0, 0, 0x10, 0, 0, 0, 0};
+    ok(kbd_shortcut_letter(&l, km, sizeof(km)) == 'M', "the letter: M, with the right-hand modifiers");
+    uint8_t kn[8] = {0x07, 0, 0x11, 0, 0, 0, 0, 0};
+    ok(kbd_shortcut_letter(&l, kn, sizeof(kn)) == 'N', "the letter: N, the host's own cursor");
+    uint8_t kc[8] = {0x07, 0, 0x06, 0, 0, 0, 0, 0};
+    ok(kbd_shortcut_letter(&l, kc, sizeof(kc)) == 'C', "the letter: C, the sharp TV cursor or the regular one");
+    ok(!kbd_overlay_chord_down(&l, kc, sizeof(kc)), "C does not open the overlay");
+    uint8_t c_alone[8] = {0x03, 0, 0x06, 0, 0, 0, 0, 0};   /* Ctrl and Shift, no Alt */
+    ok(kbd_shortcut_letter(&l, c_alone, sizeof(c_alone)) == 0, "not C without Alt");
+    ok(!kbd_overlay_chord_down(&l, ka, sizeof(ka)), "A does not open the overlay");
+    uint8_t a_alone[8] = {0x05, 0, 0x04, 0, 0, 0, 0, 0};   /* Ctrl and Alt, no Shift */
+    ok(kbd_shortcut_letter(&l, a_alone, sizeof(a_alone)) == 0, "not A without Shift");
+    ok(kbd_shortcut_letter(&l, other, sizeof(other)) == 0, "not O, nor any other letter");
+    uint8_t first[8] = {0x07, 0, 0x05, 0x10, 0x04, 0, 0, 0};   /* b, then m, then a */
+    ok(kbd_shortcut_letter(&l, first, sizeof(first)) == 'M', "the first shortcut letter held is the one");
+
     uint8_t rel[8];
     memcpy(rel, r, sizeof(rel));
     kbd_released_report(&l, rel, sizeof(rel));

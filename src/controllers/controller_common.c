@@ -318,17 +318,19 @@ struct ctm_controller {
     /* The report descriptor's top level is a joystick, gamepad or multi-axis
      * controller. Set by open_hid; see grab_skips_gamepads. */
     int is_gamepad;
-    /* ⭐ A bridged keyboard's layout, for the overlay's shortcut
+    /* ⭐ A bridged keyboard's layout, for the app's shortcuts
      * (kbd_chord.inl); kbd.present only for a hidraw keyboard it understands.
-     * kbd_chord_down: the shortcut is held right now. */
+     * kbd_chord_key: the shortcut's letter held right now, 0 for none. */
     kbd_layout_t kbd;
-    int kbd_chord_down;
+    char kbd_chord_key;
     /* ⭐ A bridged mouse's report (pointer_layout.inl); ptr.present only for a
      * Mouse or Pointer collection. handed_back: the TV's overlay holds input,
      * so the keyboard or mouse is ungrabbed and reaches the TV
-     * (handback_sync_hold). */
+     * (handback_sync_hold). ptr_used: its first report saying something has
+     * gone to the host since the bridge, and the app was told. */
     ptr_layout_t ptr;
     int handed_back;
+    int ptr_used;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
      * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
@@ -810,6 +812,21 @@ static overlay_request_cb g_overlay_cb;
 void controller_set_overlay_cb(overlay_request_cb cb)
 {
     g_overlay_cb = cb;
+}
+
+/* Told when a bridged keyboard presses one of the app's other shortcuts, and
+ * when a bridged mouse is first used; see ctm_controller.h. */
+static shortcut_request_cb g_shortcut_cb;
+static pointer_used_cb g_pointer_used_cb;
+
+void controller_set_shortcut_cb(shortcut_request_cb cb)
+{
+    g_shortcut_cb = cb;
+}
+
+void controller_set_pointer_used_cb(pointer_used_cb cb)
+{
+    g_pointer_used_cb = cb;
 }
 
 /* Write a line to the gesture log -- the same file the app's plug-in watcher
@@ -2943,18 +2960,37 @@ static void *input_thread_main(void *arg)
                         continue;
                     }
                 }
+                /* ⭐ The app's other shortcuts, A, C, M and N, are found the same
+                 * way (kbd_chord.inl) and handed to the app, and their report
+                 * goes to the host with nothing pressed as well. */
                 if (c->kbd.present) {
-                    if (kbd_overlay_chord_down(&c->kbd, buf, (size_t)n)) {
-                        if (!c->kbd_chord_down) {
-                            c->kbd_chord_down = 1;
-                            ctl_log(c, "keyboard: overlay shortcut pressed%s",
-                                    g_overlay_cb ? "" : " (no app to tell)");
-                            if (g_overlay_cb) g_overlay_cb();
+                    const char key = kbd_shortcut_letter(&c->kbd, buf, (size_t)n);
+                    if (key != 0) {
+                        if (key != c->kbd_chord_key) {
+                            c->kbd_chord_key = key;
+                            if (key == 'S') {
+                                ctl_log(c, "keyboard: overlay shortcut pressed%s",
+                                        g_overlay_cb ? "" : " (no app to tell)");
+                                if (g_overlay_cb) g_overlay_cb();
+                            } else {
+                                ctl_log(c, "keyboard: shortcut Ctrl+Alt+Shift+%c pressed%s", key,
+                                        g_shortcut_cb ? "" : " (no app to tell)");
+                                if (g_shortcut_cb) g_shortcut_cb(key);
+                            }
                         }
                         kbd_released_report(&c->kbd, buf, (size_t)n);
                     } else {
-                        c->kbd_chord_down = 0;
+                        c->kbd_chord_key = 0;
                     }
+                }
+                /* ⭐ A bridged mouse's first report that says something, on its
+                 * way to the host: the app asks then whether to turn the TV's
+                 * cursor off (ptr_report_active, pointer_layout.inl). */
+                if (c->ptr.present && !c->ptr_used && ptr_report_active(&c->ptr, buf, (size_t)n)) {
+                    c->ptr_used = 1;
+                    ctl_log(c, "mouse: first used since the bridge%s",
+                            g_pointer_used_cb ? "" : " (no app to tell)");
+                    if (g_pointer_used_cb) g_pointer_used_cb();
                 }
                 /* ⭐⭐ LOOK FIRST WHEN INPUT IS HELD, because the copy the host
                  * gets is about to be blanked and the chord lives in the real
@@ -3678,9 +3714,11 @@ static void *session_main(void *arg)
             grab_matching_evdev(c);
         }
         /* ⓘ A fresh grab means the host has the keyboard or mouse again,
-         * whatever the last session left. */
+         * whatever the last session left, and a mouse's first use is this
+         * bridge's to tell. */
         c->handed_back = 0;
-        c->kbd_chord_down = 0;
+        c->kbd_chord_key = 0;
+        c->ptr_used = 0;
         if (c->ops->on_plug_init) c->ops->on_plug_init(c, &c->xport);
 
         /* ⭐⭐ WAKE THE BLUETOOTH SPEAKER HERE -- BEFORE THE SESSION, NOT BESIDE
@@ -4093,6 +4131,10 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     pthread_mutex_unlock(&c->status_mutex);
     out->reports_in = c->st_reports_in;
     out->reports_out = c->st_reports_out;
+    /* ⓘ Advisory as the counters are: set once by the plug and once by the
+     * input thread. */
+    out->pointer = c->ptr.present ? true : false;
+    out->pointer_used = c->ptr_used ? true : false;
 }
 
 /* Free an idle (already plugged-out) controller. When: the device is removed

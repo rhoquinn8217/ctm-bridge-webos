@@ -208,6 +208,25 @@ int main(void)
     ptr_layout_from_descriptor(k_keyboard, sizeof(k_keyboard), &l);
     ok(ptr_released_report(&l, r, sizeof(r)) == 0, "none for a device that is not a mouse");
 
+    printf("\nwhich reports say the mouse is being used (2026-10-11)\n");
+    ptr_layout_from_descriptor(k_boot_mouse, sizeof(k_boot_mouse), &l);
+    const uint8_t rest[3] = {0, 0, 0}, moved[3] = {0, 1, 0}, pressed[3] = {1, 0, 0};
+    ok(!ptr_report_active(&l, rest, sizeof(rest)), "a mouse at rest: no");
+    ok(ptr_report_active(&l, moved, sizeof(moved)), "a mouse that moved: yes");
+    ok(ptr_report_active(&l, pressed, sizeof(pressed)), "a mouse with a button down: yes");
+    ptr_layout_from_descriptor(k_wheel_mouse, sizeof(k_wheel_mouse), &l);
+    const uint8_t idle2[8] = {2, 0, 0, 0, 0, 0, 0, 0}, wheel2[8] = {2, 0, 0, 0, 0, 0, 1, 0};
+    const uint8_t media1[3] = {1, 0xe9, 0};
+    ok(!ptr_report_active(&l, idle2, sizeof(idle2)), "report 2 with nothing in it: no");
+    ok(ptr_report_active(&l, wheel2, sizeof(wheel2)), "report 2 with the wheel turned: yes");
+    ok(!ptr_report_active(&l, media1, sizeof(media1)), "a media key in report 1 is not the mouse's");
+    ptr_layout_from_descriptor(k_combo, sizeof(k_combo), &l);
+    const uint8_t typed[9] = {1, 0x07, 0, 0x16, 0, 0, 0, 0, 0}, nudged[4] = {2, 0, 0xff, 0};
+    ok(!ptr_report_active(&l, typed, sizeof(typed)), "a keyboard and a mouse on one interface: a key is not the mouse");
+    ok(ptr_report_active(&l, nudged, sizeof(nudged)), "  and the mouse's report 2, moved, is");
+    ptr_layout_from_descriptor(k_keyboard, sizeof(k_keyboard), &l);
+    ok(!ptr_report_active(&l, moved, sizeof(moved)), "never for a device that is not a mouse");
+
     printf("\nwhere the pump uses it\n");
     char *common = load("src/controllers/controller_common.c");
     ok(common != NULL, "the pump's code can be read");
@@ -238,10 +257,15 @@ int main(void)
     const char *send = thread ? strstr(thread, "c->primary_in_ep, to_host, (size_t)n)") : NULL;
     ok(gate && drop && note && send && drop < note && drop < send,
        "while the TV has it, a mouse's reports are dropped before anything else reads them");
+    const char *used = thread ? strstr(thread, "ptr_report_active(&c->ptr, buf, (size_t)n)") : NULL;
+    ok(drop && used && send && drop < used && used < send,
+       "a mouse's first use is told from what goes to the host, not what the TV had");
     char *session = between(common, "static void *session_main(void *arg)", "\n}");
     const char *grab = session ? strstr(session, "grab_matching_evdev(c);") : NULL;
     const char *reset = grab ? strstr(grab, "c->handed_back = 0;") : NULL;
     ok(grab && reset, "a fresh grab gives the PC the keyboard or mouse again");
+    const char *fresh = grab ? strstr(grab, "c->ptr_used = 0;") : NULL;
+    ok(fresh != NULL, "  and each bridge tells a mouse's first use again");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

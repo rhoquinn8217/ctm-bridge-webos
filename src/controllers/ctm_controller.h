@@ -270,6 +270,16 @@ typedef struct {
      * session through its own path. ⓘ Unlike a host outage there is nothing
      * to put back when the stream reconnects: the device is not there. */
     bool device_gone;
+
+    /* ⭐ A MOUSE, AND WHETHER IT HAS BEEN USED SINCE ITS BRIDGE (2026-10-11).
+     * `pointer`: the device's report is a Mouse or Pointer collection
+     * (pointer_layout.inl). `pointer_used`: a report of it has said something
+     * since the bridge, as the app is told once through pointer_used_cb.
+     * ⓘ What tells a real mouse from a receiver's mouse part with nothing
+     * behind it, which is a pointer that is never used: the app keeps the
+     * TV's cursor off while a real mouse is bridged. */
+    bool pointer;
+    bool pointer_used;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
@@ -583,6 +593,18 @@ void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
  * input thread, so the app hands the work to its main thread. */
 typedef void (*overlay_request_cb)(void);
 void controller_set_overlay_cb(overlay_request_cb cb);
+
+/* ⭐ Told when a bridged keyboard presses one of the app's other shortcuts,
+ * Ctrl+Alt+Shift and 'A', 'C', 'M' or 'N' (kbd_chord.inl says what each is for).
+ * When: the keyboard's input thread, so the app hands the work on. */
+typedef void (*shortcut_request_cb)(char letter);
+void controller_set_shortcut_cb(shortcut_request_cb cb);
+
+/* ⭐ Told the first time a bridged mouse is used after it is bridged: its own
+ * report with a button, a move or the wheel in it (ptr_report_active), on its
+ * way to the host. Once a bridge. When: the mouse's input thread. */
+typedef void (*pointer_used_cb)(void);
+void controller_set_pointer_used_cb(pointer_used_cb cb);
 
 /* Scratch value owned by the controller's TYPE, one per controller. When: a
  * type needs to remember something between reports -- gesture timing, say.

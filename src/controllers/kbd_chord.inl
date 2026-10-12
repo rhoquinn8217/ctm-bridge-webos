@@ -1,11 +1,23 @@
-/* The streaming overlay's keyboard shortcut, Ctrl+Alt+Shift+S, found in a
+/* The app's keyboard shortcuts, Ctrl+Alt+Shift and a letter, found in a
  * bridged keyboard's own reports.
  *
- * ⓘ S, and only S, since 2026-10-01. It is Moonlight's stats shortcut,
- * which has always opened the overlay in the app. O was added beside it on
- * 2026-09-13 in the belief that there was none, and was the one found here
- * until rhoquinn8217 took it out again: "I added O because I thought we
- * didn't have one. We can remove it."
+ * ⓘ S is the streaming overlay's: Moonlight's stats shortcut, which has always
+ * opened the overlay in the app. O was added beside it on 2026-09-13 in the
+ * belief that there was none, and was found here until rhoquinn8217 took it
+ * out again: "I added O because I thought we didn't have one. We can remove
+ * it."
+ *
+ * ⭐ A, M AND N SINCE 2026-10-11, asked whether they should work on a bridged
+ * keyboard as S does: "yes". A opens the bar that aligns the TV's cursor, M
+ * switches the TV's cursor on or off (Moonlight's mouse-mode shortcut), and N
+ * is the host's own: Apollo and Sunshine show or hide the PC's cursor in the
+ * stream on Ctrl+Alt+Shift+N, but only from the stream's keyboard, so a
+ * bridged keyboard's N is handed to the app to send that way.
+ *
+ * ⭐ AND C SINCE 2026-10-12 (rhoquinn8217: "I want a chord that toggles
+ * between my small sharp tv cursor and the regular cursor", and of C: "yes"):
+ * Moonlight's show-the-mouse shortcut, which switches the TV's cursor between
+ * the drop the app draws and webOS's own pointer.
  *
  * ⭐ WHY IT IS HERE AND NOT IN THE APP (rhoquinn8217, 2026-09-13): the shortcut
  * works bridged or not. A keyboard the TV reads reaches Aurora's own shortcut
@@ -40,6 +52,10 @@ typedef struct {
 } kbd_layout_t;
 
 #define KBD_USAGE_S 0x16   /* keyboard usage page: "s" and "S" */
+#define KBD_USAGE_A 0x04   /* "a" */
+#define KBD_USAGE_M 0x10   /* "m" */
+#define KBD_USAGE_N 0x11   /* "n" */
+#define KBD_USAGE_C 0x06   /* "c" */
 
 /* Where the keyboard's modifier bits and key array are, from its report
  * descriptor. Returns true and fills `out` when both were found in one report.
@@ -159,6 +175,30 @@ static inline bool kbd_overlay_chord_down(const kbd_layout_t *l, const uint8_t *
         if (r[l->keys_offset + k] == KBD_USAGE_S) return true;
     }
     return false;
+}
+
+/* Which of the app's shortcuts is down in this report: S, A, C, M or N with Ctrl,
+ * Alt and Shift (either side of each), as the letter, or 0 for none. The first
+ * of them in the key array is the one. ⓘ 0 for a report of another id or too
+ * short to hold the fields. */
+static inline char kbd_shortcut_letter(const kbd_layout_t *l, const uint8_t *r, size_t n)
+{
+    if (l == NULL || !l->present || r == NULL) return 0;
+    if (l->report_id != 0 && (n < 1 || r[0] != l->report_id)) return 0;
+    if (n < (size_t)l->keys_offset + l->keys_count || n <= l->mod_offset) return 0;
+    const uint8_t mods = r[l->mod_offset];
+    if (!((mods & 0x11) != 0 && (mods & 0x22) != 0 && (mods & 0x44) != 0)) return 0;
+    for (uint8_t k = 0; k < l->keys_count; ++k) {
+        switch (r[l->keys_offset + k]) {
+            case KBD_USAGE_S: return 'S';
+            case KBD_USAGE_A: return 'A';
+            case KBD_USAGE_M: return 'M';
+            case KBD_USAGE_N: return 'N';
+            case KBD_USAGE_C: return 'C';
+            default: break;
+        }
+    }
+    return 0;
 }
 
 /* The same report with nothing pressed: every byte after the id cleared. Sent
