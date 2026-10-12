@@ -14,6 +14,11 @@
  * stream on Ctrl+Alt+Shift+N, but only from the stream's keyboard, so a
  * bridged keyboard's N is handed to the app to send that way.
  *
+ * ⭐ AND C SINCE 2026-10-12 (rhoquinn8217: "I want a chord that toggles
+ * between my small sharp tv cursor and the regular cursor", and of C: "yes"):
+ * Moonlight's show-the-mouse shortcut, which switches the TV's cursor between
+ * the drop the app draws and webOS's own pointer.
+ *
  * ⭐ WHY IT IS HERE AND NOT IN THE APP (rhoquinn8217, 2026-09-13): the shortcut
  * works bridged or not. A keyboard the TV reads reaches Aurora's own shortcut
  * handling; a BRIDGED keyboard is grabbed, so its keys never reach Aurora at
@@ -50,6 +55,7 @@ typedef struct {
 #define KBD_USAGE_A 0x04   /* "a" */
 #define KBD_USAGE_M 0x10   /* "m" */
 #define KBD_USAGE_N 0x11   /* "n" */
+#define KBD_USAGE_C 0x06   /* "c" */
 
 /* Where the keyboard's modifier bits and key array are, from its report
  * descriptor. Returns true and fills `out` when both were found in one report.
@@ -171,7 +177,7 @@ static inline bool kbd_overlay_chord_down(const kbd_layout_t *l, const uint8_t *
     return false;
 }
 
-/* Which of the app's shortcuts is down in this report: S, A, M or N with Ctrl,
+/* Which of the app's shortcuts is down in this report: S, A, C, M or N with Ctrl,
  * Alt and Shift (either side of each), as the letter, or 0 for none. The first
  * of them in the key array is the one. ⓘ 0 for a report of another id or too
  * short to hold the fields. */
@@ -188,6 +194,7 @@ static inline char kbd_shortcut_letter(const kbd_layout_t *l, const uint8_t *r, 
             case KBD_USAGE_A: return 'A';
             case KBD_USAGE_M: return 'M';
             case KBD_USAGE_N: return 'N';
+            case KBD_USAGE_C: return 'C';
             default: break;
         }
     }

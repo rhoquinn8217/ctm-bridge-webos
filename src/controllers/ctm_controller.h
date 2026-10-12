@@ -595,7 +595,7 @@ typedef void (*overlay_request_cb)(void);
 void controller_set_overlay_cb(overlay_request_cb cb);
 
 /* ⭐ Told when a bridged keyboard presses one of the app's other shortcuts,
- * Ctrl+Alt+Shift and 'A', 'M' or 'N' (kbd_chord.inl says what each is for).
+ * Ctrl+Alt+Shift and 'A', 'C', 'M' or 'N' (kbd_chord.inl says what each is for).
  * When: the keyboard's input thread, so the app hands the work on. */
 typedef void (*shortcut_request_cb)(char letter);
 void controller_set_shortcut_cb(shortcut_request_cb cb);

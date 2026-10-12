@@ -2960,7 +2960,7 @@ static void *input_thread_main(void *arg)
                         continue;
                     }
                 }
-                /* ⭐ The app's other shortcuts, A, M and N, are found the same
+                /* ⭐ The app's other shortcuts, A, C, M and N, are found the same
                  * way (kbd_chord.inl) and handed to the app, and their report
                  * goes to the host with nothing pressed as well. */
                 if (c->kbd.present) {
