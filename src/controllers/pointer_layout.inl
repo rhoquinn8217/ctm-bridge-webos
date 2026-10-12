@@ -158,4 +158,25 @@ static inline size_t ptr_released_report(const ptr_layout_t *l, uint8_t *r, size
     return l->report_len;
 }
 
+/* ⭐ Is this the mouse's own report, saying something: a button down, a move or
+ * the wheel? So the app hears when a bridged mouse is first USED, which is
+ * when it asks to turn the TV's cursor off (rhoquinn8217, 2026-10-11).
+ * ⓘ Not when it is bridged: a keyboard's receiver can have a mouse part with
+ * no mouse behind it (the RONGYUAN's has), which sends no mouse report at
+ * all, and a mouse at rest sends nothing or zeros. A report of another id on
+ * the same interface, a media key say, is not the mouse's. */
+static inline bool ptr_report_active(const ptr_layout_t *l, const uint8_t *r, size_t n)
+{
+    if (l == NULL || r == NULL || !l->present || n == 0) return false;
+    size_t lead = 0;
+    if (l->report_id != 0) {
+        if (r[0] != l->report_id) return false;
+        lead = 1;
+    }
+    for (size_t i = lead; i < n; ++i) {
+        if (r[i] != 0) return true;
+    }
+    return false;
+}
+
 #endif /* POINTER_LAYOUT_INL */
