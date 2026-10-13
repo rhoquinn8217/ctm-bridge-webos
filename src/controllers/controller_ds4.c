@@ -14,6 +14,7 @@
 
 #include "ctm_controller.h"
 #include "switch_hold.inl"
+#include "held_stick.inl"   /* the overlay's volume */
 #include "ds4_report.inl"
 #include "signal_shape.inl"
 
@@ -311,6 +312,7 @@ const ctm_controller_ops_t ctm_controller_ds4_ops = {
     /* The chord and the overlay blanking, at the Bluetooth report's offsets. */
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
+    .read_right_stick = held_stick_ds4,
     .patch_output = ds4_patch_output,
     /* ⭐ T-229: the volumes and the route are SENT on a change, because
      * patch_output alone only reaches a pad the host is already talking to. */
@@ -893,6 +895,7 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .read_pad_mac = ds4_usb_read_pad_mac,
     .on_input_report = ds4_on_input_report,
     .blank_input = ds4_blank_input,
+    .read_right_stick = held_stick_ds4,
     .patch_output = ds4_usb_patch_output,
     .signal_connected = ds4_signal_connected,
     .signal_unplugging = ds4_signal_unplugging,

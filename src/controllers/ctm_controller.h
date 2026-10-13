@@ -147,6 +147,14 @@ typedef struct {
      * layout; a report nothing places is relayed unchanged. */
     void (*blank_input)(uint8_t *data, size_t len);
 
+    /* ⭐ The right stick's Y (-32768 up to 32767 down) and its click, read from
+     * this pad's own report while the TV's overlay holds input, for the
+     * overlay's volume (held_stick.inl). Returns false for a report that is
+     * not the pad's input report. NULL => a pad the TV cannot read them from,
+     * a generic HID gamepad, which still works unbridged. When: the input
+     * thread, before the blank. Must not block. */
+    bool (*read_right_stick)(const uint8_t *data, size_t len, int *y, bool *click);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -280,6 +288,13 @@ typedef struct {
      * TV's cursor off while a real mouse is bridged. */
     bool pointer;
     bool pointer_used;
+    /* ⭐ The right stick while the TV's overlay holds input, for the overlay's
+     * volume (held_stick.inl): its Y, -32768 up to 32767 down, and its click.
+     * `held_stick` false: the pad has not reported since the overlay opened,
+     * the overlay is closed, or the TV cannot read a stick from its report. */
+    bool held_stick;
+    int held_stick_y;
+    bool held_stick_click;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
