@@ -14,6 +14,7 @@
 
 #include "ctm_controller.h"
 #include "switch_hold.inl"
+#include "held_stick.inl"   /* the overlay's volume */
 #include "device_identity.inl"
 #include "xpad_report.inl"
 
@@ -422,6 +423,7 @@ const ctm_controller_ops_t controller_xpad_ops = {
     .signal_connected = xpad_signal_connected,
     .signal_unplugging = xpad_signal_unplugging,
     .blank_input = xpad_blank_report,
+    .read_right_stick = held_stick_xbox,
     .preflight = xpad_preflight,
     .open_input = xpad_open_input,
     .read_input = xpad_read_input,

@@ -6,6 +6,7 @@
 
 #include "ctm_controller.h"
 #include "switch_hold.inl"
+#include "held_stick.inl"   /* the overlay's volume */
 #include "ds5_light.inl"
 
 /* ⚠️ snprintf needs this, and the file went without it for weeks -- it was
@@ -589,6 +590,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
+    .read_right_stick = held_stick_ds5,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
     .ready_light = ds5_ready_light,
@@ -614,6 +616,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .on_plug_init = ds5_on_plug_init,
     .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
+    .read_right_stick = held_stick_ds5,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
     .ready_light = ds5_ready_light,

@@ -331,6 +331,11 @@ struct ctm_controller {
     ptr_layout_t ptr;
     int handed_back;
     int ptr_used;
+    /* ⭐ The right stick's Y and its click while the overlay holds input, and
+     * the hold they were read in (held_stick_note, held_stick.inl). */
+    volatile int held_stick_y;
+    volatile int held_stick_click;
+    volatile unsigned held_stick_gen;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
      * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
@@ -879,10 +884,15 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c)
  * ctm_input_set_held. ⓘ Read once per report in the relay path, so it is a
  * plain int rather than anything that could block. */
 static volatile int g_input_held;
+/* ⓘ Counts the holds, so a pad's right stick read during an earlier one is not
+ * taken for this one's (held_stick_note). */
+static volatile unsigned g_input_hold_gen;
 
 void ctm_input_set_held(int held)
 {
-    g_input_held = held ? 1 : 0;
+    const int now_held = held ? 1 : 0;
+    if (now_held && !g_input_held) g_input_hold_gen++;
+    g_input_held = now_held;
 }
 
 /* ⭐ Which signals are allowed, and whether the microphone is captured. Read
@@ -950,6 +960,21 @@ static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 static int ctm_input_is_held(void)
 {
     return g_input_held;
+}
+
+/* ⭐ A bridged pad's right stick and its click while the overlay holds input,
+ * kept with the hold they were read in; ctm_controller_get_status hands them
+ * out only for the hold in force. When: the input thread, on each report while
+ * input is held. ⓘ Plain ints, read by the app's thread as advisory as the
+ * status counters are. */
+static void held_stick_note(ctm_controller_t *c, const uint8_t *buf, size_t n)
+{
+    int y = 0;
+    bool click = false;
+    if (!c->ops->read_right_stick(buf, n, &y, &click)) return;
+    c->held_stick_y = y;
+    c->held_stick_click = click ? 1 : 0;
+    c->held_stick_gen = g_input_hold_gen;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -3006,6 +3031,11 @@ static void *input_thread_main(void *arg)
                 if (held && c->ops && c->ops->on_input_report) {
                     c->ops->on_input_report(c, buf, (size_t)n);
                 }
+                /* ⭐ The overlay's volume: the right stick and its click, read
+                 * from the real report before the blank (held_stick.inl). */
+                if (held && c->ops && c->ops->read_right_stick) {
+                    held_stick_note(c, buf, (size_t)n);
+                }
                 /* ⭐ A still pad's state is kept as the pad sent it, before a
                  * hold blanks it, so what is sent again after the overlay
                  * closes is what the pad still holds. */
@@ -4135,6 +4165,12 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
      * input thread. */
     out->pointer = c->ptr.present ? true : false;
     out->pointer_used = c->ptr_used ? true : false;
+    /* ⓘ Only what was read in the hold in force (held_stick_note). */
+    if (ctm_input_is_held() && c->held_stick_gen == g_input_hold_gen) {
+        out->held_stick = true;
+        out->held_stick_y = c->held_stick_y;
+        out->held_stick_click = c->held_stick_click ? true : false;
+    }
 }
 
 /* Free an idle (already plugged-out) controller. When: the device is removed
