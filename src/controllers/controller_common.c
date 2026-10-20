@@ -336,6 +336,10 @@ struct ctm_controller {
     volatile int held_stick_y;
     volatile int held_stick_click;
     volatile unsigned held_stick_gen;
+    /* ⭐ The touchpad while the overlay holds input, one word so it is read
+     * whole, and the hold it was read in (held_touch_note, held_touch.inl). */
+    volatile uint32_t held_touch_word;
+    volatile unsigned held_touch_gen;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
      * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
@@ -975,6 +979,16 @@ static void held_stick_note(ctm_controller_t *c, const uint8_t *buf, size_t n)
     c->held_stick_y = y;
     c->held_stick_click = click ? 1 : 0;
     c->held_stick_gen = g_input_hold_gen;
+}
+
+/* ⭐ A bridged pad's touchpad while the overlay holds input, for the TV's
+ * pointer, as the right stick is above: kept with the hold it was read in. */
+static void held_touch_note(ctm_controller_t *c, const uint8_t *buf, size_t n)
+{
+    uint32_t word = 0;
+    if (!c->ops->read_touch(buf, n, &word)) return;
+    c->held_touch_word = word;
+    c->held_touch_gen = g_input_hold_gen;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -3036,6 +3050,11 @@ static void *input_thread_main(void *arg)
                 if (held && c->ops && c->ops->read_right_stick) {
                     held_stick_note(c, buf, (size_t)n);
                 }
+                /* ⭐ The TV's pointer: where the finger is, read from the real
+                 * report before the blank (held_touch.inl). */
+                if (held && c->ops && c->ops->read_touch) {
+                    held_touch_note(c, buf, (size_t)n);
+                }
                 /* ⭐ A still pad's state is kept as the pad sent it, before a
                  * hold blanks it, so what is sent again after the overlay
                  * closes is what the pad still holds. */
@@ -4170,6 +4189,10 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
         out->held_stick = true;
         out->held_stick_y = c->held_stick_y;
         out->held_stick_click = c->held_stick_click ? true : false;
+    }
+    if (ctm_input_is_held() && c->held_touch_gen == g_input_hold_gen) {
+        out->held_touch = true;
+        out->held_touch_word = c->held_touch_word;
     }
 }
 

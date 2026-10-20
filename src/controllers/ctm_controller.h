@@ -155,6 +155,14 @@ typedef struct {
      * thread, before the blank. Must not block. */
     bool (*read_right_stick)(const uint8_t *data, size_t len, int *y, bool *click);
 
+    /* ⭐ The touchpad, read from this pad's own report while the TV's overlay
+     * holds input, for the TV's pointer (held_touch.inl): one packed word,
+     * where the finger is, its contact count, how many fingers, the click.
+     * Returns false for a report it does not read. NULL => a pad whose touch
+     * bytes are not measured, which still works unbridged. When: the input
+     * thread, before the blank. Must not block. */
+    bool (*read_touch)(const uint8_t *data, size_t len, uint32_t *word);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -295,6 +303,12 @@ typedef struct {
     bool held_stick;
     int held_stick_y;
     bool held_stick_click;
+    /* ⭐ The touchpad while the TV's overlay holds input, for the TV's pointer
+     * (held_touch.inl): one word, read with HELD_TOUCH_X, _Y, _ID, _FINGERS
+     * and _CLICK. `held_touch` false: the pad has not reported since the
+     * overlay opened, the overlay is closed, or its touch is not read. */
+    bool held_touch;
+    uint32_t held_touch_word;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------
