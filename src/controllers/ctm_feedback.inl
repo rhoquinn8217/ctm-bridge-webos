@@ -218,7 +218,6 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
                           btsig_pattern_t pattern)
 {
     if (!c) return;
-    if (!CTM_SIGNALS_ENABLED) return;
     /* ⛔ THE BUS SAYS BLUETOOTH, NOT A MISSING SPEAKER (code review,
      * 2026-10-05). This read "no audio device, so Bluetooth", and a cabled pad
      * whose sound card could not be opened was sent the whole Bluetooth signal,

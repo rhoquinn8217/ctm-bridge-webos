@@ -933,8 +933,8 @@ void ctm_mic_capture_set_enabled(int on)
 
 static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
-int signals_rumble_on(void) { return CTM_SIGNALS_ENABLED && g_sig_rumble; }
-int signals_light_on(void)  { return CTM_SIGNALS_ENABLED && g_sig_light; }
+int signals_rumble_on(void) { return g_sig_rumble; }
+int signals_light_on(void)  { return g_sig_light; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)

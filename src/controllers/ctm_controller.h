@@ -347,21 +347,18 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
 extern volatile bool ctm_unplug_quietly;
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
-/* CONFIRMATION SIGNALS -- ALL OR NOTHING.
+/* CONFIRMATION SIGNALS, AND THEIR SWITCHES. The tone, the felt pulse and the
+ * lightbar each have the user's own switch (Settings > USB Bridge), on every
+ * transport, and the app's own fallback follows the same three.
  *
- * One switch for every signal on every transport: the tone, the felt pulse,
- * the lightbar patterns, and the SDL fallback. Not a tone switch and a
- * transport rule -- one concept.
- *
- * ⭐ AND IT COVERS THE FAILURE SIGNALS TOO, deliberately. rhoquinn8217, 2026-08-12:
+ * ⭐ THEY COVER THE FAILURE SIGNALS TOO, deliberately. rhoquinn8217, 2026-08-12:
  * "if you are not using the confirmation signals, you are putting on a
  * blindfold and getting angry that you are blindfolded when things go wrong."
  * A switch that silences success but keeps failure sounds thoughtful and is
  * really just a second thing to reason about.
  *
- * It becomes a real setting when the status page exists -- deliberately no
- * button for it yet. */
-#define CTM_SIGNALS_ENABLED 1
+ * ⓘ A master switch over all three sat here as a constant 1 until 2026-10-23,
+ * waiting for a status page; the three switches off are the same thing. */
 
 /* ⓘ T-120 REBUILT THE BLUETOOTH PATH ONE LAYER AT A TIME, behind switches: the
  * core's Bluetooth confirmation signal (BT_LAYER_CORE_SIGNAL) and what the
@@ -517,7 +514,7 @@ int signals_rumble_on(void);
  * from the branch in controller_common.c the first time a type gains a signal. */
 int ctm_controller_will_signal_connect(const ctm_controller_dev_t *dev);
 /* Is the light allowed right now? The same, for a type that paints a lightbar
- * of its own. ⓘ Like the pulse's, it answers no when CTM_SIGNALS_ENABLED is off. */
+ * of its own. ⓘ Like the pulse's, it follows the user's switch. */
 int signals_light_on(void);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for
