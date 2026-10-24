@@ -1595,7 +1595,11 @@ static void *mic_capture_thread(void *arg)
         }
 
         time_t now = time(NULL);
-        if (now != last_report) {
+        /* Once a minute (2026-10-23): once a second, this one line grew
+         * mic_capture.log by about half a megabyte an hour of play, and the
+         * microphone is on by default. The counts are totals, so a minute's
+         * line loses nothing; the peaks are the minute's. */
+        if (now - last_report >= 60) {
             last_report = now;
             mic_cap_log("%s card=%d reads_ok=%llu failed=%llu frames=%llu sent=%llu send_failed=%llu peak_ch0=%d peak_ch1=%d",
                         node, mic_card,
