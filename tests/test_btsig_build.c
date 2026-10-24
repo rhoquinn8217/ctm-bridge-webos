@@ -10,7 +10,7 @@
  * bytes in, bytes out. If a test below fails, a light or a sound is already
  * broken and nobody has had to notice it by eye.
  *
- * ➡️ Build and run:  cc -I ../src/controllers tests/test_btsig_build.c && ./a.out
+ * ➡️ Build and run:  cc tests/test_btsig_build.c -lm && ./a.out
  *    Or:             ./tests/run-tests.sh
  */
 
@@ -19,66 +19,21 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* ── just enough of the world for the builder to compile ──────────────────
+/* ── the builder itself ─────────────────────────────────────────────────
  *
- * ⓘ The builder is included from the real file rather than copied, so a change
- * there is seen here. Only the pieces it touches are stubbed. */
+ * ⓘ Included from the real files, so a change there is seen here. Until
+ * 2026-10-23 this was a hand copy of the builder's first 50 bytes, and the
+ * timing, audio and haptic blocks and the checksum went untested. */
+#include "../src/controllers/bt_sign.inl"
+#include "../src/controllers/ctm_bt_signal_data.inl"
+#include "../src/controllers/btsig_build.inl"
 
+/* The patterns, numbered as ctm_bt_signal.inl numbers them. */
 typedef enum {
     BTSIG_HANDING_OVER,
     BTSIG_HANDED_BACK,
     BTSIG_REFUSED
 } btsig_pattern_t;
-
-#define BTSIG_REPORT_ID    0x36
-#define BTSIG_REPORT_LEN   398
-#define BTSIG_STATE_AT     2
-#define BTSIG_STATE_LEN    63
-#define BTSIG_S_FLAGS1     (BTSIG_STATE_AT + 2 + 0)
-#define BTSIG_S_FLAGS2     (BTSIG_STATE_AT + 2 + 1)
-#define BTSIG_S_SPK_VOL    (BTSIG_STATE_AT + 2 + 5)
-#define BTSIG_S_AUDIO_CTL  (BTSIG_STATE_AT + 2 + 7)
-#define BTSIG_S_LED_R      (BTSIG_STATE_AT + 2 + 44)
-#define BTSIG_F1_AUDIO     0xa0
-#define BTSIG_F2_LED       0x04
-#define BTSIG_SPK_VOL      0x64
-#define BTSIG_AUDIO_CTL    0x3c
-
-typedef struct {
-    const uint8_t *audio;
-    int            seq;
-    int            haptics;
-    int            haptic_n;
-    int            claim_led;
-    int            configure;
-    uint8_t        r, g, b;
-} btsig_frame_t;
-
-/* The builder under test, kept in step with the real one by hand.
- *
- * ⚠️ A COPY, NOT AN INCLUDE, and that is a real weakness: the file it mirrors
- * pulls in Opus tables, logging and a controller type, none of which belong in
- * a test. ➡️ The mitigation is the LAST test in this file, which reads the real
- * source and fails if the line it mirrors has changed. */
-static void btsig_build(uint8_t *out, const btsig_frame_t *f)
-{
-    memset(out, 0, BTSIG_REPORT_LEN);
-    out[0] = BTSIG_REPORT_ID;
-    out[1] = (uint8_t)((f->seq << 4) & 0xf0);
-    out[BTSIG_STATE_AT]     = 0x90;
-    out[BTSIG_STATE_AT + 1] = BTSIG_STATE_LEN;
-    out[BTSIG_S_FLAGS1]     = f->configure ? BTSIG_F1_AUDIO : 0x00;
-    out[BTSIG_S_FLAGS2]     = f->claim_led ? BTSIG_F2_LED : 0x00;
-    if (f->configure) {
-        out[BTSIG_S_SPK_VOL]   = BTSIG_SPK_VOL;
-        out[BTSIG_S_AUDIO_CTL] = BTSIG_AUDIO_CTL;
-    }
-    if (f->claim_led) {
-        out[BTSIG_S_LED_R + 0] = f->r;
-        out[BTSIG_S_LED_R + 1] = f->g;
-        out[BTSIG_S_LED_R + 2] = f->b;
-    }
-}
 
 /* ── harness ─────────────────────────────────────────────────────────── */
 
@@ -178,42 +133,135 @@ static void test_report_shape(void)
     ok(rep[1] == 0x50, "the sequence sits in the high nibble");
 }
 
-/* ⭐⭐ THE GUARD ON THE COPY ABOVE.
- *
- * ⚠️ The builder here mirrors the real one by hand, so it could drift and pass
- * while the shipped code is wrong -- which is precisely the failure this whole
- * file exists to prevent. ➡️ So read the real source and check the line.
- *
- * ⓘ Crude on purpose. It does not parse C; it asserts that the flags2 line is
- * the one we believe it is, and that the value which caused the bug twice is
- * not being written into a report anywhere. */
-static void test_mirrors_the_real_source(void)
+/* The timing block, which the copy never had. */
+static void test_timing_block(void)
 {
-    puts("the shipped builder still matches this copy");
-    const char *paths[] = {
-        "src/controllers/ctm_bt_signal.inl",
-        "../src/controllers/ctm_bt_signal.inl",
-        "ctm-bridge-webos/src/controllers/ctm_bt_signal.inl",
-    };
-    FILE *fp = NULL;
-    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]) && !fp; ++i)
-        fp = fopen(paths[i], "r");
-    if (!fp) {
-        ok(0, "found ctm_bt_signal.inl -- run this from the repo root");
-        return;
+    puts("the timing block carries the latency and the audio sequence");
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f = {0};
+    f.seq = 0x123;
+    btsig_build(rep, &f);
+    ok(rep[BTSIG_TIMING_AT] == 0x91 && rep[BTSIG_TIMING_AT + 1] == BTSIG_TIMING_LEN,
+       "a 0x91 block of its own length");
+    ok(rep[BTSIG_TIMING_AT + 2] == BTSIG_T_LEAD, "its lead byte");
+    int all = 1;
+    for (int i = 3; i <= 7; ++i) all = all && rep[BTSIG_TIMING_AT + i] == BTSIG_T_LATENCY;
+    ok(all, "the latency in each of its five bytes");
+    ok(rep[BTSIG_T_AUDIO_SEQ] == 0x23,
+       "the audio sequence is the report number's low byte -- the field that defeated four attempts");
+    ok(rep[1] == 0x30, "and the report's own sequence its low nibble, in the high one");
+}
+
+/* The audio block: one Opus frame, the silence frame when none is given. */
+static void test_audio_block(void)
+{
+    puts("the audio block carries one frame, silence when none is given");
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f = {0};
+    btsig_build(rep, &f);
+    ok(rep[BTSIG_AUDIO_AT] == 0x95 && rep[BTSIG_AUDIO_AT + 1] == BTSIG_AUDIO_LEN,
+       "a 0x95 block of its own length");
+    ok(memcmp(&rep[BTSIG_AUDIO_AT + 2], g_btsig_silence, BTSIG_FRAME_BYTES) == 0,
+       "no frame given: the silence frame");
+    f.audio = g_btsig_low[0];
+    btsig_build(rep, &f);
+    ok(memcmp(&rep[BTSIG_AUDIO_AT + 2], g_btsig_low[0], BTSIG_FRAME_BYTES) == 0,
+       "a frame given: that frame, byte for byte");
+}
+
+/* The haptic block: quiet unless asked, then a wave on both motors. */
+static void test_haptic_block(void)
+{
+    puts("the haptic block is quiet unless asked, and a pulse when it is");
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f = {0};
+    btsig_build(rep, &f);
+    ok(rep[BTSIG_HAPTIC_AT] == 0x92 && rep[BTSIG_HAPTIC_AT + 1] == BTSIG_HAPTIC_LEN,
+       "a 0x92 block of its own length");
+    int quiet = 1;
+    for (int i = 0; i < BTSIG_HAPTIC_LEN; ++i) quiet = quiet && rep[BTSIG_HAPTIC_AT + 2 + i] == 0;
+    ok(quiet, "without haptics: all zero");
+    f.haptics = 1;
+    btsig_build(rep, &f);
+    int wave = 0, paired = 1;
+    for (int i = 0; i < 32; ++i) {
+        const uint8_t a = rep[BTSIG_HAPTIC_AT + 2 + i * 2];
+        const uint8_t b = rep[BTSIG_HAPTIC_AT + 2 + i * 2 + 1];
+        if (a != 0) wave = 1;
+        if (a != b) paired = 0;
     }
+    ok(wave, "with haptics: a wave");
+    ok(paired, "each sample to both motors");
+}
+
+/* After the haptics, nothing until the checksum. */
+static void test_padding_is_zero(void)
+{
+    puts("between the last block and the checksum, zeros");
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f = {0};
+    f.seq = 9;
+    f.haptics = 1;
+    f.claim_led = 1;
+    f.configure = 1;
+    f.r = f.g = f.b = 0xff;
+    btsig_build(rep, &f);
+    int zero = 1;
+    for (int i = BTSIG_HAPTIC_AT + 2 + BTSIG_HAPTIC_LEN; i < BTSIG_CRC_AT; ++i) zero = zero && rep[i] == 0;
+    ok(zero, "the end marker and the padding");
+}
+
+/* The checksum, worked out here from the CRC's own step, not by the same call. */
+static void test_signed(void)
+{
+    puts("the report is signed: CRC32 over 0xa2 and its first 394 bytes, little-endian");
+    uint8_t rep[BTSIG_REPORT_LEN];
+    btsig_frame_t f = {0};
+    f.seq = 7;
+    f.claim_led = 1;
+    f.g = 0xff;
+    btsig_build(rep, &f);
+    const uint8_t seed = 0xa2;
+    uint32_t crc = bt_crc32_step(0xffffffffu, &seed, 1);
+    crc = ~bt_crc32_step(crc, rep, BTSIG_CRC_AT);
+    ok(rep[BTSIG_CRC_AT + 0] == (uint8_t)(crc & 0xffu) &&
+       rep[BTSIG_CRC_AT + 1] == (uint8_t)((crc >> 8) & 0xffu) &&
+       rep[BTSIG_CRC_AT + 2] == (uint8_t)((crc >> 16) & 0xffu) &&
+       rep[BTSIG_CRC_AT + 3] == (uint8_t)((crc >> 24) & 0xffu),
+       "the checksum covers the whole report and sits at its end");
+    rep[BTSIG_STATE_AT + 3] ^= 0x01;
+    crc = bt_crc32_step(0xffffffffu, &seed, 1);
+    crc = ~bt_crc32_step(crc, rep, BTSIG_CRC_AT);
+    ok(rep[BTSIG_CRC_AT + 0] != (uint8_t)(crc & 0xffu) ||
+       rep[BTSIG_CRC_AT + 1] != (uint8_t)((crc >> 8) & 0xffu),
+       "and a changed byte no longer matches it (the check can fail)");
+}
+
+/* ⭐ AND NO REPORT CLAIMS THE HOST'S BITS, the value behind the bug that
+ * shipped twice. The builder above is the real one; this reads both files for
+ * that value being written into flags2 anywhere. */
+static int file_writes_host_claim(const char *path, int *found)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
     char line[512];
-    int saw_flags2 = 0, saw_host_claim = 0;
+    int bad = 0;
     while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "out[BTSIG_S_FLAGS2]")) {
-            ++saw_flags2;
-            if (strstr(line, "BTSIG_F2_HOST")) saw_host_claim = 1;
-        }
+        if (strstr(line, "out[BTSIG_S_FLAGS2]") && strstr(line, "BTSIG_F2_HOST")) bad = 1;
     }
     fclose(fp);
-    ok(saw_flags2 == 1, "flags2 is written in exactly one place");
-    ok(!saw_host_claim,
-       "flags2 does not claim the host's 0x14 -- that bug shipped twice");
+    *found = 1;
+    return bad;
+}
+
+static void test_no_report_claims_the_hosts_bits(void)
+{
+    puts("no report claims the host's 0x14 in flags2");
+    int found_builder = 0, found_signal = 0;
+    const int in_builder = file_writes_host_claim("src/controllers/btsig_build.inl", &found_builder);
+    const int in_signal = file_writes_host_claim("src/controllers/ctm_bt_signal.inl", &found_signal);
+    ok(found_builder && found_signal, "both files read -- run this from the repo root");
+    ok(!in_builder && !in_signal, "neither writes BTSIG_F2_HOST into flags2");
 }
 
 int main(void)
@@ -223,7 +271,12 @@ int main(void)
     test_configure_is_one_report_only();    puts("");
     test_each_pattern_has_its_colour();     puts("");
     test_report_shape();                    puts("");
-    test_mirrors_the_real_source();         puts("");
+    test_timing_block();                    puts("");
+    test_audio_block();                     puts("");
+    test_haptic_block();                    puts("");
+    test_padding_is_zero();                 puts("");
+    test_signed();                          puts("");
+    test_no_report_claims_the_hosts_bits(); puts("");
     printf("%d checks, %d failed\n\n", checks, failed);
     return failed ? 1 : 0;
 }

@@ -17,7 +17,7 @@ fail=0
 for src in tests/test_*.c; do
     name=$(basename "$src" .c)
     printf '\n=== %s ===\n' "$name"
-    cc -Wall -Wextra -o "/tmp/ctm-$name" "$src" || { fail=1; continue; }
+    cc -Wall -Wextra -o "/tmp/ctm-$name" "$src" -lm || { fail=1; continue; }
     "/tmp/ctm-$name" || fail=1
 done
 
