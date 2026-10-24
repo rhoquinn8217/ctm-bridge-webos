@@ -1030,9 +1030,8 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
      * 2026-08-18, when a Bluetooth bridge took eight seconds against a cable's
      * two and this file could not say where they went.
      *
-     * ⭐ MILLISECONDS, not seconds. log_append() prints hh:mm:ss, which is
-     * enough to see an eight-second gap and useless for the sub-second ones
-     * that make it up. This is the file that covers the session's own work --
+     * ⭐ MILLISECONDS, not seconds. Seconds are enough to see an eight-second
+     * gap and useless for the sub-second ones that make it up. This is the file that covers the session's own work --
      * the HID open, the connect, the evdev grabs -- so it is the one that needs
      * the resolution.
      *

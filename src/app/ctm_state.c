@@ -48,11 +48,6 @@ bool g_running = true;
 pthread_t g_stop_sniff_thread;
 bool g_stop_sniff_thread_started;
 
-char g_log[LOG_LEN];
-size_t g_log_used;
-pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-bool g_log_dirty;
-
 /* Where the logs go, and the path buffer each thread gets: log_path.inl
  * (ctm_log_dir and ctm_log_path). */
 #include "log_path.inl"
@@ -62,10 +57,11 @@ FILE *ctm_log_open(const char *name, const char *mode)
     return fopen(ctm_log_path(name), mode ? mode : "a");
 }
 
-/* Append a timestamped line to the in-memory log buffer + stderr. Thread-safe
- * (buffer guarded by g_log_mutex, touches NO LVGL) so controller threads can
- * log through the sink. The on-screen console is refreshed separately by
- * ctm_ui_log_flush() on the UI thread. When: app + controller events. */
+/* A line for the gesture log, ctm-gesture.log (2026-10-23). This filled a ring
+ * in memory that nothing read and wrote to stderr, which a TV does not keep:
+ * "controller started ...", the DS4 tone results and every pointer failure
+ * reached nobody. Thread-safe: the gesture log opens, writes and closes per
+ * line. When: app + controller events. */
 void log_append(const char *fmt, ...)
 {
     char body[512];
@@ -73,40 +69,7 @@ void log_append(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
-
-    time_t now = time(NULL);
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-
-    char line[640];
-    int written = snprintf(line, sizeof(line), "[%02d:%02d:%02d] %s\n",
-                           tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, body);
-    if (written <= 0) {
-        return;
-    }
-    if ((size_t)written >= sizeof(line)) {
-        written = (int)sizeof(line) - 1;
-        line[written] = '\0';
-    }
-
-    pthread_mutex_lock(&g_log_mutex);
-    if (g_log_used + (size_t)written + 1 >= sizeof(g_log)) {
-        size_t keep = sizeof(g_log) / 2;
-        if (g_log_used < keep) {
-            keep = g_log_used;
-        }
-        memmove(g_log, g_log + g_log_used - keep, keep);
-        g_log_used = keep;
-        g_log[g_log_used] = '\0';
-    }
-    memcpy(g_log + g_log_used, line, (size_t)written);
-    g_log_used += (size_t)written;
-    g_log[g_log_used] = '\0';
-    g_log_dirty = true;
-    pthread_mutex_unlock(&g_log_mutex);
-
-    fputs(line, stderr);
-    fflush(stderr);
+    ctm_gesture_log(NULL, "%s", body);
 }
 
 int count_dir_entries(const char *path)

@@ -50,7 +50,6 @@ struct hidraw_devinfo {
 #define MAX_DEVICES 64
 #define MAX_SESSIONS 32
 #define TEXT_LEN 256
-#define LOG_LEN 8192
 #define CTM_AGENT_PORT 48054
 #define CTM_BRIDGE_BASE_PORT 48055
 
@@ -222,11 +221,6 @@ void ctm_agent_probe_park(bool parked);
 extern bool g_running;
 extern pthread_t g_stop_sniff_thread;
 extern bool g_stop_sniff_thread_started;
-
-extern char g_log[LOG_LEN];
-extern size_t g_log_used;
-extern pthread_mutex_t g_log_mutex;   /* guards g_log + g_log_dirty */
-extern bool g_log_dirty;              /* set by log_append, cleared by ctm_ui_log_flush */
 
 /* ---- ctm_state.c: log + generic string/file helpers ---- */
 
