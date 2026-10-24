@@ -221,7 +221,7 @@ static void *hm_session_main(void *arg)
                 break;
             }
             const uint64_t tried_at = hm_now_ms();
-            if (ctm_transport_connect_within(&g_hm.xport, g_hm.host, g_hm.port, 400,
+            if (ctm_transport_connect_within(&g_hm.xport, g_hm.host, g_hm.port,
                                              (unsigned int)(HM_HOST_GONE_MS - gone_ms)) == 0) {
                 break;
             }
@@ -244,7 +244,7 @@ static void *hm_session_main(void *arg)
             usleep(500 * 1000);
             continue;
         }
-        hm_log("connected via %s", g_hm.xport.kind == CTM_TRANSPORT_ENET ? "ENet" : "TCP");
+        hm_log("connected via TCP");
         pthread_mutex_lock(&g_hm.state_mutex);
         g_hm.connected = 1;
         g_hm.last_buttons = 0xFF; /* force first feed to send */
@@ -291,7 +291,7 @@ int ctm_hostmouse_plug(const char *host, int port)
      * reconnect, while the app's thread could be sending through that lock
      * (ctm_hostmouse_feed). Made here and destroyed in ctm_hostmouse_unplug,
      * both on the app's thread, which is also the one that feeds. */
-    ctm_transport_init(&g_hm.xport, NULL);
+    ctm_transport_init(&g_hm.xport);
     if (pthread_create(&g_hm.thread, NULL, hm_session_main, NULL) != 0) {
         hm_log("session thread create failed");
         ctm_transport_destroy(&g_hm.xport);

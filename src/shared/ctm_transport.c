@@ -152,12 +152,11 @@ static int connect_tcp(const char *host, int port, int timeout_ms)
     return fd;
 }
 
-void ctm_transport_init(ctm_transport_t *t, ctm_enet_client_t *enet)
+void ctm_transport_init(ctm_transport_t *t)
 {
     if (!t) return;
     t->kind = CTM_TRANSPORT_NONE;
     t->fd = -1;
-    t->enet = enet;
     t->send_sequence = 0;
     t->ready = 0;
     pthread_mutex_init(&t->send_mutex, NULL);
@@ -178,36 +177,20 @@ void ctm_transport_attach_tcp(ctm_transport_t *t, int fd)
     if (fd >= 0) tune_tcp(fd);
 }
 
-int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port,
-                               unsigned int enet_timeout_ms)
+int ctm_transport_connect_once(ctm_transport_t *t, const char *host, int port)
 {
-    /* ⓘ The whole of both tries, as it always was: ENet's own wait, then
-     * TCP's full one. */
-    return ctm_transport_connect_within(t, host, port, enet_timeout_ms,
-                                        enet_timeout_ms + CTM_CONNECT_TIMEOUT_MS);
+    return ctm_transport_connect_within(t, host, port, CTM_CONNECT_TIMEOUT_MS);
 }
 
 int ctm_transport_connect_within(ctm_transport_t *t, const char *host, int port,
-                                 unsigned int enet_timeout_ms, unsigned int most_ms)
+                                 unsigned int most_ms)
 {
     if (!t) return -1;
     ctm_transport_set_ready(t, 0);
     if (most_ms == 0) return -1;
-    const uint64_t began_us = ctm_now_us();
 
-    /* 1) ENet first, brief timeout, and never past the caller's limit. */
-    if (t->enet && enet_client_connect(t->enet, host, port,
-                                       enet_timeout_ms < most_ms ? enet_timeout_ms : most_ms) == 0) {
-        t->kind = CTM_TRANSPORT_ENET;
-        t->fd = -1;
-        return 0;
-    }
-
-    /* 2) Fall back to TCP, for what is left, and never longer than the
-     * transport's own limit. */
-    const uint64_t spent_ms = (ctm_now_us() - began_us) / 1000u;
-    if (spent_ms >= most_ms) return -1;
-    unsigned int tcp_ms = most_ms - (unsigned int)spent_ms;
+    /* The caller's limit, and never longer than the transport's own. */
+    unsigned int tcp_ms = most_ms;
     if (tcp_ms > CTM_CONNECT_TIMEOUT_MS) tcp_ms = CTM_CONNECT_TIMEOUT_MS;
     int fd = connect_tcp(host, port, (int)tcp_ms);
     if (fd >= 0) {
@@ -246,13 +229,6 @@ int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
                            uint32_t request_id, const void *payload, size_t len)
 {
     if (!t || len > CTMB_MAX_PAYLOAD) return -1;
-
-    /* ENet: enet_client_send_msg is thread-safe (queues to an outbox the
-     * service pump drains on the owning thread) and stamps its own header. */
-    if (t->kind == CTM_TRANSPORT_ENET) {
-        return enet_client_send_msg(t->enet, type, flags, request_id, payload, len);
-    }
-
     if (t->fd < 0) return -1;
     ctmb_header_t h;
     fill_header(&h, type, flags, request_id, len);
@@ -274,8 +250,6 @@ int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t fl
     int rc;
     if (!t->ready) {
         rc = 1;
-    } else if (t->kind == CTM_TRANSPORT_ENET) {
-        rc = enet_client_send_msg(t->enet, type, flags, request_id, payload, len);
     } else if (t->fd < 0) {
         rc = -1;
     } else {
@@ -297,9 +271,6 @@ int ctm_transport_recv_msg(ctm_transport_t *t, ctmb_header_t *h, uint8_t **paylo
 {
     *payload = NULL;
     if (!t) return -1;
-    if (t->kind == CTM_TRANSPORT_ENET) {
-        return enet_client_recv_msg(t->enet, h, payload);
-    }
     if (t->fd < 0) return -1;
     if (recv_all(t->fd, h, sizeof(*h)) != 0) return -1;
     if (h->magic != CTMB_MAGIC || h->version != CTMB_VERSION ||
@@ -318,25 +289,15 @@ int ctm_transport_recv_msg(ctm_transport_t *t, ctmb_header_t *h, uint8_t **paylo
     return 1;
 }
 
-int ctm_transport_service(ctm_transport_t *t, unsigned int timeout_ms)
-{
-    if (t && t->kind == CTM_TRANSPORT_ENET) {
-        return enet_client_service(t->enet, timeout_ms);
-    }
-    return 0;
-}
-
 int ctm_transport_wait_readable(ctm_transport_t *t, unsigned int timeout_ms)
 {
     if (!t) return -1;
-    if (t->kind == CTM_TRANSPORT_ENET) return 1;
     return socket_wait_readable(t->fd, (int)timeout_ms);
 }
 
 int ctm_transport_connected(const ctm_transport_t *t)
 {
     if (!t) return 0;
-    if (t->kind == CTM_TRANSPORT_ENET) return enet_client_connected(t->enet);
     return t->fd >= 0;
 }
 
@@ -344,9 +305,7 @@ void ctm_transport_disconnect(ctm_transport_t *t)
 {
     if (!t) return;
     ctm_transport_set_ready(t, 0);
-    if (t->kind == CTM_TRANSPORT_ENET) {
-        if (t->enet) enet_client_disconnect(t->enet);
-    } else if (t->fd >= 0) {
+    if (t->fd >= 0) {
         shutdown(t->fd, SHUT_RDWR);
         close(t->fd);
     }

@@ -223,7 +223,6 @@ struct ctm_controller {
     int port;
 
     ctm_transport_t xport;
-    ctm_enet_client_t *enet;        /* process-owned client; borrowed by xport */
     int hid_fd;
     int alsa_fd;   /* wired DS5/Edge: the controller's own playback device */
     int alsa_consec_fail;      /* audio writes that failed outright, in a row */
@@ -366,7 +365,6 @@ struct ctm_controller {
     /* ⭐ The device itself went away mid-session. Set once, read by the UI
      * tick, which releases the session: see device_gone in ctm_controller.h. */
     volatile int st_device_gone;
-    volatile int st_transport_enet;
     volatile unsigned long st_reports_in;
     volatile unsigned long st_reports_out;
     char st_last_event[96];
@@ -380,15 +378,6 @@ struct ctm_controller {
     uint8_t primary_iface;           /* the primary hidraw's USB interface number */
     volatile int comp_run;           /* gates the sibling reader threads */
 };
-
-/* ENet is process-global; init once for all controllers, never deinit. */
-static pthread_once_t g_enet_once = PTHREAD_ONCE_INIT;
-static int g_enet_ready = 0;
-static void enet_global_init_once(void)
-{
-    if (enet_client_global_init() == 0) g_enet_ready = 1;
-    else fprintf(stderr, "controller: enet_initialize failed; ENet disabled, TCP only\n");
-}
 
 /* Audio has its own log file, and every line in it carries a wall-clock time.
  *
@@ -3336,20 +3325,16 @@ static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     uint64_t start = now_us();
     for (;;) {
         if (c->stop) return -1;
-        if (c->xport.kind == CTM_TRANSPORT_ENET) {
-            if (ctm_transport_service(&c->xport, 50) < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
-        } else {
-            /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
-             * 2026-10-05), so the 5 s below could never fire: a listener that
-             * accepted and said nothing held this session for ever, with no
-             * host-gone. Wait for something to read, a slice at a time, and
-             * count the slices that bring nothing. */
-            int ready = ctm_transport_wait_readable(&c->xport, 50);
-            if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
-            if (ready == 0) {
-                if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
-                continue;
-            }
+        /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
+         * 2026-10-05), so the 5 s below could never fire: a listener that
+         * accepted and said nothing held this session for ever, with no
+         * host-gone. Wait for something to read, a slice at a time, and
+         * count the slices that bring nothing. */
+        int ready = ctm_transport_wait_readable(&c->xport, 50);
+        if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+        if (ready == 0) {
+            if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
+            continue;
         }
         int got = c_recv(c, &h, &payload);
         if (got < 0) { ctl_log(c, "host config receive failed"); return -1; }
@@ -3502,13 +3487,11 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         if (c->comp_count > 0)
             ctl_log(c, "composite: forwarding %d sibling interface(s)", c->comp_count);
     }
-    ctl_log(c, "active host=%s port=%d path=%s product=%s transport=%s",
-         c->host, c->port, c->dev.path, caps->product,
-         c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
+    ctl_log(c, "active host=%s port=%d path=%s product=%s transport=TCP",
+         c->host, c->port, c->dev.path, caps->product);
 
     pthread_mutex_lock(&c->status_mutex);
     c->st_connected = 1;
-    c->st_transport_enet = (c->xport.kind == CTM_TRANSPORT_ENET) ? 1 : 0;
     pthread_mutex_unlock(&c->status_mutex);
 
     int link_alive = 1;
@@ -3536,38 +3519,23 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
             timeout_ms = next_paced_us <= now ? 0 : (int)((next_paced_us - now) / 1000u);
             if (timeout_ms > 50) timeout_ms = 50;
         }
-        if (c->xport.kind == CTM_TRANSPORT_ENET) {
-            if (ctm_transport_service(&c->xport, 1) < 0) {
-                ctl_log(c, "ENet link lost");
+        struct pollfd pfd;
+        pfd.fd = c->xport.fd; pfd.events = POLLIN; pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            link_alive = 0;
+        } else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            link_alive = 0;
+        } else if (pfd.revents & POLLIN) {
+            ctmb_header_t h;
+            uint8_t *payload = NULL;
+            if (c_recv(c, &h, &payload) != 1) {
+                free(payload);
                 link_alive = 0;
             } else {
-                ctmb_header_t h;
-                uint8_t *payload = NULL;
-                while (c_recv(c, &h, &payload) == 1) {
-                    handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
-                    free(payload);
-                    payload = NULL;
-                }
-            }
-        } else {
-            struct pollfd pfd;
-            pfd.fd = c->xport.fd; pfd.events = POLLIN; pfd.revents = 0;
-            int pr = poll(&pfd, 1, timeout_ms);
-            if (pr < 0) {
-                if (errno == EINTR) continue;
-                link_alive = 0;
-            } else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                link_alive = 0;
-            } else if (pfd.revents & POLLIN) {
-                ctmb_header_t h;
-                uint8_t *payload = NULL;
-                if (c_recv(c, &h, &payload) != 1) {
-                    free(payload);
-                    link_alive = 0;
-                } else {
-                    handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
-                    free(payload);
-                }
+                handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
+                free(payload);
             }
         }
     }
@@ -3662,8 +3630,8 @@ static void *session_main(void *arg)
          * age_ms=7000 on Bluetooth against 2000 on a cable -- and the gap sat
          * here, invisible, because a failed attempt said nothing.
          *
-         * Each pass costs ENet's 400ms timeout plus a 500ms sleep, so seven
-         * seconds is about eight attempts before the host's listener is up.
+         * Each pass then cost ENet's 400ms timeout plus a 500ms sleep, so seven
+         * seconds was about eight attempts before the host's listener was up.
          *
          * ⭐ Counted and logged now: the number of attempts is what says whether
          * the answer is to wait less, retry faster, or start later. */
@@ -3733,7 +3701,7 @@ static void *session_main(void *arg)
              * Release that a dead PC once caused was the length of ONE connect,
              * bounded in ctm_transport.c, and not this loop. */
             const uint64_t tried_us = now_us();
-            if (ctm_transport_connect_within(&c->xport, c->host, c->port, 400,
+            if (ctm_transport_connect_within(&c->xport, c->host, c->port,
                                              (unsigned int)left_ms) == 0) {
                 break;
             }
@@ -3754,7 +3722,7 @@ static void *session_main(void *arg)
                                           (w1.tv_nsec - w0.tv_nsec) / 1000000);
             ctl_log(c, "connect took %ldms over %d failed attempt(s)", waited_ms, attempts);
         }
-        ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
+        ctl_log(c, "connected via TCP");
 
         if (c->ops->grab_evdev && c->ops->grab_skips_gamepads && c->is_gamepad) {
             ctl_log(c, "evdev: not grabbed -- a gamepad, which the TV must still see "
@@ -3919,7 +3887,7 @@ static void open_log(ctm_controller_t *c)
     c->log = fopen(name, "a");
 }
 
-/* Start bridging: open log, bring up ENet + transport, launch the session
+/* Start bridging: open log, bring up the transport, launch the session
  * thread. Returns once the thread is started (connect happens async). When: the
  * user clicks Plug in. */
 /* Composite: hand the controller the forwarded enumeration payload (CTMB_MSG_ENUM),
@@ -3953,12 +3921,7 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     pthread_mutex_unlock(&c->signal_mutex);
     open_log(c);
 
-    pthread_once(&g_enet_once, enet_global_init_once);
-    if (g_enet_ready) {
-        c->enet = enet_client_create();
-        if (!c->enet) ctl_log(c, "enet client create failed; ENet disabled");
-    }
-    ctm_transport_init(&c->xport, c->enet);
+    ctm_transport_init(&c->xport);
 
     /* ⏱️ ON THE SAME CLOCK AS THE SESSION'S OWN LINES, deliberately.
      *
@@ -3972,7 +3935,6 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     if (pthread_create(&c->session_thread, NULL, session_main, c) != 0) {
         ctl_log(c, "session thread failed errno=%d", errno);
         ctm_transport_destroy(&c->xport);
-        if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }
         if (c->log) { fclose(c->log); c->log = NULL; }
         return -1;
     }
@@ -4144,7 +4106,6 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     c->alsa_retry_streak = 0;
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }
     if (c->wake_pipe[1] >= 0) { close(c->wake_pipe[1]); c->wake_pipe[1] = -1; }
-    if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }
     release_evdev_grabs(c);
     if (c->log) { fclose(c->log); c->log = NULL; }
 }
@@ -4179,7 +4140,6 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     out->connected = c->st_connected ? true : false;
     out->host_gone = c->st_host_gone ? true : false;
     out->device_gone = c->st_device_gone ? true : false;
-    out->transport_enet = c->st_transport_enet ? true : false;
     snprintf(out->last_event, sizeof(out->last_event), "%s", c->st_last_event);
     pthread_mutex_unlock(&c->status_mutex);
     out->reports_in = c->st_reports_in;

@@ -253,7 +253,6 @@ typedef struct {
 /* Live bridging status — read-only snapshot for the UI status panel. */
 typedef struct {
     bool connected;              /* a session is up (handshake done, looping) */
-    bool transport_enet;         /* true = ENet/UDP, false = TCP */
     unsigned long reports_in;    /* input reports forwarded to the host */
     unsigned long reports_out;   /* output reports written to the device */
     char last_event[96];         /* most recent controller log line */

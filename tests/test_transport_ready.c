@@ -19,19 +19,6 @@
 #include <arpa/inet.h>
 #include <poll.h>
 
-/* The ENet client is not under test: these only let the transport link. */
-int enet_client_connect(ctm_enet_client_t *client, const char *host, int port, unsigned int timeout_ms)
-{ (void)client; (void)host; (void)port; (void)timeout_ms; return -1; }
-void enet_client_disconnect(ctm_enet_client_t *client) { (void)client; }
-int enet_client_connected(const ctm_enet_client_t *client) { (void)client; return 0; }
-int enet_client_service(ctm_enet_client_t *client, unsigned int timeout_ms)
-{ (void)client; (void)timeout_ms; return 0; }
-int enet_client_send_msg(ctm_enet_client_t *client, uint16_t type, uint32_t flags,
-                         uint32_t request_id, const void *payload, size_t len)
-{ (void)client; (void)type; (void)flags; (void)request_id; (void)payload; (void)len; return -1; }
-int enet_client_recv_msg(ctm_enet_client_t *client, ctmb_header_t *h, uint8_t **payload)
-{ (void)client; (void)h; (void)payload; return -1; }
-
 static int checks, failed;
 
 static void ok(int cond, const char *what)
@@ -72,7 +59,7 @@ static int send_audio(ctm_transport_t *t)
 int main(void)
 {
     ctm_transport_t t;
-    ctm_transport_init(&t, NULL);
+    ctm_transport_init(&t);
 
     printf("\na connection, before and after its opening exchange\n");
     int sv[2];
@@ -107,7 +94,7 @@ int main(void)
         return 2;
     }
     ctm_transport_set_ready(&t, 1);   /* as the last connection left it, at worst */
-    ok(ctm_transport_connect_once(&t, "127.0.0.1", ntohs(a.sin_port), 0) == 0, "the reconnect lands");
+    ok(ctm_transport_connect_once(&t, "127.0.0.1", ntohs(a.sin_port)) == 0, "the reconnect lands");
     const int peer = accept(lfd, NULL, NULL);
     ok(ctm_transport_connected(&t), "the transport calls itself connected");
     ok(send_audio(&t) == 1, "and still holds audio back: a reconnect starts before its hello");
