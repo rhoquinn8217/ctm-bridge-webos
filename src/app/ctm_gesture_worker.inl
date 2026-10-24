@@ -196,9 +196,26 @@ static volatile bool g_probe_running;
  * a second of frozen overlay is exactly the fault T-062 is about. */
 static volatile bool g_probe_now;
 
+/* ⭐ PARKED OUTSIDE A STREAM (2026-10-23). After the first stream the probe
+ * asked the PC every ten seconds for as long as the app ran, the launcher
+ * included, over a port that is forwarded for remote play, and a PC asleep cost
+ * a second a probe; outside a stream nothing on screen reads the answer. It
+ * parks rather than leaves (a probe that LEFT once froze the panel on its last
+ * reading: see the end of agent_probe_thread). The bridge's start wakes it with
+ * a probe at once; its stop parks it. */
+static volatile bool g_probe_parked = true;
+
 void ctm_agent_probe_soon(void)
 {
     g_probe_now = true;
+}
+
+void ctm_agent_probe_park(bool parked)
+{
+    g_probe_parked = parked;
+    if (!parked) {
+        g_probe_now = true;
+    }
 }
 
 static void *agent_probe_thread(void *arg)
@@ -209,7 +226,7 @@ static void *agent_probe_thread(void *arg)
     bool last_online = false;   /* the reading logged last */
     int last_compat = PROTOCOL_UNKNOWN;   /* the protocol verdict logged last */
     for (;;) {
-        if (g_agent_host[0]) {
+        if (g_agent_host[0] && !g_probe_parked) {
             char probe[256];
             /* ⭐ LOGGED WHEN THE ANSWER CHANGES, and when an ONLINE listener
              * was slow to give it (code review, 2026-10-05). This logged every

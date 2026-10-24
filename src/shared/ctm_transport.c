@@ -28,7 +28,10 @@ static int send_all(int fd, const void *data, size_t len)
     const uint8_t *p = (const uint8_t *)data;
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, p + sent, len - sent, 0);
+        /* MSG_NOSIGNAL: a peer that reset the link is an error here, not a
+         * SIGPIPE that ends the app (the streaming library happens to ignore
+         * SIGPIPE; nothing here should lean on that). */
+        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -1;
         sent += (size_t)n;

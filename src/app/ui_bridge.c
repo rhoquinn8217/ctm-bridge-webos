@@ -364,7 +364,7 @@ static int send_agent_line(const char *command, char *response, size_t response_
     /* ⓘ Room for a command with its pairing proof: about 460 bytes. */
     char line[1024];
     snprintf(line, sizeof(line), "%s\n", command);
-    if (send(fd, line, strlen(line), 0) < 0) {
+    if (send(fd, line, strlen(line), MSG_NOSIGNAL) < 0) {   /* no SIGPIPE: see ctm_transport.c */
         close(fd);
         return agent_command_rc(true, false, 0, NULL);
     }
@@ -848,6 +848,29 @@ bool ctm_tv_pointer_active(void)
     return g_tv_pointer_active && !ctm_hostmouse_host_gone();
 }
 
+/* A Bluetooth DS4's handback, played off the caller's thread (it takes about
+ * 2.5 s, and the stream's end runs on the app's loop). */
+static void *ds4_handback_thread(void *arg)
+{
+    char *node = arg;
+    const int trc = ds4_signal_tone_node(node, 1 /* BTSIG_HANDED_BACK */);
+    log_append("ds4 handback tone at the stream's end: rc=%d (%s)", trc, node);
+    free(node);
+    return NULL;
+}
+
+static void ds4_handback_soon(const char *node)
+{
+    char *copy = strdup(node);
+    if (!copy) return;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, ds4_handback_thread, copy) == 0) {
+        pthread_detach(thread);
+    } else {
+        free(copy);
+    }
+}
+
 /* ⭐ EVERY SESSION, AT THE END OF A STREAM OR OF THE APP.
  *
  * ⛔ It walked the table with no lock and plugged out whatever it found, so a
@@ -873,6 +896,7 @@ void release_local_sessions_on_exit(void)
     char busids[MAX_SESSIONS][sizeof(g_sessions[0].busid)];
     ctm_controller_t *controllers[MAX_SESSIONS];
     int n = 0;
+    char nodes[MAX_SESSIONS][sizeof(g_sessions[0].node)];
     pthread_mutex_lock(&g_sessions_mutex);
     for (int i = 0; i < g_session_count && n < MAX_SESSIONS; ++i) {
         if (g_sessions[i].stopping) {
@@ -881,6 +905,7 @@ void release_local_sessions_on_exit(void)
         g_sessions[i].stopping = true;
         snprintf(keys[n], sizeof(keys[n]), "%s", g_sessions[i].key);
         snprintf(busids[n], sizeof(busids[n]), "%s", g_sessions[i].busid);
+        snprintf(nodes[n], sizeof(nodes[n]), "%s", g_sessions[i].node);
         controllers[n] = g_sessions[i].controller;
         ++n;
     }
@@ -891,6 +916,14 @@ void release_local_sessions_on_exit(void)
         if (controllers[i]) {
             ctm_controller_plug_out_reason(controllers[i], CTM_UNPLUG_SHUTDOWN);
             ctm_controller_destroy(controllers[i]);
+        }
+        /* ⭐ A BLUETOOTH DS4's HANDBACK, as a single release plays it
+         * (stop_session), so it is not the one pad that goes dark and silent
+         * when the stream ends (2026-10-23). On its own thread: about 2.5 s
+         * of tone, and this runs on the app's loop. Not when the app quits
+         * (ctm_unplug_quietly): nothing plays then. */
+        if (nodes[i][0] && strstr(busids[i], "-ds4-") != NULL && !ctm_unplug_quietly) {
+            ds4_handback_soon(nodes[i]);
         }
         if (listener_reached && busids[i][0]) {
             char cmd[96];
@@ -1011,6 +1044,16 @@ static bool plug_in_scan_index(logical_device_t *item, int scan_index, const cha
         ctm_gesture_log(NULL, "bridge refused for %s: no listener address yet, "
                         "which only a stream sets", item->name);
         return false;
+    }
+    /* ⭐ NOT TWICE (2026-10-23). The gesture's path asks first (plug_in_by_node);
+     * this one, which keyboards, mice and Auto Bridge take, did not, and a
+     * second plug of a bridged device made a second device on the PC, left the
+     * first to the listener's grace, and could lose the grab, so a keyboard
+     * typed on both. It is bridged, which is what was asked: no second start,
+     * and no refusal. */
+    if (plug_key_is_set(session_key)) {
+        ctm_gesture_log(NULL, "%s is already bridged: not started again", item->name);
+        return true;
     }
 
     const device_info_t *dev = &g_scan.devices[scan_index];
