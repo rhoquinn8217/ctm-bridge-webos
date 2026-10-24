@@ -23,10 +23,6 @@
 puck_enum_t g_puck_enum;
 scan_result_t g_scan;
 logical_result_t g_devices;
-int g_selected_index = -1;
-char g_selected_key[96];
-char g_expanded_keys[MAX_DEVICES][96];
-int g_expanded_key_count;
 bridge_session_t g_sessions[MAX_SESSIONS];
 int g_session_count;
 pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -70,23 +66,6 @@ void log_append(const char *fmt, ...)
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
     ctm_gesture_log(NULL, "%s", body);
-}
-
-int count_dir_entries(const char *path)
-{
-    DIR *dir = opendir(path);
-    if (!dir) {
-        return -1;
-    }
-    int count = 0;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) {
-            count++;
-        }
-    }
-    closedir(dir);
-    return count;
 }
 
 int read_text_file(const char *path, char *out, size_t out_len)

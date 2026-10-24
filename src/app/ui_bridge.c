@@ -31,20 +31,14 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
 {
     tv_bridge_worker_settings_t settings;
     memset(&settings, 0, sizeof(settings));
-    settings.kind = TV_BRIDGE_KIND_HID;
     settings.audio_mode = TV_BRIDGE_AUDIO_AUTO;
     settings.latency_ms = 60;
     settings.haptics_gain_centi = 100;
     settings.headset_volume_percent = 100;
     settings.speaker_volume_percent = 100;
-    settings.ds5_patch_high_nibble = 0xf;
-    settings.ds5_patch_low_nibble = 0xd;
-    settings.ds5_patch2_high_nibble = 0xf;
-    settings.ds5_patch2_low_nibble = 0x7;
 
     const char *kind = bridge_kind_for_item(item);
     if (strcmp(kind, "ds5") == 0) {
-        settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         /* 0x64, matching the wired path, rather than the 0x41 this was.
          *
@@ -63,21 +57,17 @@ tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *it
         /* Wired: the host owns the output reports, so the audio fields are
          * never patched here. Volume defaults match the BT arm so behaviour
          * is unchanged for a listener that does not distinguish the two. */
-        settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strcmp(kind, "ds5e") == 0) {
         /* Edge over BT: a DualSense as far as reports go, so the same values. */
-        settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strcmp(kind, "ds5e_usb") == 0) {
         /* Edge wired: as ds5_usb -- the host owns the output reports. */
-        settings.kind = TV_BRIDGE_KIND_DS5;
         settings.headset_volume_percent = 0x4d;
         settings.speaker_volume_percent = 0x64;   /* see the ds5 arm above */
     } else if (strncmp(kind, "ds4", 3) == 0) {   /* ds4 and ds4_usb alike */
-        settings.kind = TV_BRIDGE_KIND_DS4;
         settings.haptics_gain_centi = 0;
         /* ~75% of the 0x4F raw ceiling — the pad persists whatever volume was
          * last written, so a sane audible default beats inheriting stale 0. */
@@ -137,22 +127,6 @@ tv_bridge_worker_settings_t *settings_for_item(const logical_device_t *item)
 {
     ui_device_settings_t *record = ui_record_for_item(item);
     return record ? &record->settings : NULL;
-}
-
-static int session_index_locked(const char *key);
-
-void apply_settings_to_session(const logical_device_t *item)
-{
-    tv_bridge_worker_settings_t *settings = settings_for_item(item);
-    if (!item || !settings) return;
-    /* ⓘ Under the table's lock, and never on a stopping entry: its controller
-     * may be freed by the path tearing it down. */
-    pthread_mutex_lock(&g_sessions_mutex);
-    int session = session_index_locked(item->key);
-    if (session >= 0 && !g_sessions[session].stopping && g_sessions[session].controller) {
-        ctm_controller_set_settings(g_sessions[session].controller, settings);
-    }
-    pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 int run_child_wait(char *const argv[])

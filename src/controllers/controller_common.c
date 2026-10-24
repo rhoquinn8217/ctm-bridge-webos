@@ -355,9 +355,7 @@ struct ctm_controller {
 
     FILE *log;
 
-    /* Live status for the UI panel. Counters are single-writer (reports_in:
-     * reader thread; reports_out: session thread) and read advisorily;
-     * connected/transport/last_event are guarded by status_mutex. */
+    /* Live status for the app: the flags below are guarded by status_mutex. */
     pthread_mutex_t status_mutex;
     volatile int st_connected;
     /* ⭐ T-127: the reconnect loop gave up. Set once, read by the UI tick. */
@@ -365,9 +363,6 @@ struct ctm_controller {
     /* ⭐ The device itself went away mid-session. Set once, read by the UI
      * tick, which releases the session: see device_gone in ctm_controller.h. */
     volatile int st_device_gone;
-    volatile unsigned long st_reports_in;
-    volatile unsigned long st_reports_out;
-    char st_last_event[96];
 
     uint8_t *enum_payload;           /* composite: forwarded enumeration (CTMB_MSG_ENUM) */
     int enum_payload_len;
@@ -784,10 +779,6 @@ static uint64_t now_us(void)
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 }
 
-/* Optional UI log sink, set by the app, so controller events also appear in the
- * on-screen console. NULL => file + stderr only. */
-static void (*g_log_sink)(const char *line);
-
 /* Told when a controller asks to be unplugged; the app does the work. */
 static ctm_controller_unplug_cb g_unplug_cb;
 
@@ -990,14 +981,9 @@ void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v)
     c->type_state[slot] = v;
 }
 
-void ctm_controller_set_log_sink(void (*sink)(const char *line))
-{
-    g_log_sink = sink;
-}
-
-/* Per-controller log: writes to its MAC-named file (if open), stderr, and the
- * UI sink (if set), each line prefixed with the controller kind. When:
- * throughout a controller's lifetime (any of its threads). */
+/* Per-controller log: writes to its MAC-named file (if open) and stderr; a line
+ * with no controller goes to the gesture log. When: throughout a controller's
+ * lifetime (any of its threads). */
 void ctl_log(ctm_controller_t *c, const char *fmt, ...)
 {
     char body[512];
@@ -1035,25 +1021,16 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
         fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
-    if (c) {
-        pthread_mutex_lock(&c->status_mutex);
-        snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
-        pthread_mutex_unlock(&c->status_mutex);
-    }
-    if (g_log_sink) {
-        char line[600];
-        snprintf(line, sizeof(line), "%s: %s", kind, body);
-        g_log_sink(line);
-    } else if (!c) {
-        /* NO CONTROLLER AND NO SINK: THE LINE WOULD VANISH, SO IT GOES TO THE
-         * GESTURE LOG INSTEAD.
+    if (!c) {
+        /* NO CONTROLLER: THE LINE WOULD VANISH, SO IT GOES TO THE GESTURE LOG
+         * INSTEAD.
          *
          * A caller holding a controller still gets a file, `c->log`. A caller
          * without one -- the Bluetooth refusal is the only one today -- had
-         * nowhere to go: `c->log` needs a controller, and `g_log_sink` was set
-         * only by the standalone UI app, removed from this repo on 2026-10-07. aurora-tv never sets it,
-         * so on a TV the line reached `fprintf(stderr, ...)` and nothing else,
-         * and stderr is not captured into the app's log files.
+         * nowhere to go: `c->log` needs a controller, and the only sink for
+         * these lines was the standalone UI app's, removed from this repo on
+         * 2026-10-07, so on a TV the line reached `fprintf(stderr, ...)` and
+         * nothing else, and stderr is not captured into the app's log files.
          *
          * MEASURED on the rooted monitor 2026-09-22, build 398: a refusal was
          * forced by killing the listener inside the TV's 11 s probe gap. It
@@ -2611,7 +2588,6 @@ static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len
      * report itself (rumble, for a wired Xbox pad). */
     if (c->ops->write_output) {
         const int rc = c->ops->write_output(c, c->hid_fd, data, len);
-        if (rc == 0) c->st_reports_out++;
         return rc;
     }
     uint8_t patched[MAX_REPORT];
@@ -2628,7 +2604,6 @@ static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len
         /* After patching and only on success: what is recorded is what the
          * controller actually received. */
         remember_audio_settings(c, patched, patched_len);
-        c->st_reports_out++;
         return 0;
     }
     return -1;
@@ -2642,7 +2617,7 @@ static int hid_write_fd_raw(ctm_controller_t *c, int fd, const uint8_t *data, si
     pthread_mutex_lock(&c->hid_mutex);
     ssize_t n = write(fd, data, len);
     pthread_mutex_unlock(&c->hid_mutex);
-    if (n == (ssize_t)len) { c->st_reports_out++; return 0; }
+    if (n == (ssize_t)len) return 0;
     return -1;
 }
 
@@ -2830,7 +2805,6 @@ static void *composite_reader_main(void *arg)
                     input_link_lost(c, "sibling's report");
                     break;
                 }
-                c->st_reports_in++;
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
@@ -3065,7 +3039,6 @@ static void *input_thread_main(void *arg)
                     input_link_lost(c, "input report");
                     break;
                 }
-                c->st_reports_in++;
                 if (c->ops->keepalive_ms) c->last_input_us = now_us();
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
@@ -4130,8 +4103,7 @@ void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_
 }
 
 /* Snapshot live bridging status for the UI panel. When: the UI status timer
- * (~500 ms). connected/transport/last_event are read under status_mutex; the
- * report counters are read advisorily (single-writer, monotonic). */
+ * (~500 ms). The flags are read under status_mutex. */
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out)
 {
     if (!c || !out) return;
@@ -4140,10 +4112,7 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     out->connected = c->st_connected ? true : false;
     out->host_gone = c->st_host_gone ? true : false;
     out->device_gone = c->st_device_gone ? true : false;
-    snprintf(out->last_event, sizeof(out->last_event), "%s", c->st_last_event);
     pthread_mutex_unlock(&c->status_mutex);
-    out->reports_in = c->st_reports_in;
-    out->reports_out = c->st_reports_out;
     /* ⓘ Advisory as the counters are: set once by the plug and once by the
      * input thread. */
     out->pointer = c->ptr.present ? true : false;

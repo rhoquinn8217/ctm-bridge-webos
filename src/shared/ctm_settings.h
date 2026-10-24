@@ -1,15 +1,9 @@
 #ifndef CTM_SETTINGS_H
 #define CTM_SETTINGS_H
 
-/* Per-controller tunables (audio route/volume, latency, haptics, DS5 patch
- * nibbles), shared by the UI and the controller layer. The type keeps the
+/* Per-controller tunables (audio route/volume, latency, haptics), shared by
+ * the UI and the controller layer. The type keeps the
  * name of the first standalone worker it came from, which is gone. */
-
-typedef enum {
-    TV_BRIDGE_KIND_HID = 0,
-    TV_BRIDGE_KIND_DS4 = 4,
-    TV_BRIDGE_KIND_DS5 = 5
-} tv_bridge_kind_t;
 
 typedef enum {
     /* Auto: no patching of route/volume/enable bits — let the host (game)
@@ -23,7 +17,6 @@ typedef enum {
 } tv_bridge_audio_mode_t;
 
 typedef struct {
-    tv_bridge_kind_t kind;
     tv_bridge_audio_mode_t audio_mode;
     unsigned int latency_ms;
     unsigned int haptics_gain_centi;
@@ -52,10 +45,6 @@ typedef struct {
      * unconditionally in AUTO. The two settings were never symmetrical, and the
      * header note says as much: AUTO *"touches only the latency block"*. */
     unsigned int host_audio_set;
-    unsigned int ds5_patch_high_nibble;
-    unsigned int ds5_patch_low_nibble;
-    unsigned int ds5_patch2_high_nibble;
-    unsigned int ds5_patch2_low_nibble;
 } tv_bridge_worker_settings_t;
 
 #endif /* CTM_SETTINGS_H */

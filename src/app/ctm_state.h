@@ -175,10 +175,6 @@ extern puck_enum_t g_puck_enum;
 /* ---- headless global state (defined in ctm_state.c) --------------------- */
 extern scan_result_t g_scan;
 extern logical_result_t g_devices;
-extern int g_selected_index;
-extern char g_selected_key[96];
-extern char g_expanded_keys[MAX_DEVICES][96];
-extern int g_expanded_key_count;
 extern bridge_session_t g_sessions[MAX_SESSIONS];
 extern int g_session_count;
 /* ⭐⭐ GUARDS g_sessions AND g_session_count, and a controller's lifetime while
@@ -247,7 +243,6 @@ const char *ctm_log_path(const char *name);
 FILE *ctm_log_open(const char *name, const char *mode);
 
 void log_append(const char *fmt, ...);
-int count_dir_entries(const char *path);
 int read_text_file(const char *path, char *out, size_t out_len);
 bool starts_with(const char *text, const char *prefix);
 char ascii_lower(char c);
@@ -278,9 +273,6 @@ void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len
  * is no second record to keep in step. There is deliberately no setter: the
  * answer changes by starting or stopping a session, never by being told. */
 bool plug_key_is_set(const char *key);
-bool expand_key_is_set(const char *key);
-void set_expand_key(const char *key, bool expanded);
-bool logical_device_can_expand(const logical_device_t *item);
 logical_device_t *find_or_add_logical_device(logical_result_t *logical,
                                              const device_info_t *dev, int scan_index);
 void build_logical_devices(const scan_result_t *scan, logical_result_t *logical);
@@ -297,7 +289,6 @@ int puck_enum_capture(const char *vid, const char *pid);   /* Stage 1: cache enu
 tv_bridge_worker_settings_t default_settings_for_item(const logical_device_t *item);
 ui_device_settings_t *ui_record_for_item(const logical_device_t *item);
 tv_bridge_worker_settings_t *settings_for_item(const logical_device_t *item);
-void apply_settings_to_session(const logical_device_t *item);
 int run_child_wait(char *const argv[]);
 void stop_sniff_once(const char *mac);
 void *stop_sniff_worker(void *arg);
@@ -330,7 +321,6 @@ bool ctm_tv_pointer_active(void);
 const char *bridge_kind_for_item(const logical_device_t *item);
 bool plug_in_item(logical_device_t *item);
 bool item_is_tv_remote(const logical_device_t *item);
-bool item_is_mouse_or_keyboard(const logical_device_t *item);
 /* A game controller: a kind the bridge knows, or a HID joystick, gamepad or
  * multi-axis controller. Only controllers are auto-bridged or given a config. */
 bool item_is_controller(const logical_device_t *item);

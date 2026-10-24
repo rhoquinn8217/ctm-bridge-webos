@@ -253,9 +253,6 @@ typedef struct {
 /* Live bridging status — read-only snapshot for the UI status panel. */
 typedef struct {
     bool connected;              /* a session is up (handshake done, looping) */
-    unsigned long reports_in;    /* input reports forwarded to the host */
-    unsigned long reports_out;   /* output reports written to the device */
-    char last_event[96];         /* most recent controller log line */
 
     /* ⭐⭐ THE HOST IS GONE AND THE SESSION HAS STOPPED TRYING. T-127.
      *
@@ -429,7 +426,6 @@ int ds4_signal_refused_bt(const char *node);
  * `pattern` is btsig_pattern_t: 0 handing over, 1 handed back, 2 refused. */
 void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms);
-int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
 /* The light's brightness `at_ms` into a DS4 signal: 0 bridged, 1 handed
  * back, 2 refused, as ds4_signal_shape_of numbers them. */
 int  ds4_signal_level(int pattern, long at_ms);
@@ -439,9 +435,6 @@ int  ds4_signal_level(int pattern, long at_ms);
  * five seconds, so this is the only way a DS4 tone reliably plays. */
 int ds4_signal_tone_node(const char *node, int pattern);
 
-/* The light and the felt pulse on a bare node, for a signal with no session --
- * a refusal. 0 handing over, 1 handed back, 2 refused. ⛔ Bluetooth only. */
-int ds4_signal_light_pulse_node(const char *node, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
@@ -449,11 +442,6 @@ void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_set
 void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_t *out);
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out);
 void ctm_controller_destroy(ctm_controller_t *c);
-
-/* Register a sink for controller log lines (e.g. the app's on-screen console).
- * NULL = file + stderr only. The sink must be thread-safe — controllers log
- * from their own threads. When: app startup. */
-void ctm_controller_set_log_sink(void (*sink)(const char *line));
 
 /* Append the Sony BT HID output-report CRC32 (seed 0xa2) to the trailing 4
  * bytes. When: a DS patch_output hook after rewriting a report. Defined in

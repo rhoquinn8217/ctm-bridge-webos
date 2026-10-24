@@ -385,38 +385,6 @@ bool plug_key_is_set(const char *key)
     return session_index_for_key(key) >= 0;
 }
 
-bool expand_key_is_set(const char *key)
-{
-    for (int i = 0; i < g_expanded_key_count; ++i) {
-        if (strcmp(g_expanded_keys[i], key) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void set_expand_key(const char *key, bool expanded)
-{
-    for (int i = 0; i < g_expanded_key_count; ++i) {
-        if (strcmp(g_expanded_keys[i], key) == 0) {
-            if (!expanded) {
-                memmove(&g_expanded_keys[i], &g_expanded_keys[i + 1],
-                        (size_t)(g_expanded_key_count - i - 1) * sizeof(g_expanded_keys[0]));
-                g_expanded_key_count--;
-            }
-            return;
-        }
-    }
-    if (expanded && g_expanded_key_count < MAX_DEVICES) {
-        snprintf(g_expanded_keys[g_expanded_key_count++], sizeof(g_expanded_keys[0]), "%s", key);
-    }
-}
-
-bool logical_device_can_expand(const logical_device_t *item)
-{
-    return item && starts_with(item->key, "steam:") && item->device_count > 1;
-}
-
 logical_device_t *find_or_add_logical_device(logical_result_t *logical, const device_info_t *dev, int scan_index)
 {
     char key[96];
@@ -870,24 +838,6 @@ void enumerate_devices(scan_result_t *result)
             }
         }
     }
-}
-
-/* A generic "hid" row that is a real mouse or keyboard (top-level HID usage
- * page 1, usage 2/6 on any of its interfaces). These enumerate cleanly on the
- * host via the dynamic identity profile, so they are safe to auto-plug —
- * unlike exotic vendor collections (the MR24 raw-relay code-10 lesson). */
-bool item_is_mouse_or_keyboard(const logical_device_t *item)
-{
-    if (!item) return false;
-    for (int i = 0; i < item->device_count; ++i) {
-        int idx = item->device_indices[i];
-        if (idx < 0 || idx >= g_scan.count) continue;
-        const device_info_t *dev = &g_scan.devices[idx];
-        if (dev->usage_page == 1 && (dev->usage == 2 || dev->usage == 6)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* ⭐ Is this a game controller? Only controllers are auto-bridged or given a
