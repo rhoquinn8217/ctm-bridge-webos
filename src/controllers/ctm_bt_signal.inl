@@ -17,7 +17,7 @@
  * ⛔ BLUETOOTH ONLY. These are report 0x36 at 398 bytes. A wired DualSense
  * expects 0x02 at 48, and every byte would land in the wrong field -- done by
  * accident during development, and the controller "went crazy". The caller
- * gates on there being no ALSA device, which is the Bluetooth condition.
+ * picks this route by the pad's bus (signal_route.inl).
  *
  * ⚠️ A BAD REPORT DOES NOT MERELY FAIL. Enough malformed ones and the
  * controller stops acting on anything at all -- no light, no sound -- until it
@@ -225,15 +225,15 @@ static void btsig_build(uint8_t *out, const btsig_frame_t *f)
 
 /* The two signals, as the light shows them.
  *
- * Magenta going to the host, yellow coming back -- the vocabulary the app's
- * own patterns already used, kept so nothing has to be relearned.
+ * Green going to the host, yellow coming back, red refused: the vocabulary the
+ * app's own patterns use, so nothing has to be relearned.
  *
  * ⭐ AND THE PULSE CAN ACTUALLY PULSE NOW. The app's version froze at its
  * brightest and stayed there, because it animated on the UI thread and lost
  * the competition for it. This runs on its own thread at one report every ten
  * milliseconds, so a ramp is smooth and repeating it costs nothing. */
 typedef enum {
-    BTSIG_HANDING_OVER,   /* magenta, solid */
+    BTSIG_HANDING_OVER,   /* green, solid */
     BTSIG_HANDED_BACK,    /* yellow, three flashes */
     BTSIG_REFUSED         /* red, three flashes */
 } btsig_pattern_t;
@@ -465,7 +465,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     }
 
     /* The signal itself: colour ramping up, a pulse to feel, a tone to hear. */
-    /* Magenta going to the host, yellow coming back, RED refused.
+    /* Green going to the host, yellow coming back, RED refused.
      *
      * ⭐ Yellow used to mean two opposite things -- "you have it back because
      * you asked" and "you still have it because the bridge failed". Red
@@ -558,49 +558,30 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
         f.audio = tone_on ? note : NULL;   /* silence when the tone is off */
         f.seq = seq++;
         f.haptics = ctm_sig_rumble_on() && i < BUZZ; f.haptic_n = hn; hn += 32;
-        /* ⭐⭐ THE LIGHT IS OURS ONLY ON THE WAY BACK. Settled 2026-08-19 after
-         * getting it wrong in both directions.
+        /* ⭐⭐ THE CORE PAINTS EVERY PATTERN, A BRIDGE INCLUDED (rhoquinn8217,
+         * 2026-08-19), so the light and the tone arrive together: the same code
+         * writes both, and green, yellow and red all come from this side, each
+         * with its own sound, on both transports. The app only ever puts the
+         * player colour back.
          *
-         * ⛔ ON A BRIDGE THE CORE MUST NOT PAINT. This signal runs AFTER the
-         * bridge completes, so its colour lands on top of the app's own green
-         * and then stays -- releasing a claim only stops writing, it does not
-         * restore anything.
+         * ⚠️ THE TRADE IS THE FLICKER, KNOWINGLY TAKEN. A bridge's signal fires
+         * as the controller changes hands -- Moonlight's emulated pad is retired
+         * and the real DualSense arrives on the host -- so its green WILL
+         * stutter. The app used to draw green when the plug call returned, about
+         * a second BEFORE the tone, so the two never arrived together. If the
+         * flicker ever reads worse than that gap did, this is the line to change
+         * back.
          *
-         * ⭐⭐ THE CORE PAINTS EVERY PATTERN NOW, INCLUDING A BRIDGE. rhoquinn8217, 2026-08-19.
- *
- * ⓘ A bridge was excluded for a good reason and the reason still holds: that
- * signal fires as the controller changes hands -- Moonlight's emulated pad is
- * retired and the real DualSense arrives on the host -- so the green WILL
- * stutter. Nothing drawn there can be clean.
- *
- * ⭐ It is included anyway, deliberately, because the alternative was worse:
- * the app drew green when the plug call returned, about a second BEFORE the
- * tone, so the light and the sound never arrived together. Painting here makes
- * them simultaneous by construction -- the same code writes both.
- *
- * ⭐ And it makes the design one rule instead of two: green, yellow and red all
- * come from this side, each with its own sound, on both transports. The app
- * only ever puts the player colour back.
- *
- * ⚠️ THE TRADE IS THE FLICKER, KNOWINGLY TAKEN. If it ever reads worse than the
- * gap did, this line is the one to change back.
- *
- * ⭐ EVERYWHERE ELSE THE CORE SHOULD PAINT -- a handback AND a refusal.
- *
- * ⛔ It was written as "handback only" on 2026-08-19 and that silently killed
- * the refusal's three red flashes: on Bluetooth the app deliberately skips its
- * own red because it believes this side lit it. The tone and the rumble
- * survived, which is why it read as "no red" rather than "no refusal".
- *
- * ⭐ ON AN UNBRIDGE THE CORE SHOULD PAINT, and the app cannot. The
-         * unbridge chord is detected HERE, not in the app: a bridged
-         * controller's touchpad reports come through the core, so the app is
-         * blind to it. It only learns of the unplug from its plugged-check,
-         * a second or more after this tone has finished. Measured: `unplug
-         * pulse finished, 29 steps in 1453ms` arriving well after the sound.
+         * ⛔ A refusal paints here too. Written as "handback only" on 2026-08-19,
+         * that silently killed its three red flashes: on Bluetooth the app skips
+         * its own red when it believes this side lit it.
          *
-         * ➡️ So the light and the tone travel together on the way back, and
-         * the app restores the player colour when it catches up. */
+         * ⓘ On an unbridge only this side can paint: the release gesture is
+         * detected HERE, because a bridged controller's touchpad reports come
+         * through the core and the app is blind to them. The app learns of the
+         * unplug a second or more after this tone has finished (measured: `unplug
+         * pulse finished, 29 steps in 1453ms` well after the sound), and puts the
+         * player colour back when it catches up. */
         /* ⭐ The user's switches. ⓘ Turning the light off does not stop the
          * report going out -- the tone and the felt pulse ride in the same one
          * -- it stops us CLAIMING the lightbar, so the controller leaves it

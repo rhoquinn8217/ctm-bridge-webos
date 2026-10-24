@@ -60,7 +60,7 @@ static uint8_t ds4_volume_raw_byte(unsigned int value)
  *   is Headphones (0xFF) or Split (0xDF); AUTO passes through — the map's
  *   auto_route already wrote it from the jack bit.
  * - 0x11 effect frames: volume bytes BT[21]=headphone-L, BT[22]=headphone-R,
- *   BT[24]=speaker are always the sliders' (TV owns volume; the pad persists
+ *   BT[24]=speaker are always the settings' (TV owns volume; the pad persists
  *   whatever was set last, so an explicit value every frame is the sane
  *   default the user asked for). Rumble/LED bytes untouched.
  * When: every outbound report, from the pump. Returns 0 (never drops). */
@@ -284,7 +284,8 @@ static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settin
             headset, speaker, route, rc);
 }
 
-/* set_settings: a live slider moved. ⓘ The FIRST set_settings in this tree --
+/* set_settings: new values, at the plug and whenever the PC's host config sends
+ * them. ⓘ The FIRST set_settings in this tree --
  * every other type leaves it NULL and reads its values inside patch_output,
  * which is exactly why a pad the host is not talking to never heard them. */
 static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)

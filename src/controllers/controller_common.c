@@ -256,10 +256,10 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
-    /* ⭐⭐ A TYPE'S OWN SIGNAL THREAD, and plug-out's wait for it -- see
+    /* ⭐⭐ A SIGNAL THREAD, and plug-out's wait for it -- see
      * controller_signal_begin. Guarded by signal_mutex, which nothing else
-     * takes. ⚠️ The DualSense's connected signal does not use this: its thread
-     * is handed the bare controller and nothing waits for it. */
+     * takes. ⓘ The DualSense's connected signal claims it too, since
+     * 2026-09-21 (feedback_play_connected). */
     pthread_mutex_t signal_mutex;
     pthread_cond_t signal_idle;
     int signal_running;      /* a signal thread holds the controller */
@@ -1303,8 +1303,7 @@ static void *mic_capture_thread(void *arg)
      * INVISIBLE WITH ONE CONTROLLER. One thread, one buffer, correct
      * behaviour -- the fault could not exist until a second thread did.
      *
-     * It cannot go on the stack: ~2 KB is too much for a thread here.
-     * Allocated per thread and freed on exit instead. */
+     * Allocated per thread and freed on exit. */
     int16_t *buf = (int16_t *)malloc(sizeof(int16_t) * MIC_CAP_FRAMES * MIC_CAP_CHANNELS);
     if (!buf) {
         mic_cap_log("capture buffer allocation failed; thread exiting");
@@ -1702,9 +1701,8 @@ static void request_full_bt_mode(int fd)
     pthread_attr_destroy(&attr);
 }
 
-/* INVESTIGATION, 2026-08-08 -- read only, changes nothing.
- *
- * Does a WIRED DualSense report its own identity?
+/* Does a WIRED DualSense report its own identity? Asked 2026-08-08, answered
+ * 2026-08-24 (below): it does, and the answer is used.
  *
  * The working assumption all along has been that a wired controller has no
  * unique identifier: `dev.mac` is empty on a cable, which is why two
@@ -1716,10 +1714,9 @@ static void request_full_bt_mode(int fd)
  * PlayStation driver obtains a MAC for a wired DualSense. If it answers here,
  * the identifier exists and has simply never been asked for.
  *
- * The whole first line of the reply is logged as bytes rather than parsed. The
- * layout is documented but unverified on this hardware, and guessing at
- * formats is what produced three sessions of wrong conclusions elsewhere in
- * this project. Read the bytes first, decide what they mean second. */
+ * The reply was logged as bytes before anything parsed it: guessing at formats
+ * is what produced three sessions of wrong conclusions elsewhere in this
+ * project. Read the bytes first, decide what they mean second. */
 static int reply_is_zero(const uint8_t *p, size_t n)
 {
     for (size_t i = 0; i < n; ++i) if (p[i]) return 0;
@@ -2332,14 +2329,14 @@ int ctm_controller_open_config(ctm_controller_t *c)
 
 /* --- a type's signal thread, and plug-out's wait for it --------------------
  *
- * ⛔⛔ WHY ANY OF THIS EXISTS. The DualSense's connected signal is handed the
- * bare controller on a detached thread and nothing ever waits for it: it writes
- * the node and the speaker for up to a couple of seconds, while plug-out closes
- * both and every caller frees the controller the moment plug-out returns. A
- * release inside that window writes to a closed or reused descriptor and reads
- * freed memory. ➡️ These give a type's signal thread the one guarantee it
- * needs -- plug-out does not close anything until it has finished -- without
- * changing a line of the DualSense's.
+ * ⛔⛔ WHY ANY OF THIS EXISTS. A signal is handed the bare controller on a
+ * detached thread: it writes the node and the speaker for up to a couple of
+ * seconds, while plug-out closes both and every caller frees the controller the
+ * moment plug-out returns. A release inside that window writes to a closed or
+ * reused descriptor and reads freed memory. ➡️ These give a signal thread the
+ * one guarantee it needs -- plug-out does not close anything until it has
+ * finished. ⓘ The DualSense's connected signal was the one that waited for
+ * nothing, until it claimed as well (feedback_play_connected, 2026-09-21).
  *
  * ⓘ Every touch is under signal_mutex, including the value kept for the
  * signal to give back: the session thread writes it, the signal thread reads
@@ -2539,8 +2536,7 @@ uint32_t controller_signal_kept(ctm_controller_t *c)
  * is told to stop and waited for. ⚠️ Unbounded on purpose -- the other choice
  * is closing the node under a write. A signal thread checks between steps of a
  * few tens of milliseconds, so the wait is one step long -- or one write, if
- * the pad is stalling its writes. ⓘ Instant for every type that never begins
- * a signal, the DualSense included. */
+ * the pad is stalling its writes. ⓘ Instant when no signal is playing. */
 static void signal_close(ctm_controller_t *c)
 {
     pthread_mutex_lock(&c->signal_mutex);

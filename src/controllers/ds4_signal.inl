@@ -401,32 +401,16 @@ static int ds4sig_play_fd(int fd, int pattern, ctm_controller_t *log_to, const c
     ds4sig_notes_for(pattern, &first, &second);
 
 
-    /* ⛔⛔ ALWAYS THE LONG PRIME. The DualSense's per-pad memory is WRONG for
-     * this pad, and the logs say so plainly: every handback that was heard
-     * tonight carried `prime 450`, and every silent one carried `prime 150` --
-     * same pad, same build, same perfect delivery (`929ms for 928ms`, writes
-     * 0ms).
-     * ➡️ "Primed once" is not a property that LASTS on a DS4. Its decoder goes
-     * idle between signals, so a table that remembers forever hands a short
-     * prime to a cold decoder and the tone is simply not played.
-     * ⓘ The cost is a 1.8 s lead-in on every tone. ⭐ Worth revisiting with a
-     * LAST-HEARD TIMESTAMP rather than a flag -- short prime only if a tone
-     * played in the last few seconds -- which needs state this file does not
-     * keep yet. Correct and slow beats fast and silent. */
-    /* ⛔ BACK TO THE PER-PAD RULE, build 414's. Long for a pad this run has not
-     * primed, short afterwards. ⚠️ I replaced it with "always long" on 2026-09-22
-     * because good handbacks logged `prime 450` and silent ones `prime 150` --
-     * and rhoquinn8217's C3 showed that correlation was confounded: there the
-     * delivery is PERFECT (`writes took 0ms`) and the release still went from
-     * heard-regularly to hardly-ever. ➡️ The change did not buy what it claimed
-     * and it cost the release, so it goes back. */
     /* ⛔⛔ ALWAYS THE LONG PRIME. THE SHORT ONE IS THE LAST FAULT (2026-09-23).
      *
-     * ⚠️ Yes, this file records "always long" being tried on 2026-09-22 and
-     * reverted. That reading was confounded: it predated the 0x15 combined
-     * report, so a second writer was eating notes at the same time, and it was
-     * judged without measuring each note. Both of those are fixed now, and the
-     * evidence this time is a rate rather than an impression:
+     * ⓘ The road here: "always long" was first tried on 2026-09-22, when every
+     * handback heard that night carried `prime 450` and every silent one
+     * `prime 150`, and was then reverted to the per-pad rule (long for a pad not
+     * yet primed this run, short afterwards) on the C3's evidence. That reading
+     * was confounded: it predated the 0x15 combined report, so a second writer
+     * was eating notes at the same time, and it was judged without measuring
+     * each note. Both of those are fixed now, and the evidence this time is a
+     * rate rather than an impression:
      *
      *     signals ~30s apart, prime 450   release 15/15, bridge 13/15
      *     signals ~7s apart,  prime 450   10 of 10

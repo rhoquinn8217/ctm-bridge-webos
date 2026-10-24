@@ -227,9 +227,11 @@ typedef struct {
      *   preflight       can the device be opened; 0 or the errno. Replaces
      *                   the hidraw check before BRIDGE_START.
      *   open_input      open the node, fill caps (no report descriptor),
-     *                   return the fd or -1. The pump then GRABS THIS FD
-     *                   ITSELF: a grab through another handle would take the
-     *                   events from this one too.
+     *                   return the fd or -1. A type that also sets grab_evdev
+     *                   has the pump grab THIS FD itself, since a grab through
+     *                   another handle would take the events from this one too
+     *                   (none does today: SDL must still read an Xbox-driver
+     *                   pad, for the overlay's combo).
      *   read_input      turn what the node has into one report; its length,
      *                   0 for nothing complete yet, -1 on error.
      *   current_report  the report for the present state, with no I/O. Sent

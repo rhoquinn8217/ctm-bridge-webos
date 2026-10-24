@@ -28,10 +28,10 @@
  * WIRED ONLY -- Bluetooth carries audio inside the report patching, a
  * different path entirely.
  *
- * THE FAILURE SIGNAL IS NOT HERE, AND CANNOT BE. A refused plug has no
- * session and no open audio device, so nothing on this side can make a sound.
- * It lives in the app, which still holds the controller through SDL, and is
- * rumble only for that reason. */
+ * THE REFUSAL IS NOT HERE. A refused plug has no session, so it is played
+ * without one: ctm_signal_wired.inl opens a cabled pad's sound card itself and
+ * ctm_bt_signal.inl writes a Bluetooth pad's node, and the app's own red and
+ * buzz cover a pad neither can sound. */
 
 #define FEEDBACK_RATE         48000
 #define FEEDBACK_CHANNELS     4
@@ -512,17 +512,14 @@ static void feedback_play_connected(ctm_controller_t *c)
  * then finding the controller still bridged is itself a report of a failed
  * unplug that would otherwise be silent.
  *
- * Generic, one beep, same as connecting -- the two are not yet meant to be
- * told apart. */
+ * The handed-back pattern, falling, where connecting rises (BTSIG_HANDED_BACK). */
 static void feedback_play_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
-    /* All three sound the SAME for now, deliberately. The signals have to be
-     * heard before a vocabulary is committed to, and today connecting and
-     * unplugging are already indistinguishable from each other -- so encoding
-     * meaning would be building on nothing.
+    /* All three reasons sound the SAME, deliberately: a pad handed back is
+     * handed back, whatever asked for it.
      *
-     * What the reason buys today is the LOG: it names which of the three
-     * routes actually fired. They are not interchangeable -- a user asking is
+     * What the reason buys is the LOG: it names which of the three routes
+     * actually fired. They are not interchangeable -- a user asking is
      * not the same event as everything being torn down -- and until now
      * nothing recorded which had happened. */
     const char *what;

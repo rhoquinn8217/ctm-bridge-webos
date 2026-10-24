@@ -377,9 +377,10 @@ void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len
  * stale "plugged" cannot strand the row. This applies that decision to
  * controllers.
  *
- * Cheap on purpose: a walk of an in-memory table, no I/O, no lock. It is
- * called during enumeration on the UI thread, and anything that waited here
- * would be waiting in front of the interface. */
+ * Cheap on purpose: a walk of an in-memory table under its own lock, held
+ * only for the walk, and no I/O. It is called during enumeration on the UI
+ * thread, and anything that waited here would be waiting in front of the
+ * interface. */
 bool plug_key_is_set(const char *key)
 {
     return session_index_for_key(key) >= 0;
