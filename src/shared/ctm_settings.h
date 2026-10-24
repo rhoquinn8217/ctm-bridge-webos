@@ -2,10 +2,8 @@
 #define CTM_SETTINGS_H
 
 /* Per-controller tunables (audio route/volume, latency, haptics, DS5 patch
- * nibbles), shared by the UI and the controller layer. Extracted from
- * tv_bridge_worker.h so neither depends on the worker (D2 stage 2 removes it).
- * Type names kept for now; a rename to ctm_settings_t lands when
- * tv_bridge_worker is deleted. */
+ * nibbles), shared by the UI and the controller layer. The type keeps the
+ * name of the first standalone worker it came from, which is gone. */
 
 typedef enum {
     TV_BRIDGE_KIND_HID = 0,

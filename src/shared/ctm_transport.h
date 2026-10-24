@@ -2,9 +2,9 @@
 #define CTM_TRANSPORT_H
 
 /* Unified CTMB transport: one framed-message channel that is either raw TCP or
- * ENet/UDP. Promotes the abstraction that lived inline in hidraw_bridge.c
- * (hb_transport_t) and tv_bridge_worker.c (send_msg/recv_msg/connect_tcp/
- * dual-probe) into a single module so the framing + connect logic exists once.
+ * ENet/UDP. Promotes the abstraction that lived inline in the first
+ * standalone worker and relay (send_msg/recv_msg/connect_tcp/dual-probe) into
+ * a single module so the framing + connect logic exists once.
  *
  * Behaviour matches the previously-proven worker path byte-for-byte:
  *   - TCP connect via getaddrinfo (hostname or IP), TCP_NODELAY + keepalive

@@ -1,6 +1,6 @@
 /* DualSense (DS5) controller, BT. Classification + the 0x36/0x32 BT output
- * patching (audio route / volume / latency / haptics) ported verbatim from
- * tv_bridge_worker.c's apply_ds5_settings, now the patch_output hook. */
+ * patching (audio route / volume / latency / haptics), ported verbatim from
+ * the first standalone worker, now the patch_output hook. */
 
 #define _GNU_SOURCE
 

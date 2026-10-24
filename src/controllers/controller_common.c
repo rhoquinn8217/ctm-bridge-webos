@@ -1,9 +1,9 @@
-/* Controller pump + lifecycle + factory (D2 stage 2).
+/* Controller pump + lifecycle + factory.
  *
  * One isolated bridging session per controller: its own reader + session
- * threads, HID fd, ctm_transport, settings, and per-MAC log. This is the merge
- * of tv_bridge_worker.c (DS pump: 2 threads, pacing, evdev grab, HELLO/
- * HOST_CONFIG handshake) and hidraw_bridge.c (verbatim relay). Per-type
+ * threads, HID fd, ctm_transport, settings, and per-MAC log. It merged the
+ * first standalone worker's DS pump (2 threads, pacing, evdev grab, HELLO/
+ * HOST_CONFIG handshake) and its verbatim HID relay; both are gone. Per-type
  * behaviour is preserved via ops flags (needs_host_config / grab_evdev /
  * request_bt_mode) and the patch_output hook. */
 
