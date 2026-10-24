@@ -273,16 +273,11 @@ bool is_ds4_device(const device_info_t *dev)
            (strcmp(dev->pid, "09cc") == 0 || strcmp(dev->pid, "05c4") == 0);
 }
 
+/* ⓘ The one list is the Xbox type's (controller_xbox.c), so the two cannot
+ * drift apart (2026-10-23): the same twelve ids were written out here too. */
 bool is_xbox_pid(const char *pid)
 {
-    return pid &&
-           (strcmp(pid, "02d1") == 0 || strcmp(pid, "02dd") == 0 ||
-            strcmp(pid, "02e0") == 0 || strcmp(pid, "02e3") == 0 ||
-            strcmp(pid, "02ea") == 0 ||
-            strcmp(pid, "02fd") == 0 || strcmp(pid, "0b00") == 0 ||
-            strcmp(pid, "0b05") == 0 || strcmp(pid, "0b0a") == 0 ||
-            strcmp(pid, "0b12") == 0 || strcmp(pid, "0b13") == 0 ||
-            strcmp(pid, "0b20") == 0);
+    return xbox_known_pid(pid);
 }
 
 bool is_xbox_device(const device_info_t *dev)

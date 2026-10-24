@@ -27,11 +27,14 @@
 #include <sys/socket.h>
 #include <time.h>
 
-/* ⓘ Declared here rather than by including ctm_state.h: that header also
- * declares read_text_file(), and this file has its own static copy of it.
- * ⭐ Defined in ctm_state.c -- see the /tmp note on the declaration there. */
+/* ⓘ Declared here rather than by including ctm_state.h, which carries the
+ * app half's whole state. ⭐ Defined in ctm_state.c -- see the /tmp note on
+ * the declaration there. read_text_file is the one sysfs reader: this file had
+ * its own copy until 2026-10-23, which failed an empty file where the other
+ * gave an empty string. */
 const char *ctm_log_path(const char *name);
 FILE *ctm_log_open(const char *name, const char *mode);
+int read_text_file(const char *path, char *out, size_t out_len);
 #include <unistd.h>
 
 #ifdef __linux__
@@ -1623,24 +1626,6 @@ static void mic_capture_stop(ctm_controller_t *c)
 static int c_recv(ctm_controller_t *c, ctmb_header_t *h, uint8_t **payload)
 {
     return ctm_transport_recv_msg(&c->xport, h, payload);
-}
-
-/* Read a sysfs text attribute, trimmed. When: evdev-grab vid/pid matching. */
-static int read_text_file(const char *path, char *out, size_t out_len)
-{
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, out, out_len - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    out[n] = '\0';
-    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
-                     out[n - 1] == ' ' || out[n - 1] == '\t')) {
-        out[--n] = '\0';
-    }
-    return 0;
 }
 
 /* Compare a hex-string sysfs attr to a numeric vid/pid. When: evdev matching. */
