@@ -353,10 +353,7 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
 {
     if (fd < 0) return -1;
 
-    /* ⚠️ COUNTED, because each note is being heard TWICE and reading the code
-     * has not explained it -- one pass through here writes each note once.
-     * Either this runs twice per event, or something else is playing as well.
-     * The number says which. */
+    /* One number per signal: the light takeover's sequence below. */
     static unsigned s_calls;
     unsigned call = ++s_calls;
 
@@ -383,31 +380,6 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     btsig_frame_t f;
     memset(&f, 0, sizeof(f));
     int seq = 0, hn = 0, sent = 0, failed = 0;
-
-    /* ⭐⭐ OUR OWN BYTES, in the same layout the relay logs for the host's.
-     * The shapes match; the contents are the only place a difference can be,
-     * and these are the blocks where we choose values rather than copy them. */
-    {
-        btsig_frame_t probe;
-        memset(&probe, 0, sizeof(probe));
-        probe.audio = NULL; probe.seq = 0;
-        uint8_t sample[BTSIG_REPORT_LEN];
-        btsig_build(sample, &probe);
-        char hx[300];
-        int m = 0;
-        m += snprintf(hx + m, sizeof(hx) - m, "ours_bytes: hdr %02x %02x |", sample[0], sample[1]);
-        m += snprintf(hx + m, sizeof(hx) - m, " 90:");
-        for (int k = 0; k < 12; ++k) m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[2 + k]);
-        m += snprintf(hx + m, sizeof(hx) - m, " | 91:");
-        for (int k = 0; k < 9; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[67 + k]);
-        m += snprintf(hx + m, sizeof(hx) - m, " | 95hdr:");
-        for (int k = 0; k < 4; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[76 + k]);
-        m += snprintf(hx + m, sizeof(hx) - m, " | 92hdr:");
-        for (int k = 0; k < 6; ++k)  m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[278 + k]);
-        m += snprintf(hx + m, sizeof(hx) - m, " | tail:");
-        for (int k = 4; k >= 1; --k) m += snprintf(hx + m, sizeof(hx) - m, " %02x", sample[BTSIG_REPORT_LEN - k]);
-        if (log_to) ctl_log(log_to, "%s", hx);
-    }
 
     /* Prime: the decoder needs a stream to start. A burst from cold produces
      * nothing at all, which is how three earlier attempts read as failures.

@@ -571,17 +571,10 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
         fclose(f);
         if (!found) continue;
 
-        /* MEASUREMENT, NOT A FIX -- and the same line the capture scan already
-         * writes. Both controllers' scans match on the name "DualSense", so
-         * with two attached there is nothing here tying a card to the
-         * controller asking for it, and audio has been heard coming from a
-         * controller that was not even bridged.
-         *
-         * Every occurrence so far has been unattributable, because this scan
-         * said which card it opened and never which controller asked. It has
-         * now been observed twice and reproduced neither time; this line is
-         * what makes the next occurrence readable rather than another parked
-         * report. Matching on the header is deliberately NOT done yet. */
+        /* ⓘ Which card this scan opens, and for which node: the line that
+         * makes audio heard from the wrong pad readable. The scan matches on
+         * the name "DualSense" alone; the card match (ctm_cardmatch.inl) is
+         * what tells two pads' cards apart. */
         alsa_log("[alsa-scan]", "card=%d wants_node=%s header=[%s]",
                  card, want_node ? want_node : "?", header);
 
@@ -1186,20 +1179,10 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
         fclose(f);
         if (!found) continue;
 
-        /* MEASUREMENT, NOT A FIX. Both capture threads scan this same list and
-         * both match on the name "DualSense", so with two controllers there is
-         * nothing here that ties a card to the controller asking for it.
-         *
-         * On 2026-08-04 both threads reported bit-identical audio levels while
-         * one controller was MUTED AT THE HARDWARE -- peaks 231/231, 188/188,
-         * 237/237 -- which a muted microphone cannot produce. Both were
-         * reading one microphone.
-         *
-         * This line prints what each card says about itself and which
-         * controller is asking, so a later session can see whether they
-         * correspond. Matching on it is deliberately NOT done yet: the text
-         * format has not been read, and guessing at formats is what produced
-         * three sessions of wrong conclusions. */
+        /* ⓘ Which card this capture scan opens, and for which node. The scan
+         * matches on the name "DualSense" alone: on 2026-08-04 two pads' threads
+         * read one microphone (identical levels while one pad was muted at the
+         * hardware), and this line is what shows such a thing. */
         mic_cap_log("scan: card=%d wants_node=%s header=[%s]",
                     card, want_node ? want_node : "?", header);
 
