@@ -227,9 +227,11 @@ typedef struct {
      *   preflight       can the device be opened; 0 or the errno. Replaces
      *                   the hidraw check before BRIDGE_START.
      *   open_input      open the node, fill caps (no report descriptor),
-     *                   return the fd or -1. The pump then GRABS THIS FD
-     *                   ITSELF: a grab through another handle would take the
-     *                   events from this one too.
+     *                   return the fd or -1. A type that also sets grab_evdev
+     *                   has the pump grab THIS FD itself, since a grab through
+     *                   another handle would take the events from this one too
+     *                   (none does today: SDL must still read an Xbox-driver
+     *                   pad, for the overlay's combo).
      *   read_input      turn what the node has into one report; its length,
      *                   0 for nothing complete yet, -1 on error.
      *   current_report  the report for the present state, with no I/O. Sent
@@ -253,10 +255,6 @@ typedef struct {
 /* Live bridging status — read-only snapshot for the UI status panel. */
 typedef struct {
     bool connected;              /* a session is up (handshake done, looping) */
-    bool transport_enet;         /* true = ENet/UDP, false = TCP */
-    unsigned long reports_in;    /* input reports forwarded to the host */
-    unsigned long reports_out;   /* output reports written to the device */
-    char last_event[96];         /* most recent controller log line */
 
     /* ⭐⭐ THE HOST IS GONE AND THE SESSION HAS STOPPED TRYING. T-127.
      *
@@ -349,21 +347,18 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
 extern volatile bool ctm_unplug_quietly;
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
-/* CONFIRMATION SIGNALS -- ALL OR NOTHING.
+/* CONFIRMATION SIGNALS, AND THEIR SWITCHES. The tone, the felt pulse and the
+ * lightbar each have the user's own switch (Settings > USB Bridge), on every
+ * transport, and the app's own fallback follows the same three.
  *
- * One switch for every signal on every transport: the tone, the felt pulse,
- * the lightbar patterns, and the SDL fallback. Not a tone switch and a
- * transport rule -- one concept.
- *
- * ⭐ AND IT COVERS THE FAILURE SIGNALS TOO, deliberately. rhoquinn8217, 2026-08-12:
+ * ⭐ THEY COVER THE FAILURE SIGNALS TOO, deliberately. rhoquinn8217, 2026-08-12:
  * "if you are not using the confirmation signals, you are putting on a
  * blindfold and getting angry that you are blindfolded when things go wrong."
  * A switch that silences success but keeps failure sounds thoughtful and is
  * really just a second thing to reason about.
  *
- * It becomes a real setting when the status page exists -- deliberately no
- * button for it yet. */
-#define CTM_SIGNALS_ENABLED 1
+ * ⓘ A master switch over all three sat here as a constant 1 until 2026-10-23,
+ * waiting for a status page; the three switches off are the same thing. */
 
 /* ⓘ T-120 REBUILT THE BLUETOOTH PATH ONE LAYER AT A TIME, behind switches: the
  * core's Bluetooth confirmation signal (BT_LAYER_CORE_SIGNAL) and what the
@@ -430,7 +425,6 @@ int ds4_signal_refused_bt(const char *node);
  * `pattern` is btsig_pattern_t: 0 handing over, 1 handed back, 2 refused. */
 void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms);
-int  ds4_signal_breath(long at_ms, long total_ms, int breaths);
 /* The light's brightness `at_ms` into a DS4 signal: 0 bridged, 1 handed
  * back, 2 refused, as ds4_signal_shape_of numbers them. */
 int  ds4_signal_level(int pattern, long at_ms);
@@ -440,9 +434,6 @@ int  ds4_signal_level(int pattern, long at_ms);
  * five seconds, so this is the only way a DS4 tone reliably plays. */
 int ds4_signal_tone_node(const char *node, int pattern);
 
-/* The light and the felt pulse on a bare node, for a signal with no session --
- * a refusal. 0 handing over, 1 handed back, 2 refused. ⛔ Bluetooth only. */
-int ds4_signal_light_pulse_node(const char *node, int pattern);
 int ctm_signal_wired_no_session(const char *node, int pattern);
 
 void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s);
@@ -450,11 +441,6 @@ void ctm_controller_set_settings(ctm_controller_t *c, const tv_bridge_worker_set
 void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_t *out);
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out);
 void ctm_controller_destroy(ctm_controller_t *c);
-
-/* Register a sink for controller log lines (e.g. the app's on-screen console).
- * NULL = file + stderr only. The sink must be thread-safe — controllers log
- * from their own threads. When: app startup. */
-void ctm_controller_set_log_sink(void (*sink)(const char *line));
 
 /* Append the Sony BT HID output-report CRC32 (seed 0xa2) to the trailing 4
  * bytes. When: a DS patch_output hook after rewriting a report. Defined in
@@ -528,7 +514,7 @@ int signals_rumble_on(void);
  * from the branch in controller_common.c the first time a type gains a signal. */
 int ctm_controller_will_signal_connect(const ctm_controller_dev_t *dev);
 /* Is the light allowed right now? The same, for a type that paints a lightbar
- * of its own. ⓘ Like the pulse's, it answers no when CTM_SIGNALS_ENABLED is off. */
+ * of its own. ⓘ Like the pulse's, it follows the user's switch. */
 int signals_light_on(void);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for

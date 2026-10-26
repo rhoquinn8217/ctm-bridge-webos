@@ -273,16 +273,11 @@ bool is_ds4_device(const device_info_t *dev)
            (strcmp(dev->pid, "09cc") == 0 || strcmp(dev->pid, "05c4") == 0);
 }
 
+/* ⓘ The one list is the Xbox type's (controller_xbox.c), so the two cannot
+ * drift apart (2026-10-23): the same twelve ids were written out here too. */
 bool is_xbox_pid(const char *pid)
 {
-    return pid &&
-           (strcmp(pid, "02d1") == 0 || strcmp(pid, "02dd") == 0 ||
-            strcmp(pid, "02e0") == 0 || strcmp(pid, "02e3") == 0 ||
-            strcmp(pid, "02ea") == 0 ||
-            strcmp(pid, "02fd") == 0 || strcmp(pid, "0b00") == 0 ||
-            strcmp(pid, "0b05") == 0 || strcmp(pid, "0b0a") == 0 ||
-            strcmp(pid, "0b12") == 0 || strcmp(pid, "0b13") == 0 ||
-            strcmp(pid, "0b20") == 0);
+    return xbox_known_pid(pid);
 }
 
 bool is_xbox_device(const device_info_t *dev)
@@ -377,44 +372,13 @@ void logical_name_for_device(const device_info_t *dev, char *out, size_t out_len
  * stale "plugged" cannot strand the row. This applies that decision to
  * controllers.
  *
- * Cheap on purpose: a walk of an in-memory table, no I/O, no lock. It is
- * called during enumeration on the UI thread, and anything that waited here
- * would be waiting in front of the interface. */
+ * Cheap on purpose: a walk of an in-memory table under its own lock, held
+ * only for the walk, and no I/O. It is called during enumeration on the UI
+ * thread, and anything that waited here would be waiting in front of the
+ * interface. */
 bool plug_key_is_set(const char *key)
 {
     return session_index_for_key(key) >= 0;
-}
-
-bool expand_key_is_set(const char *key)
-{
-    for (int i = 0; i < g_expanded_key_count; ++i) {
-        if (strcmp(g_expanded_keys[i], key) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void set_expand_key(const char *key, bool expanded)
-{
-    for (int i = 0; i < g_expanded_key_count; ++i) {
-        if (strcmp(g_expanded_keys[i], key) == 0) {
-            if (!expanded) {
-                memmove(&g_expanded_keys[i], &g_expanded_keys[i + 1],
-                        (size_t)(g_expanded_key_count - i - 1) * sizeof(g_expanded_keys[0]));
-                g_expanded_key_count--;
-            }
-            return;
-        }
-    }
-    if (expanded && g_expanded_key_count < MAX_DEVICES) {
-        snprintf(g_expanded_keys[g_expanded_key_count++], sizeof(g_expanded_keys[0]), "%s", key);
-    }
-}
-
-bool logical_device_can_expand(const logical_device_t *item)
-{
-    return item && starts_with(item->key, "steam:") && item->device_count > 1;
 }
 
 logical_device_t *find_or_add_logical_device(logical_result_t *logical, const device_info_t *dev, int scan_index)
@@ -870,24 +834,6 @@ void enumerate_devices(scan_result_t *result)
             }
         }
     }
-}
-
-/* A generic "hid" row that is a real mouse or keyboard (top-level HID usage
- * page 1, usage 2/6 on any of its interfaces). These enumerate cleanly on the
- * host via the dynamic identity profile, so they are safe to auto-plug —
- * unlike exotic vendor collections (the MR24 raw-relay code-10 lesson). */
-bool item_is_mouse_or_keyboard(const logical_device_t *item)
-{
-    if (!item) return false;
-    for (int i = 0; i < item->device_count; ++i) {
-        int idx = item->device_indices[i];
-        if (idx < 0 || idx >= g_scan.count) continue;
-        const device_info_t *dev = &g_scan.devices[idx];
-        if (dev->usage_page == 1 && (dev->usage == 2 || dev->usage == 6)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* ⭐ Is this a game controller? Only controllers are auto-bridged or given a

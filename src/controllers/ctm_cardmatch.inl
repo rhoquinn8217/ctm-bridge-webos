@@ -30,7 +30,8 @@
  * what any controller does, so it tells us nothing about whose card it is.
  *
  * WHAT THIS FILE DOES, AND ONLY THIS. One controller. Read its level, mute
- * it, read again, unmute. Log both. NOTHING ACTS ON THE RESULT.
+ * it, read again, unmute. Log both. The answer is the card the speaker and
+ * the microphone use from then on (cardmatch_identify).
  *
  * The whole design rests on "live is never zero, muted is always zero", and
  * that has never been measured in a genuinely silent room. If the live
@@ -286,10 +287,10 @@ static void cardmatch_read_all(cardmatch_slot_t *slots, int n, int muted_pass)
 
 /* Work out which free card belongs to this controller, and say so.
  *
- * LOGS THE ANSWER AND CHANGES NOTHING. It also records which card the
- * ordinary scan would have taken, so the two can be compared: when they
- * disagree, that is the misrouting caught in the act rather than reported
- * afterwards. */
+ * The answer is the card this controller uses from here on (matched_card),
+ * and the speaker is moved onto it. It also records which card the ordinary
+ * scan would have taken, so the two can be compared: when they disagree, that
+ * is the misrouting caught in the act rather than reported afterwards. */
 /* THE PROBE ITSELF, split out so it can be SKIPPED when the answer is already
  * known. Everything here was cardmatch_identify's first half and is unchanged
  * -- the split is where `answer` was decided, and the card handles are closed

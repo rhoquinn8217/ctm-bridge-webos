@@ -10,8 +10,8 @@
  * - no address: nothing is known, and nothing is online;
  * - a different address or port: nothing is known about it yet, so "probed"
  *   is cleared and the status reads unknown until it answers. "Online" is
- *   assumed, as it always was for a new address: the standalone app waits on
- *   it, and every reading the TV app shows asks "probed" first;
+ *   assumed, as it always was for a new address: every reading the TV app
+ *   shows asks "probed" first;
  * - the same address and port: what is known about it stays, until the probe.
  *
  * Returns true when the address or port changed.

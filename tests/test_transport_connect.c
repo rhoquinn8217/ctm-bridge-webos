@@ -16,19 +16,6 @@
 
 #include <arpa/inet.h>
 
-/* The ENet client is not under test: these only let the transport link. */
-int enet_client_connect(ctm_enet_client_t *client, const char *host, int port, unsigned int timeout_ms)
-{ (void)client; (void)host; (void)port; (void)timeout_ms; return -1; }
-void enet_client_disconnect(ctm_enet_client_t *client) { (void)client; }
-int enet_client_connected(const ctm_enet_client_t *client) { (void)client; return 0; }
-int enet_client_service(ctm_enet_client_t *client, unsigned int timeout_ms)
-{ (void)client; (void)timeout_ms; return 0; }
-int enet_client_send_msg(ctm_enet_client_t *client, uint16_t type, uint32_t flags,
-                         uint32_t request_id, const void *payload, size_t len)
-{ (void)client; (void)type; (void)flags; (void)request_id; (void)payload; (void)len; return -1; }
-int enet_client_recv_msg(ctm_enet_client_t *client, ctmb_header_t *h, uint8_t **payload)
-{ (void)client; (void)h; (void)payload; return -1; }
-
 static int checks, failed;
 
 static void ok(int cond, const char *what)
@@ -82,7 +69,7 @@ static int dial_and_leave(int port)
 int main(void)
 {
     ctm_transport_t t;
-    ctm_transport_init(&t, NULL);
+    ctm_transport_init(&t);
     struct timespec t0;
     int port = 0;
 
@@ -90,7 +77,7 @@ int main(void)
     int lfd = listening(4, &port);
     if (lfd < 0) { perror("listener"); return 2; }
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 0, 300) == 0, "the connect lands");
+    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 300) == 0, "the connect lands");
     ok(ms_since(&t0) < 200, "at once");
     ctm_transport_disconnect(&t);
     close(lfd);
@@ -100,7 +87,7 @@ int main(void)
     if (lfd < 0) { perror("listener"); return 2; }
     close(lfd);   /* the port is free again, and nothing is on it */
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 0, 1000) != 0, "the connect is refused");
+    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 1000) != 0, "the connect is refused");
     ok(ms_since(&t0) < 200, "at once: the session paces its attempts for this one");
 
     printf("\na PC that drops the connect in silence\n");
@@ -113,18 +100,18 @@ int main(void)
     const int fill_b = dial_and_leave(port);
     usleep(100000);   /* the first is in the queue now */
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    int rc = ctm_transport_connect_within(&t, "127.0.0.1", port, 0, 300);
+    int rc = ctm_transport_connect_within(&t, "127.0.0.1", port, 300);
     long took = ms_since(&t0);
     ok(rc != 0, "a connect nobody answers fails");
     ok(took >= 250 && took < 1000, "after the 300 ms it was allowed, not the transport's two seconds");
     printf("        (%ld ms)\n", took);
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    rc = ctm_transport_connect_within(&t, "127.0.0.1", port, 0, 5000);
+    rc = ctm_transport_connect_within(&t, "127.0.0.1", port, 5000);
     took = ms_since(&t0);
     ok(rc != 0 && took >= 1900 && took < 2600,
        "allowed five seconds, it still waits only the transport's two");
     printf("        (%ld ms)\n", took);
-    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 0, 0) != 0, "allowed nothing, it does not try");
+    ok(ctm_transport_connect_within(&t, "127.0.0.1", port, 0) != 0, "allowed nothing, it does not try");
     if (fill_a >= 0) close(fill_a);
     if (fill_b >= 0) close(fill_b);
     close(lfd);

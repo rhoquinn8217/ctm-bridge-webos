@@ -28,14 +28,13 @@
  * WIRED ONLY -- Bluetooth carries audio inside the report patching, a
  * different path entirely.
  *
- * THE FAILURE SIGNAL IS NOT HERE, AND CANNOT BE. A refused plug has no
- * session and no open audio device, so nothing on this side can make a sound.
- * It lives in the app, which still holds the controller through SDL, and is
- * rumble only for that reason. */
+ * THE REFUSAL IS NOT HERE. A refused plug has no session, so it is played
+ * without one: ctm_signal_wired.inl opens a cabled pad's sound card itself and
+ * ctm_bt_signal.inl writes a Bluetooth pad's node, and the app's own red and
+ * buzz cover a pad neither can sound. */
 
 #define FEEDBACK_RATE         48000
 #define FEEDBACK_CHANNELS     4
-#define FEEDBACK_TONE_HZ      880    /* a clear beep, above game rumble */
 #define FEEDBACK_RUMBLE_HZ    60     /* low enough to be felt, not heard */
 #define FEEDBACK_MS           140
 #define FEEDBACK_GAP_MS       90     /* silence between beeps, so two read as two */
@@ -68,23 +67,6 @@
  * a freshly cabled controller hears its one tone about two and a half
  * seconds late, once. The first play is inaudible there by definition. */
 #define FEEDBACK_REPEAT_GAP_MS 1500
-/* How long to ask the host to keep the audio stream alive. Comfortably longer
- * than the tone -- 14 Opus frames at Bluetooth pacing take roughly 400 ms to
- * go out, and overshooting costs only a few silent reports. */
-#define FEEDBACK_HOLD_MS      1500
-/* Longest to hold up a teardown waiting for the tone to leave.
- *
- * MEASURED, not estimated. 800 ms was tried first on the assumption that 14
- * frames at Bluetooth's ~30 ms pacing would take about 400 ms. It does not:
- * the connect tone timed out at 800 ms and then finished shortly after, so
- * the frames leave at roughly 60 ms each -- about 840 ms for the set, just
- * past the old cutoff. The connect survived it because the session carries on
- * afterwards; the unplug did not, because it tears down the moment the wait
- * gives up.
- *
- * Still bounded, so a stalled link cannot hold an unplug open indefinitely,
- * and still shorter than the hold the host was asked for. */
-#define FEEDBACK_TONE_WAIT_MS 1200
 #define FEEDBACK_TONE_LEVEL   9000   /* ~28% of full scale: audible, not harsh */
 #define FEEDBACK_RUMBLE_LEVEL 14000  /* the motors need more than the speaker */
 
@@ -236,7 +218,6 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
                           btsig_pattern_t pattern)
 {
     if (!c) return;
-    if (!CTM_SIGNALS_ENABLED) return;
     /* ⛔ THE BUS SAYS BLUETOOTH, NOT A MISSING SPEAKER (code review,
      * 2026-10-05). This read "no audio device, so Bluetooth", and a cabled pad
      * whose sound card could not be opened was sent the whole Bluetooth signal,
@@ -530,17 +511,14 @@ static void feedback_play_connected(ctm_controller_t *c)
  * then finding the controller still bridged is itself a report of a failed
  * unplug that would otherwise be silent.
  *
- * Generic, one beep, same as connecting -- the two are not yet meant to be
- * told apart. */
+ * The handed-back pattern, falling, where connecting rises (BTSIG_HANDED_BACK). */
 static void feedback_play_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
-    /* All three sound the SAME for now, deliberately. The signals have to be
-     * heard before a vocabulary is committed to, and today connecting and
-     * unplugging are already indistinguishable from each other -- so encoding
-     * meaning would be building on nothing.
+    /* All three reasons sound the SAME, deliberately: a pad handed back is
+     * handed back, whatever asked for it.
      *
-     * What the reason buys today is the LOG: it names which of the three
-     * routes actually fired. They are not interchangeable -- a user asking is
+     * What the reason buys is the LOG: it names which of the three routes
+     * actually fired. They are not interchangeable -- a user asking is
      * not the same event as everything being torn down -- and until now
      * nothing recorded which had happened. */
     const char *what;

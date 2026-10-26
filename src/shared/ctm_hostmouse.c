@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "ctm_bridge_protocol.h"
+#include "ctm_controller.h"   /* ctm_gesture_log */
 #include "ctm_transport.h"
 
 /* Absolute-pointer HID report descriptor, matching the deployed AbsMouse/KVM
@@ -106,6 +107,8 @@ static struct {
     uint8_t keys[HM_KB_MAX_KEYS];
 } g_hm = { .state_mutex = PTHREAD_MUTEX_INITIALIZER };
 
+/* To the gesture log (2026-10-23): this wrote to stderr, which a TV does not
+ * keep, so a pointer that failed left no trace. */
 static void hm_log(const char *fmt, ...)
 {
     char line[256];
@@ -113,7 +116,27 @@ static void hm_log(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
-    fprintf(stderr, "hostmouse: %s\n", line);
+    ctm_gesture_log(NULL, "hostmouse: %s", line);
+}
+
+/* A send that fails fails again for every movement until the link is seen to
+ * be gone: said once, then at most once every 5 s with how many since. */
+static void hm_send_failed(const char *what)
+{
+    static time_t s_last;
+    static unsigned s_more;
+    const time_t now = time(NULL);
+    if (s_last != 0 && now - s_last < 5) {
+        ++s_more;
+        return;
+    }
+    if (s_more) {
+        hm_log("%s (and %u more since the last)", what, s_more);
+    } else {
+        hm_log("%s", what);
+    }
+    s_last = now;
+    s_more = 0;
 }
 
 /* The serial this TV's pointer goes by: ctm_hostmouse_set_serial. Written
@@ -198,7 +221,7 @@ static void *hm_session_main(void *arg)
                 break;
             }
             const uint64_t tried_at = hm_now_ms();
-            if (ctm_transport_connect_within(&g_hm.xport, g_hm.host, g_hm.port, 400,
+            if (ctm_transport_connect_within(&g_hm.xport, g_hm.host, g_hm.port,
                                              (unsigned int)(HM_HOST_GONE_MS - gone_ms)) == 0) {
                 break;
             }
@@ -221,7 +244,7 @@ static void *hm_session_main(void *arg)
             usleep(500 * 1000);
             continue;
         }
-        hm_log("connected via %s", g_hm.xport.kind == CTM_TRANSPORT_ENET ? "ENet" : "TCP");
+        hm_log("connected via TCP");
         pthread_mutex_lock(&g_hm.state_mutex);
         g_hm.connected = 1;
         g_hm.last_buttons = 0xFF; /* force first feed to send */
@@ -268,7 +291,7 @@ int ctm_hostmouse_plug(const char *host, int port)
      * reconnect, while the app's thread could be sending through that lock
      * (ctm_hostmouse_feed). Made here and destroyed in ctm_hostmouse_unplug,
      * both on the app's thread, which is also the one that feeds. */
-    ctm_transport_init(&g_hm.xport, NULL);
+    ctm_transport_init(&g_hm.xport);
     if (pthread_create(&g_hm.thread, NULL, hm_session_main, NULL) != 0) {
         hm_log("session thread create failed");
         ctm_transport_destroy(&g_hm.xport);
@@ -329,7 +352,7 @@ void ctm_hostmouse_feed(int x, int y, int w, int h, unsigned buttons, int wheel_
     report[6] = (uint8_t)wheel;
     if (ctm_transport_send_msg(&g_hm.xport, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK,
                                0, report, sizeof(report)) != 0) {
-        hm_log("report send failed");
+        hm_send_failed("report send failed");
     }
 }
 
@@ -368,6 +391,6 @@ void ctm_hostmouse_feed_key(uint8_t hid_usage, bool down)
 
     if (ctm_transport_send_msg(&g_hm.xport, CTMB_MSG_INPUT_REPORT, CTMB_FLAG_OK,
                                0, report, sizeof(report)) != 0) {
-        hm_log("key report send failed");
+        hm_send_failed("key report send failed");
     }
 }

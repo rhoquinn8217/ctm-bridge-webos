@@ -6,8 +6,7 @@
 
 #include "ctm_bridge_protocol.h"  /* ctmb_device_caps_t */
 
-/* HID report-descriptor helpers shared by the bridge binaries. Extracted from
- * byte-identical copies that lived in hidraw_bridge.c and tv_bridge_worker.c. */
+/* HID report-descriptor helpers shared by the bridge's controllers. */
 
 uint32_t hid_item_u32(const uint8_t *p, size_t n);
 void     derive_report_lengths(const uint8_t *desc, uint32_t desc_len,

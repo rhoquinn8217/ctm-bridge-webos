@@ -1,9 +1,9 @@
-/* Controller pump + lifecycle + factory (D2 stage 2).
+/* Controller pump + lifecycle + factory.
  *
  * One isolated bridging session per controller: its own reader + session
- * threads, HID fd, ctm_transport, settings, and per-MAC log. This is the merge
- * of tv_bridge_worker.c (DS pump: 2 threads, pacing, evdev grab, HELLO/
- * HOST_CONFIG handshake) and hidraw_bridge.c (verbatim relay). Per-type
+ * threads, HID fd, ctm_transport, settings, and per-MAC log. It merged the
+ * first standalone worker's DS pump (2 threads, pacing, evdev grab, HELLO/
+ * HOST_CONFIG handshake) and its verbatim HID relay; both are gone. Per-type
  * behaviour is preserved via ops flags (needs_host_config / grab_evdev /
  * request_bt_mode) and the patch_output hook. */
 
@@ -27,11 +27,14 @@
 #include <sys/socket.h>
 #include <time.h>
 
-/* ⓘ Declared here rather than by including ctm_state.h: that header also
- * declares read_text_file(), and this file has its own static copy of it.
- * ⭐ Defined in ctm_state.c -- see the /tmp note on the declaration there. */
+/* ⓘ Declared here rather than by including ctm_state.h, which carries the
+ * app half's whole state. ⭐ Defined in ctm_state.c -- see the /tmp note on
+ * the declaration there. read_text_file is the one sysfs reader: this file had
+ * its own copy until 2026-10-23, which failed an empty file where the other
+ * gave an empty string. */
 const char *ctm_log_path(const char *name);
 FILE *ctm_log_open(const char *name, const char *mode);
+int read_text_file(const char *path, char *out, size_t out_len);
 #include <unistd.h>
 
 #ifdef __linux__
@@ -223,7 +226,6 @@ struct ctm_controller {
     int port;
 
     ctm_transport_t xport;
-    ctm_enet_client_t *enet;        /* process-owned client; borrowed by xport */
     int hid_fd;
     int alsa_fd;   /* wired DS5/Edge: the controller's own playback device */
     int alsa_consec_fail;      /* audio writes that failed outright, in a row */
@@ -257,10 +259,10 @@ struct ctm_controller {
 
     pthread_t session_thread;
     int session_started;
-    /* ⭐⭐ A TYPE'S OWN SIGNAL THREAD, and plug-out's wait for it -- see
+    /* ⭐⭐ A SIGNAL THREAD, and plug-out's wait for it -- see
      * controller_signal_begin. Guarded by signal_mutex, which nothing else
-     * takes. ⚠️ The DualSense's connected signal does not use this: its thread
-     * is handed the bare controller and nothing waits for it. */
+     * takes. ⓘ The DualSense's connected signal claims it too, since
+     * 2026-09-21 (feedback_play_connected). */
     pthread_mutex_t signal_mutex;
     pthread_cond_t signal_idle;
     int signal_running;      /* a signal thread holds the controller */
@@ -356,9 +358,7 @@ struct ctm_controller {
 
     FILE *log;
 
-    /* Live status for the UI panel. Counters are single-writer (reports_in:
-     * reader thread; reports_out: session thread) and read advisorily;
-     * connected/transport/last_event are guarded by status_mutex. */
+    /* Live status for the app: the flags below are guarded by status_mutex. */
     pthread_mutex_t status_mutex;
     volatile int st_connected;
     /* ⭐ T-127: the reconnect loop gave up. Set once, read by the UI tick. */
@@ -366,10 +366,6 @@ struct ctm_controller {
     /* ⭐ The device itself went away mid-session. Set once, read by the UI
      * tick, which releases the session: see device_gone in ctm_controller.h. */
     volatile int st_device_gone;
-    volatile int st_transport_enet;
-    volatile unsigned long st_reports_in;
-    volatile unsigned long st_reports_out;
-    char st_last_event[96];
 
     uint8_t *enum_payload;           /* composite: forwarded enumeration (CTMB_MSG_ENUM) */
     int enum_payload_len;
@@ -380,15 +376,6 @@ struct ctm_controller {
     uint8_t primary_iface;           /* the primary hidraw's USB interface number */
     volatile int comp_run;           /* gates the sibling reader threads */
 };
-
-/* ENet is process-global; init once for all controllers, never deinit. */
-static pthread_once_t g_enet_once = PTHREAD_ONCE_INIT;
-static int g_enet_ready = 0;
-static void enet_global_init_once(void)
-{
-    if (enet_client_global_init() == 0) g_enet_ready = 1;
-    else fprintf(stderr, "controller: enet_initialize failed; ENet disabled, TCP only\n");
-}
 
 /* Audio has its own log file, and every line in it carries a wall-clock time.
  *
@@ -571,17 +558,10 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
         fclose(f);
         if (!found) continue;
 
-        /* MEASUREMENT, NOT A FIX -- and the same line the capture scan already
-         * writes. Both controllers' scans match on the name "DualSense", so
-         * with two attached there is nothing here tying a card to the
-         * controller asking for it, and audio has been heard coming from a
-         * controller that was not even bridged.
-         *
-         * Every occurrence so far has been unattributable, because this scan
-         * said which card it opened and never which controller asked. It has
-         * now been observed twice and reproduced neither time; this line is
-         * what makes the next occurrence readable rather than another parked
-         * report. Matching on the header is deliberately NOT done yet. */
+        /* ⓘ Which card this scan opens, and for which node: the line that
+         * makes audio heard from the wrong pad readable. The scan matches on
+         * the name "DualSense" alone; the card match (ctm_cardmatch.inl) is
+         * what tells two pads' cards apart. */
         alsa_log("[alsa-scan]", "card=%d wants_node=%s header=[%s]",
                  card, want_node ? want_node : "?", header);
 
@@ -802,10 +782,6 @@ static uint64_t now_us(void)
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 }
 
-/* Optional UI log sink, set by the app, so controller events also appear in the
- * on-screen console. NULL => file + stderr only. */
-static void (*g_log_sink)(const char *line);
-
 /* Told when a controller asks to be unplugged; the app does the work. */
 static ctm_controller_unplug_cb g_unplug_cb;
 
@@ -957,8 +933,8 @@ void ctm_mic_capture_set_enabled(int on)
 
 static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
-int signals_rumble_on(void) { return CTM_SIGNALS_ENABLED && g_sig_rumble; }
-int signals_light_on(void)  { return CTM_SIGNALS_ENABLED && g_sig_light; }
+int signals_rumble_on(void) { return g_sig_rumble; }
+int signals_light_on(void)  { return g_sig_light; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
@@ -1008,14 +984,9 @@ void ctm_controller_set_type_state(ctm_controller_t *c, int slot, uint64_t v)
     c->type_state[slot] = v;
 }
 
-void ctm_controller_set_log_sink(void (*sink)(const char *line))
-{
-    g_log_sink = sink;
-}
-
-/* Per-controller log: writes to its MAC-named file (if open), stderr, and the
- * UI sink (if set), each line prefixed with the controller kind. When:
- * throughout a controller's lifetime (any of its threads). */
+/* Per-controller log: writes to its MAC-named file (if open) and stderr; a line
+ * with no controller goes to the gesture log. When: throughout a controller's
+ * lifetime (any of its threads). */
 void ctl_log(ctm_controller_t *c, const char *fmt, ...)
 {
     char body[512];
@@ -1037,9 +1008,8 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
      * 2026-08-18, when a Bluetooth bridge took eight seconds against a cable's
      * two and this file could not say where they went.
      *
-     * ⭐ MILLISECONDS, not seconds. log_append() prints hh:mm:ss, which is
-     * enough to see an eight-second gap and useless for the sub-second ones
-     * that make it up. This is the file that covers the session's own work --
+     * ⭐ MILLISECONDS, not seconds. Seconds are enough to see an eight-second
+     * gap and useless for the sub-second ones that make it up. This is the file that covers the session's own work --
      * the HID open, the connect, the evdev grabs -- so it is the one that needs
      * the resolution.
      *
@@ -1054,25 +1024,16 @@ void ctl_log(ctm_controller_t *c, const char *fmt, ...)
         fprintf(c->log, "%.3f %s\n", t, body);
         fflush(c->log);
     }
-    if (c) {
-        pthread_mutex_lock(&c->status_mutex);
-        snprintf(c->st_last_event, sizeof(c->st_last_event), "%s", body);
-        pthread_mutex_unlock(&c->status_mutex);
-    }
-    if (g_log_sink) {
-        char line[600];
-        snprintf(line, sizeof(line), "%s: %s", kind, body);
-        g_log_sink(line);
-    } else if (!c) {
-        /* NO CONTROLLER AND NO SINK: THE LINE WOULD VANISH, SO IT GOES TO THE
-         * GESTURE LOG INSTEAD.
+    if (!c) {
+        /* NO CONTROLLER: THE LINE WOULD VANISH, SO IT GOES TO THE GESTURE LOG
+         * INSTEAD.
          *
          * A caller holding a controller still gets a file, `c->log`. A caller
          * without one -- the Bluetooth refusal is the only one today -- had
-         * nowhere to go: `c->log` needs a controller, and `g_log_sink` was set
-         * only by the standalone UI app, removed from this repo on 2026-10-07. aurora-tv never sets it,
-         * so on a TV the line reached `fprintf(stderr, ...)` and nothing else,
-         * and stderr is not captured into the app's log files.
+         * nowhere to go: `c->log` needs a controller, and the only sink for
+         * these lines was the standalone UI app's, removed from this repo on
+         * 2026-10-07, so on a TV the line reached `fprintf(stderr, ...)` and
+         * nothing else, and stderr is not captured into the app's log files.
          *
          * MEASURED on the rooted monitor 2026-09-22, build 398: a refusal was
          * forced by killing the listener inside the TV's 11 s probe gap. It
@@ -1186,20 +1147,10 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
         fclose(f);
         if (!found) continue;
 
-        /* MEASUREMENT, NOT A FIX. Both capture threads scan this same list and
-         * both match on the name "DualSense", so with two controllers there is
-         * nothing here that ties a card to the controller asking for it.
-         *
-         * On 2026-08-04 both threads reported bit-identical audio levels while
-         * one controller was MUTED AT THE HARDWARE -- peaks 231/231, 188/188,
-         * 237/237 -- which a muted microphone cannot produce. Both were
-         * reading one microphone.
-         *
-         * This line prints what each card says about itself and which
-         * controller is asking, so a later session can see whether they
-         * correspond. Matching on it is deliberately NOT done yet: the text
-         * format has not been read, and guessing at formats is what produced
-         * three sessions of wrong conclusions. */
+        /* ⓘ Which card this capture scan opens, and for which node. The scan
+         * matches on the name "DualSense" alone: on 2026-08-04 two pads' threads
+         * read one microphone (identical levels while one pad was muted at the
+         * hardware), and this line is what shows such a thing. */
         mic_cap_log("scan: card=%d wants_node=%s header=[%s]",
                     card, want_node ? want_node : "?", header);
 
@@ -1355,8 +1306,7 @@ static void *mic_capture_thread(void *arg)
      * INVISIBLE WITH ONE CONTROLLER. One thread, one buffer, correct
      * behaviour -- the fault could not exist until a second thread did.
      *
-     * It cannot go on the stack: ~2 KB is too much for a thread here.
-     * Allocated per thread and freed on exit instead. */
+     * Allocated per thread and freed on exit. */
     int16_t *buf = (int16_t *)malloc(sizeof(int16_t) * MIC_CAP_FRAMES * MIC_CAP_CHANNELS);
     if (!buf) {
         mic_cap_log("capture buffer allocation failed; thread exiting");
@@ -1678,24 +1628,6 @@ static int c_recv(ctm_controller_t *c, ctmb_header_t *h, uint8_t **payload)
     return ctm_transport_recv_msg(&c->xport, h, payload);
 }
 
-/* Read a sysfs text attribute, trimmed. When: evdev-grab vid/pid matching. */
-static int read_text_file(const char *path, char *out, size_t out_len)
-{
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, out, out_len - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    out[n] = '\0';
-    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
-                     out[n - 1] == ' ' || out[n - 1] == '\t')) {
-        out[--n] = '\0';
-    }
-    return 0;
-}
-
 /* Compare a hex-string sysfs attr to a numeric vid/pid. When: evdev matching. */
 static int hex_equals(const char *text, unsigned int value)
 {
@@ -1754,9 +1686,8 @@ static void request_full_bt_mode(int fd)
     pthread_attr_destroy(&attr);
 }
 
-/* INVESTIGATION, 2026-08-08 -- read only, changes nothing.
- *
- * Does a WIRED DualSense report its own identity?
+/* Does a WIRED DualSense report its own identity? Asked 2026-08-08, answered
+ * 2026-08-24 (below): it does, and the answer is used.
  *
  * The working assumption all along has been that a wired controller has no
  * unique identifier: `dev.mac` is empty on a cable, which is why two
@@ -1768,10 +1699,9 @@ static void request_full_bt_mode(int fd)
  * PlayStation driver obtains a MAC for a wired DualSense. If it answers here,
  * the identifier exists and has simply never been asked for.
  *
- * The whole first line of the reply is logged as bytes rather than parsed. The
- * layout is documented but unverified on this hardware, and guessing at
- * formats is what produced three sessions of wrong conclusions elsewhere in
- * this project. Read the bytes first, decide what they mean second. */
+ * The reply was logged as bytes before anything parsed it: guessing at formats
+ * is what produced three sessions of wrong conclusions elsewhere in this
+ * project. Read the bytes first, decide what they mean second. */
 static int reply_is_zero(const uint8_t *p, size_t n)
 {
     for (size_t i = 0; i < n; ++i) if (p[i]) return 0;
@@ -2384,14 +2314,14 @@ int ctm_controller_open_config(ctm_controller_t *c)
 
 /* --- a type's signal thread, and plug-out's wait for it --------------------
  *
- * ⛔⛔ WHY ANY OF THIS EXISTS. The DualSense's connected signal is handed the
- * bare controller on a detached thread and nothing ever waits for it: it writes
- * the node and the speaker for up to a couple of seconds, while plug-out closes
- * both and every caller frees the controller the moment plug-out returns. A
- * release inside that window writes to a closed or reused descriptor and reads
- * freed memory. ➡️ These give a type's signal thread the one guarantee it
- * needs -- plug-out does not close anything until it has finished -- without
- * changing a line of the DualSense's.
+ * ⛔⛔ WHY ANY OF THIS EXISTS. A signal is handed the bare controller on a
+ * detached thread: it writes the node and the speaker for up to a couple of
+ * seconds, while plug-out closes both and every caller frees the controller the
+ * moment plug-out returns. A release inside that window writes to a closed or
+ * reused descriptor and reads freed memory. ➡️ These give a signal thread the
+ * one guarantee it needs -- plug-out does not close anything until it has
+ * finished. ⓘ The DualSense's connected signal was the one that waited for
+ * nothing, until it claimed as well (feedback_play_connected, 2026-09-21).
  *
  * ⓘ Every touch is under signal_mutex, including the value kept for the
  * signal to give back: the session thread writes it, the signal thread reads
@@ -2591,8 +2521,7 @@ uint32_t controller_signal_kept(ctm_controller_t *c)
  * is told to stop and waited for. ⚠️ Unbounded on purpose -- the other choice
  * is closing the node under a write. A signal thread checks between steps of a
  * few tens of milliseconds, so the wait is one step long -- or one write, if
- * the pad is stalling its writes. ⓘ Instant for every type that never begins
- * a signal, the DualSense included. */
+ * the pad is stalling its writes. ⓘ Instant when no signal is playing. */
 static void signal_close(ctm_controller_t *c)
 {
     pthread_mutex_lock(&c->signal_mutex);
@@ -2640,7 +2569,6 @@ static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len
      * report itself (rumble, for a wired Xbox pad). */
     if (c->ops->write_output) {
         const int rc = c->ops->write_output(c, c->hid_fd, data, len);
-        if (rc == 0) c->st_reports_out++;
         return rc;
     }
     uint8_t patched[MAX_REPORT];
@@ -2657,7 +2585,6 @@ static int hid_write_report(ctm_controller_t *c, const uint8_t *data, size_t len
         /* After patching and only on success: what is recorded is what the
          * controller actually received. */
         remember_audio_settings(c, patched, patched_len);
-        c->st_reports_out++;
         return 0;
     }
     return -1;
@@ -2671,7 +2598,7 @@ static int hid_write_fd_raw(ctm_controller_t *c, int fd, const uint8_t *data, si
     pthread_mutex_lock(&c->hid_mutex);
     ssize_t n = write(fd, data, len);
     pthread_mutex_unlock(&c->hid_mutex);
-    if (n == (ssize_t)len) { c->st_reports_out++; return 0; }
+    if (n == (ssize_t)len) return 0;
     return -1;
 }
 
@@ -2859,7 +2786,6 @@ static void *composite_reader_main(void *arg)
                     input_link_lost(c, "sibling's report");
                     break;
                 }
-                c->st_reports_in++;
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
@@ -3094,7 +3020,6 @@ static void *input_thread_main(void *arg)
                     input_link_lost(c, "input report");
                     break;
                 }
-                c->st_reports_in++;
                 if (c->ops->keepalive_ms) c->last_input_us = now_us();
                 /* Relay first, look second: the host sees the report whatever
                  * the type makes of it. */
@@ -3354,20 +3279,16 @@ static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     uint64_t start = now_us();
     for (;;) {
         if (c->stop) return -1;
-        if (c->xport.kind == CTM_TRANSPORT_ENET) {
-            if (ctm_transport_service(&c->xport, 50) < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
-        } else {
-            /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
-             * 2026-10-05), so the 5 s below could never fire: a listener that
-             * accepted and said nothing held this session for ever, with no
-             * host-gone. Wait for something to read, a slice at a time, and
-             * count the slices that bring nothing. */
-            int ready = ctm_transport_wait_readable(&c->xport, 50);
-            if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
-            if (ready == 0) {
-                if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
-                continue;
-            }
+        /* ⛔ OVER TCP THE READ BLOCKS UNTIL BYTES ARRIVE (code review,
+         * 2026-10-05), so the 5 s below could never fire: a listener that
+         * accepted and said nothing held this session for ever, with no
+         * host-gone. Wait for something to read, a slice at a time, and
+         * count the slices that bring nothing. */
+        int ready = ctm_transport_wait_readable(&c->xport, 50);
+        if (ready < 0) { ctl_log(c, "host config wait: link dropped"); return -1; }
+        if (ready == 0) {
+            if (now_us() - start >= CTM_HOST_ANSWER_US) { ctl_log(c, "host config timeout"); return -1; }
+            continue;
         }
         int got = c_recv(c, &h, &payload);
         if (got < 0) { ctl_log(c, "host config receive failed"); return -1; }
@@ -3520,13 +3441,11 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         if (c->comp_count > 0)
             ctl_log(c, "composite: forwarding %d sibling interface(s)", c->comp_count);
     }
-    ctl_log(c, "active host=%s port=%d path=%s product=%s transport=%s",
-         c->host, c->port, c->dev.path, caps->product,
-         c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
+    ctl_log(c, "active host=%s port=%d path=%s product=%s transport=TCP",
+         c->host, c->port, c->dev.path, caps->product);
 
     pthread_mutex_lock(&c->status_mutex);
     c->st_connected = 1;
-    c->st_transport_enet = (c->xport.kind == CTM_TRANSPORT_ENET) ? 1 : 0;
     pthread_mutex_unlock(&c->status_mutex);
 
     int link_alive = 1;
@@ -3554,38 +3473,23 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
             timeout_ms = next_paced_us <= now ? 0 : (int)((next_paced_us - now) / 1000u);
             if (timeout_ms > 50) timeout_ms = 50;
         }
-        if (c->xport.kind == CTM_TRANSPORT_ENET) {
-            if (ctm_transport_service(&c->xport, 1) < 0) {
-                ctl_log(c, "ENet link lost");
+        struct pollfd pfd;
+        pfd.fd = c->xport.fd; pfd.events = POLLIN; pfd.revents = 0;
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            link_alive = 0;
+        } else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            link_alive = 0;
+        } else if (pfd.revents & POLLIN) {
+            ctmb_header_t h;
+            uint8_t *payload = NULL;
+            if (c_recv(c, &h, &payload) != 1) {
+                free(payload);
                 link_alive = 0;
             } else {
-                ctmb_header_t h;
-                uint8_t *payload = NULL;
-                while (c_recv(c, &h, &payload) == 1) {
-                    handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
-                    free(payload);
-                    payload = NULL;
-                }
-            }
-        } else {
-            struct pollfd pfd;
-            pfd.fd = c->xport.fd; pfd.events = POLLIN; pfd.revents = 0;
-            int pr = poll(&pfd, 1, timeout_ms);
-            if (pr < 0) {
-                if (errno == EINTR) continue;
-                link_alive = 0;
-            } else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                link_alive = 0;
-            } else if (pfd.revents & POLLIN) {
-                ctmb_header_t h;
-                uint8_t *payload = NULL;
-                if (c_recv(c, &h, &payload) != 1) {
-                    free(payload);
-                    link_alive = 0;
-                } else {
-                    handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
-                    free(payload);
-                }
+                handle_message(c, &host_cfg, paced_q, &paced_head, &paced_count, &h, payload);
+                free(payload);
             }
         }
     }
@@ -3680,8 +3584,8 @@ static void *session_main(void *arg)
          * age_ms=7000 on Bluetooth against 2000 on a cable -- and the gap sat
          * here, invisible, because a failed attempt said nothing.
          *
-         * Each pass costs ENet's 400ms timeout plus a 500ms sleep, so seven
-         * seconds is about eight attempts before the host's listener is up.
+         * Each pass then cost ENet's 400ms timeout plus a 500ms sleep, so seven
+         * seconds was about eight attempts before the host's listener was up.
          *
          * ⭐ Counted and logged now: the number of attempts is what says whether
          * the answer is to wait less, retry faster, or start later. */
@@ -3751,7 +3655,7 @@ static void *session_main(void *arg)
              * Release that a dead PC once caused was the length of ONE connect,
              * bounded in ctm_transport.c, and not this loop. */
             const uint64_t tried_us = now_us();
-            if (ctm_transport_connect_within(&c->xport, c->host, c->port, 400,
+            if (ctm_transport_connect_within(&c->xport, c->host, c->port,
                                              (unsigned int)left_ms) == 0) {
                 break;
             }
@@ -3772,7 +3676,7 @@ static void *session_main(void *arg)
                                           (w1.tv_nsec - w0.tv_nsec) / 1000000);
             ctl_log(c, "connect took %ldms over %d failed attempt(s)", waited_ms, attempts);
         }
-        ctl_log(c, "connected via %s", c->xport.kind == CTM_TRANSPORT_ENET ? "ENet/UDP" : "TCP");
+        ctl_log(c, "connected via TCP");
 
         if (c->ops->grab_evdev && c->ops->grab_skips_gamepads && c->is_gamepad) {
             ctl_log(c, "evdev: not grabbed -- a gamepad, which the TV must still see "
@@ -3937,7 +3841,7 @@ static void open_log(ctm_controller_t *c)
     c->log = fopen(name, "a");
 }
 
-/* Start bridging: open log, bring up ENet + transport, launch the session
+/* Start bridging: open log, bring up the transport, launch the session
  * thread. Returns once the thread is started (connect happens async). When: the
  * user clicks Plug in. */
 /* Composite: hand the controller the forwarded enumeration payload (CTMB_MSG_ENUM),
@@ -3971,12 +3875,7 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     pthread_mutex_unlock(&c->signal_mutex);
     open_log(c);
 
-    pthread_once(&g_enet_once, enet_global_init_once);
-    if (g_enet_ready) {
-        c->enet = enet_client_create();
-        if (!c->enet) ctl_log(c, "enet client create failed; ENet disabled");
-    }
-    ctm_transport_init(&c->xport, c->enet);
+    ctm_transport_init(&c->xport);
 
     /* ⏱️ ON THE SAME CLOCK AS THE SESSION'S OWN LINES, deliberately.
      *
@@ -3990,7 +3889,6 @@ int ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port)
     if (pthread_create(&c->session_thread, NULL, session_main, c) != 0) {
         ctl_log(c, "session thread failed errno=%d", errno);
         ctm_transport_destroy(&c->xport);
-        if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }
         if (c->log) { fclose(c->log); c->log = NULL; }
         return -1;
     }
@@ -4162,7 +4060,6 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     c->alsa_retry_streak = 0;
     if (c->wake_pipe[0] >= 0) { close(c->wake_pipe[0]); c->wake_pipe[0] = -1; }
     if (c->wake_pipe[1] >= 0) { close(c->wake_pipe[1]); c->wake_pipe[1] = -1; }
-    if (c->enet) { enet_client_destroy(c->enet); c->enet = NULL; }
     release_evdev_grabs(c);
     if (c->log) { fclose(c->log); c->log = NULL; }
 }
@@ -4187,8 +4084,7 @@ void ctm_controller_get_settings(ctm_controller_t *c, tv_bridge_worker_settings_
 }
 
 /* Snapshot live bridging status for the UI panel. When: the UI status timer
- * (~500 ms). connected/transport/last_event are read under status_mutex; the
- * report counters are read advisorily (single-writer, monotonic). */
+ * (~500 ms). The flags are read under status_mutex. */
 void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out)
 {
     if (!c || !out) return;
@@ -4197,11 +4093,7 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     out->connected = c->st_connected ? true : false;
     out->host_gone = c->st_host_gone ? true : false;
     out->device_gone = c->st_device_gone ? true : false;
-    out->transport_enet = c->st_transport_enet ? true : false;
-    snprintf(out->last_event, sizeof(out->last_event), "%s", c->st_last_event);
     pthread_mutex_unlock(&c->status_mutex);
-    out->reports_in = c->st_reports_in;
-    out->reports_out = c->st_reports_out;
     /* ⓘ Advisory as the counters are: set once by the plug and once by the
      * input thread. */
     out->pointer = c->ptr.present ? true : false;

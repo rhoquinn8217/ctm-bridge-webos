@@ -60,7 +60,7 @@ static uint8_t ds4_volume_raw_byte(unsigned int value)
  *   is Headphones (0xFF) or Split (0xDF); AUTO passes through — the map's
  *   auto_route already wrote it from the jack bit.
  * - 0x11 effect frames: volume bytes BT[21]=headphone-L, BT[22]=headphone-R,
- *   BT[24]=speaker are always the sliders' (TV owns volume; the pad persists
+ *   BT[24]=speaker are always the settings' (TV owns volume; the pad persists
  *   whatever was set last, so an explicit value every frame is the sane
  *   default the user asked for). Rumble/LED bytes untouched.
  * When: every outbound report, from the pump. Returns 0 (never drops). */
@@ -284,7 +284,8 @@ static void ds4_bt_send_audio(ctm_controller_t *c, const tv_bridge_worker_settin
             headset, speaker, route, rc);
 }
 
-/* set_settings: a live slider moved. ⓘ The FIRST set_settings in this tree --
+/* set_settings: new values, at the plug and whenever the PC's host config sends
+ * them. ⓘ The FIRST set_settings in this tree --
  * every other type leaves it NULL and reads its values inside patch_output,
  * which is exactly why a pad the host is not talking to never heard them. */
 static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
@@ -542,7 +543,7 @@ static void ds4_signal_play(ctm_controller_t *c, bool bt, const ds4_signal_shape
     run->took_ms = ds4_elapsed_ms(&t0);
 }
 
-/* 🔗 Declared in ctm_controller.h: the shape table and the breath, reached
+/* 🔗 Declared in ctm_controller.h: the shape table and the level, reached
  * from ds4_signal.inl's combined 0x15 report in the other translation unit. */
 void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
                          int *breaths, int *solid, long *ms)
@@ -558,86 +559,12 @@ void ds4_signal_shape_of(int pattern, uint8_t *r, uint8_t *g, uint8_t *b,
     if (ms) *ms = s->ms;
 }
 
-int ds4_signal_breath(long at_ms, long total_ms, int breaths)
-{
-    return ds4_breath_level(at_ms, total_ms, breaths);
-}
-
 int ds4_signal_level(int pattern, long at_ms)
 {
     const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
                                 : (pattern == 1) ? &k_ds4_released
                                                  : &k_ds4_connected;
     return ds4_shape_level(s, at_ms);
-}
-
-/* ⭐⭐ THE LIGHT AND THE PULSE ON A BARE NODE, with no session behind them.
- *
- * ⛔ A REFUSAL HAS NO CONTROLLER. A plug that failed leaves no object and no
- * open device, which is why the refusal signal was tone-only while a bridge and
- * a handback had light and rumble. rhoquinn8217, 2026-09-23: all three, on all
- * three events, like the ds5.
- *
- * ⓘ A trimmed copy of ds4_signal_play's loop rather than a shared one: that
- * version needs a controller for its cancel check and its mutex, and neither
- * exists here. The shape, the breath and the pulse are the same.
- * ⚠️ Bluetooth only -- a cabled refusal has no node of ours to write to. */
-int ds4_signal_light_pulse_node(const char *node, int pattern)
-{
-    const uint8_t drives = ds4_signal_drives();
-    if (!drives || node == NULL || !node[0]) return -1;
-    const ds4_signal_shape_t *s = (pattern == 2) ? &k_ds4_refused
-                                : (pattern == 1) ? &k_ds4_released
-                                                 : &k_ds4_connected;
-    const int fd = open(node, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return -1;
-
-    const bool light = (drives & DS4_OUT_LIGHT) != 0;
-    const bool rumble = (drives & DS4_OUT_MOTORS) != 0;
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    int last_level = -1, last_motor = -1, sent = 0, failed = 0;
-
-    for (;;) {
-        const long at = ds4_elapsed_ms(&t0);
-        if (at >= s->ms || (!light && at >= DS4_PULSE_MS)) break;
-        /* 🔗 DS4SIG_VIS_PULSE_LVL: ONE pulse, whatever the light does. A count of
-         * buzzes is for a pad with no lightbar and no speaker. */
-        const int motor = (rumble && at < DS4_PULSE_MS) ? DS4_PULSE_LEVEL : 0;
-        const int level = light ? ds4_shape_level(s, at) : 0;
-        if (level != last_level || motor != last_motor) {
-            uint8_t rep[DS4_BT_OUT_LEN];
-            const uint8_t claims = (uint8_t)((light ? DS4_OUT_LIGHT : 0) |
-                                             (rumble ? DS4_OUT_MOTORS : 0));
-            /* ⓘ Full volumes: there is no session to read them from, and a
-             * confirmation nobody can hear is worse than a loud one. 🔗 the note
-             * in ds4_bt_build_output on why the audio bits travel at all. */
-            const size_t n = ds4_bt_build_output(rep, sizeof rep, claims, (uint8_t)motor,
-                                                 (uint8_t)motor,
-                                                 (uint8_t)((s->r * level) / 255),
-                                                 (uint8_t)((s->g * level) / 255),
-                                                 (uint8_t)((s->b * level) / 255),
-                                                 0x4f, 0x4f);
-            if (n == 0) { ++failed; break; }
-            ctm_bt_sign_output(rep, n);
-            if (write(fd, rep, n) != (ssize_t)n) { ++failed; break; }
-            ++sent;
-            last_level = level;
-            last_motor = motor;
-        }
-        struct timespec nap = { 0, 10 * 1000000L };
-        nanosleep(&nap, NULL);
-    }
-    /* ⛔ THE PULSE ALWAYS ENDS WITH A STOP, however the pattern ended -- a
-     * DS4's motors keep running until a report tells them otherwise. And the
-     * light goes dark, because nothing owns it after a refusal. */
-    uint8_t stop[DS4_BT_OUT_LEN];
-    const size_t sn = ds4_bt_build_output(stop, sizeof stop,
-                                          (uint8_t)(DS4_OUT_MOTORS | DS4_OUT_LIGHT),
-                                          0, 0, 0, 0, 0, 0x4f, 0x4f);
-    if (sn) { ctm_bt_sign_output(stop, sn); if (write(fd, stop, sn) == (ssize_t)sn) ++sent; }
-    close(fd);
-    return failed == 0 ? 0 : -1;
 }
 
 /* The connected signal's thread.
