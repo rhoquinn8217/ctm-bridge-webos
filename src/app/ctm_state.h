@@ -216,6 +216,9 @@ extern bool g_last_plug_unreachable;
  * a second against an unreachable host, and the panel opens on the interface
  * thread. The result arrives on the panel's next refresh. */
 void ctm_agent_probe_soon(void);
+/* Parked (true) outside a stream: the probe asks nothing until the bridge's
+ * start unparks it, with a probe at once. See ctm_gesture_worker.inl. */
+void ctm_agent_probe_park(bool parked);
 extern bool g_running;
 extern pthread_t g_stop_sniff_thread;
 extern bool g_stop_sniff_thread_started;

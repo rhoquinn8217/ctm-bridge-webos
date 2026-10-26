@@ -1595,7 +1595,11 @@ static void *mic_capture_thread(void *arg)
         }
 
         time_t now = time(NULL);
-        if (now != last_report) {
+        /* Once a minute (2026-10-23): once a second, this one line grew
+         * mic_capture.log by about half a megabyte an hour of play, and the
+         * microphone is on by default. The counts are totals, so a minute's
+         * line loses nothing; the peaks are the minute's. */
+        if (now - last_report >= 60) {
             last_report = now;
             mic_cap_log("%s card=%d reads_ok=%llu failed=%llu frames=%llu sent=%llu send_failed=%llu peak_ch0=%d peak_ch1=%d",
                         node, mic_card,
@@ -3481,7 +3485,21 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
      * change the other. */
     if (c->ops->speaks_ds5) {
         pthread_mutex_lock(&g_cardmatch_lock);
-        cardmatch_identify(c);
+        /* ⭐ THE CARD IS FOUND ONCE PER BRIDGE (2026-10-23). A reconnect ran the
+         * match again, and with no note to read (a usbbus that cannot be read)
+         * it answered by elimination, where this pad's own card is not free
+         * (its microphone holds it): the speaker moved to another, unbridged
+         * cabled DualSense. A reconnect keeps the card it found, and opens the
+         * speaker there again if it was closed. */
+        if (c->matched_card < 0) {
+            cardmatch_identify(c);
+        } else {
+            pthread_mutex_lock(&c->alsa_mutex);
+            if (c->alsa_fd < 0) {
+                ctm_controller_open_alsa_playback(c);
+            }
+            pthread_mutex_unlock(&c->alsa_mutex);
+        }
         mic_capture_start(c);
         feedback_play_connected(c);
         pthread_mutex_unlock(&g_cardmatch_lock);
@@ -4052,6 +4070,8 @@ void ctm_controller_plug_out(ctm_controller_t *c)
     ctm_controller_plug_out_reason(c, CTM_UNPLUG_REQUESTED);
 }
 
+volatile bool ctm_unplug_quietly = false;   /* see ctm_controller.h */
+
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why)
 {
     if (!c) return;
@@ -4104,6 +4124,8 @@ void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why
     signal_close(c);
     if (gone) {
         ctl_log(c, "unplugging -- the device is gone, so no release signal");
+    } else if (ctm_unplug_quietly) {
+        ctl_log(c, "unplugging -- the app is quitting, so no release signal");
     } else if (c->ops->speaks_ds5) {
         feedback_play_unplugging(c, why);
     } else if (c->ops->signal_unplugging) {

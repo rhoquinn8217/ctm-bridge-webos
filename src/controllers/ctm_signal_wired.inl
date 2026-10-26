@@ -47,7 +47,7 @@ static void wired_sig_log(const char *fmt, ...)
 #define WIRED_SIG_RATE      48000
 #define WIRED_SIG_CHANNELS  4        /* speaker L/R, then haptics L/R */
 #define WIRED_SIG_MS        140
-#define WIRED_SIG_GAP_MS    40
+#define WIRED_SIG_GAP_MS    90       /* as a session's signal: FEEDBACK_GAP_MS (2026-10-23) */
 #define WIRED_SIG_LEAD_MS   0        /* measured useless; see FEEDBACK_LEAD_MS */
 #define WIRED_SIG_REPEAT_GAP_MS 1500 /* played twice on a fresh cable; see FEEDBACK_REPEAT_GAP_MS */
 
@@ -105,10 +105,27 @@ static int16_t *wired_sig_render(btsig_pattern_t pattern, int *frames_out,
 
             const double t = (double)i / (double)WIRED_SIG_RATE;
             const double tone = sin(2.0 * M_PI * hz * t) * env * level;
-            const double bump = sin(2.0 * M_PI * 60.0 * t) * env;
 
             const int f = (base + i) * WIRED_SIG_CHANNELS;
             buf[f + 0] = buf[f + 1] = (int16_t)(tone * 9000.0);
+        }
+    }
+    /* ⭐ ONE BUZZ, NOT ONE PER NOTE (2026-10-23), as a session's signal has
+     * since the code review of 2026-10-05 (ctm_feedback.inl): that fix reached
+     * only that copy, and a refused cabled pad, which has no session and plays
+     * this one, still buzzed twice. One envelope spans both notes and the gap. */
+    {
+        const int span = per * 2 + gap;
+        const int span_attack  = span / 10;
+        const int span_release = (span * 18) / 100;
+        for (int i = 0; i < span; ++i) {
+            double env;
+            if (i < span_attack)               env = (double)i / (double)span_attack;
+            else if (i > span - span_release)  env = (double)(span - i) / (double)span_release;
+            else                               env = 1.0;
+            const double t = (double)i / (double)WIRED_SIG_RATE;
+            const double bump = sin(2.0 * M_PI * 60.0 * t) * env;
+            const int f = (lead_frames + i) * WIRED_SIG_CHANNELS;
             buf[f + 2] = buf[f + 3] = (int16_t)(bump * 14000.0);
         }
     }

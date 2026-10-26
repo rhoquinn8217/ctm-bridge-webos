@@ -342,6 +342,11 @@ int  ctm_controller_plug_in(ctm_controller_t *c, const char *host, int port);
 
 void ctm_controller_plug_out(ctm_controller_t *c);
 void ctm_controller_plug_out_reason(ctm_controller_t *c, ctm_unplug_reason_t why);
+/* Set when the app quits (2026-10-23): a plug-out then plays no release signal,
+ * so every BRIDGE_STOP goes out before webOS ends the app, about a second
+ * after closing it. A signal takes a second or more a pad, and the PC kept a
+ * pad it was never told about for its grace, with its last state. */
+extern volatile bool ctm_unplug_quietly;
 /* Composite: forwarded enumeration payload (CTMB_MSG_ENUM), sent before HELLO. */
 void ctm_controller_set_enum_payload(ctm_controller_t *c, const uint8_t *payload, int len);
 /* CONFIRMATION SIGNALS -- ALL OR NOTHING.

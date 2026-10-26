@@ -165,7 +165,9 @@ static int micsafe_disarm_node(const char *node)
 void ctm_mic_safety_disarm_all_reason(const char *why)
 {
     int silenced = 0, skipped = 0;
-    for (int i = 0; i < 16; ++i) {
+    /* ⓘ As far as the device scan looks (ui_devices.c): a DualSense on
+     * /dev/hidraw16 or above was never disarmed (2026-10-23). */
+    for (int i = 0; i < 64; ++i) {
         char node[32];
         snprintf(node, sizeof(node), "/dev/hidraw%d", i);
         const int rc = micsafe_disarm_node(node);
