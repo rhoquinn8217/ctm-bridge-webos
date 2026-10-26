@@ -1,0 +1,3 @@
+# The shell scripts run on a Mac and in Linux containers: LF, whatever the
+# checkout's own setting.
+*.sh text eol=lf
