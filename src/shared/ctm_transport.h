@@ -74,6 +74,16 @@ int ctm_transport_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
 int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t flags,
                                   uint32_t request_id, const void *payload, size_t len);
 
+/* ⭐ SEND ONLY IF IT CAN GO NOW (code review, 2026-10-27). For the interface
+ * thread, which must not wait on the PC: a PC that stops reading fills the
+ * socket, the next send blocks holding the send lock, and anything waiting for
+ * that lock waits with it. This waits at most about 50 ms for the lock, which
+ * an ordinary send holds for microseconds, and sends only if the socket has
+ * room now. Returns 0 sent, 1 not sent (the lock stayed busy, or no room), -1
+ * failed. ⓘ For small messages: the room is looked at, not reserved. */
+int ctm_transport_try_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
+                               uint32_t request_id, const void *payload, size_t len);
+
 /* The opening exchange is done (1), or the connection is ending (0). A
  * connect, an attach and a disconnect set 0 themselves. */
 void ctm_transport_set_ready(ctm_transport_t *t, int ready);
@@ -91,7 +101,8 @@ int ctm_transport_wait_readable(ctm_transport_t *t, unsigned int timeout_ms);
 /* 1 if connected (the socket is open), else 0. */
 int ctm_transport_connected(const ctm_transport_t *t);
 
-/* Close the socket; return to idle. */
+/* Close the socket; return to idle. A send stuck on a peer that stopped
+ * reading is woken first, and the close is made under the send lock. */
 void ctm_transport_disconnect(ctm_transport_t *t);
 
 #ifdef __cplusplus
