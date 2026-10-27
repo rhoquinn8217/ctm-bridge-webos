@@ -10,6 +10,12 @@
  * socket is full, and ctm_transport_disconnect, which wakes a send stuck on a
  * full socket instead of waiting behind it.
  *
+ * ⓘ The disconnect check needs the system to wake a send blocked on a full
+ * socket when that socket is shut down, as Linux does and the TV relies on.
+ * The lab's WSL1 left this test waiting the first time it ran (2026-10-27), so
+ * the system is asked first, with plain sockets, and a system that does not
+ * wake the send skips that check and says so.
+ *
  * ➡️ Build and run:  cc tests/test_transport_try_send.c && ./a.out
  *    Or:             ./tests/run-tests.sh
  */
@@ -33,6 +39,12 @@ static long ms_since(const struct timespec *t0)
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     return (long)((t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000);
+}
+
+static void sleep_ms(long ms)
+{
+    const struct timespec d = {ms / 1000, (ms % 1000) * 1000000};
+    nanosleep(&d, NULL);
 }
 
 /* A call that never comes back is a failure, not a run that never ends. */
@@ -67,6 +79,39 @@ static void drain(int fd)
     while (recv(fd, sink, sizeof(sink), MSG_DONTWAIT) > 0) {}
 }
 
+/* --- the system itself: does shutdown wake a send blocked on a full socket? */
+
+static volatile int plain_returned;
+
+static void *plain_blocked_send(void *arg)
+{
+    static uint8_t more[4096];
+    (void)send(*(int *)arg, more, sizeof(more), MSG_NOSIGNAL);
+    plain_returned = 1;
+    return NULL;
+}
+
+/* 1 if it does. A send it does not wake stays blocked for the rest of the
+ * run, which ends with the process. */
+static int system_wakes_a_blocked_send(void)
+{
+    static int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0 || !fill(pair[0])) return 0;
+    pthread_t th;
+    if (pthread_create(&th, NULL, plain_blocked_send, &pair[0]) != 0) return 0;
+    sleep_ms(100);
+    if (plain_returned) return 0;   /* it did not block: nothing to learn */
+    shutdown(pair[0], SHUT_RDWR);
+    for (int i = 0; i < 100 && !plain_returned; ++i) sleep_ms(10);
+    if (!plain_returned) return 0;
+    pthread_join(th, NULL);
+    close(pair[0]);
+    close(pair[1]);
+    return 1;
+}
+
+/* --- the transport ------------------------------------------------------ */
+
 static volatile int stuck_returned;
 static int stuck_rc;
 
@@ -82,6 +127,7 @@ static void *stuck_send(void *arg)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);   /* so a run cut short shows how far it got */
     signal(SIGALRM, on_alarm);
     alarm(10);
 
@@ -97,6 +143,9 @@ int main(void)
     ctmb_header_t h;
     ok(recv_all(sv[1], &h, sizeof(h)) == 0 && h.type == CTMB_MSG_OPEN_CONFIG && h.payload_len == 0,
        "and arrives whole");
+    ok(ctm_transport_try_send_msg(&t, CTMB_MSG_OPEN_CONFIG, CTMB_FLAG_OK, 0, NULL,
+                                  CTM_TRY_SEND_MAX + 1) == -1,
+       "a payload too big to send at once is refused");
 
     printf("\nanother send holding the lock\n");
     pthread_mutex_lock(&t.send_mutex);
@@ -124,13 +173,15 @@ int main(void)
         drain(sv[1]);
 
         printf("\na disconnect while a send is stuck on the full link\n");
-        if (!fill(sv[0])) {
+        if (!system_wakes_a_blocked_send()) {
+            printf("  --    this system's sockets do not wake a send blocked on a full socket when it\n"
+                   "        is shut down, so the transport's disconnect cannot be checked here\n");
+        } else if (!fill(sv[0])) {
             printf("  --    the link did not fill a second time\n");
         } else {
             pthread_t th;
             pthread_create(&th, NULL, stuck_send, &t);
-            const struct timespec a_tenth = {0, 100000000};
-            nanosleep(&a_tenth, NULL);
+            sleep_ms(100);
             ok(!stuck_returned, "the send is stuck, holding the lock");
             clock_gettime(CLOCK_MONOTONIC, &t0);
             ctm_transport_disconnect(&t);

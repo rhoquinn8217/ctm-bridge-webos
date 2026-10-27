@@ -78,9 +78,10 @@ int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t fl
  * thread, which must not wait on the PC: a PC that stops reading fills the
  * socket, the next send blocks holding the send lock, and anything waiting for
  * that lock waits with it. This waits at most about 50 ms for the lock, which
- * an ordinary send holds for microseconds, and sends only if the socket has
- * room now. Returns 0 sent, 1 not sent (the lock stayed busy, or no room), -1
- * failed. ⓘ For small messages: the room is looked at, not reserved. */
+ * an ordinary send holds for microseconds, and sends only if the socket takes
+ * it now. Returns 0 sent, 1 not sent (the lock stayed busy, or no room), -1
+ * failed, or a payload over CTM_TRY_SEND_MAX. */
+#define CTM_TRY_SEND_MAX 256u
 int ctm_transport_try_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
                                uint32_t request_id, const void *payload, size_t len);
 
