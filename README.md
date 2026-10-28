@@ -47,12 +47,13 @@ build. A clone made with `--recursive` has the core; in any other checkout,
 
 The core carries its own test suite, run by `tests/run-tests.sh`.
 
-## Clean-room
+## Where the controller protocol comes from
 
-**Load-bearing, not a formality.** All controller protocol here is derived from
-this project's own observation (sysfs reads and on-wire captures), **not** from
-third-party or kernel driver sources. ciprianmisaila's ctm-bridge-webos holds the
-same line, and this fork continues it.
+The controller handling here is worked out from this project's own observation:
+sysfs reads, and captures of the reports the controllers send and accept. A few
+facts were looked up in other projects and checked against those captures: report
+byte positions, flag values and limits. They are facts about the controllers, not
+code from those projects, and the projects are named below.
 
 ## Acknowledgements
 
@@ -60,6 +61,12 @@ same line, and this fork continues it.
   [CTM-USBIP](https://github.com/CTM-Bridge/CTM-USBIP). The bridge itself, the
   map-driven translation pipeline, the TCP protocol between the television and the
   host, and the DualSense audio work over Bluetooth are all ciprianmisaila's.
+- **The Linux kernel's
+  [hid-playstation](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-playstation.c)
+  driver**: a reference for report layouts and output flag values.
+- **[dualsensectl](https://github.com/nowrep/dualsensectl)**: a cross-check for the
+  DualSense's microphone and speaker settings.
+- **DS4Windows**: a reference for the header of one Bluetooth output report.
 
 ## License
 
