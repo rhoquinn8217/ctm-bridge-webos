@@ -6,7 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>      /* ⓘ connect_with_deadline -- O_NONBLOCK */
 #include <netdb.h>
-#include <poll.h>       /* ⓘ connect_with_deadline -- the deadline itself */
+#include <poll.h>       /* ⓘ connect_with_deadline's deadline, try_send's room */
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -215,10 +215,12 @@ static void fill_header(ctmb_header_t *h, uint16_t type, uint32_t flags,
     h->payload_len = (uint32_t)len;
 }
 
-/* One message on the TCP socket, with send_mutex already held. */
+/* One message on the TCP socket, with send_mutex already held. ⓘ The socket
+ * is looked at again here: a disconnect closes it under this lock. */
 static int send_tcp_locked(ctm_transport_t *t, ctmb_header_t *h,
                            const void *payload, size_t len)
 {
+    if (t->fd < 0) return -1;
     h->sequence = ++t->send_sequence;
     if (send_all(t->fd, h, sizeof(*h)) != 0) return -1;
     if (len && send_all(t->fd, payload, len) != 0) return -1;
@@ -254,6 +256,69 @@ int ctm_transport_send_when_ready(ctm_transport_t *t, uint16_t type, uint32_t fl
         rc = -1;
     } else {
         rc = send_tcp_locked(t, &h, payload, len);
+    }
+    pthread_mutex_unlock(&t->send_mutex);
+    return rc;
+}
+
+/* One small message, with send_mutex held, only if the socket takes it without
+ * waiting: 1 when nothing went, 0 when all of it did. ⓘ MSG_DONTWAIT as well
+ * as the poll before it, so a system whose poll calls a full socket writable
+ * still cannot make this wait. A message that went in part is finished with
+ * an ordinary send, since half a message would garble the stream; the rest
+ * is under CTM_TRY_SEND_MAX bytes. */
+static int send_now_locked(ctm_transport_t *t, ctmb_header_t *h,
+                           const void *payload, size_t len)
+{
+    uint8_t buf[sizeof(ctmb_header_t) + CTM_TRY_SEND_MAX];
+    const size_t total = sizeof(*h) + len;
+    h->sequence = t->send_sequence + 1;
+    memcpy(buf, h, sizeof(*h));
+    if (len) memcpy(buf + sizeof(*h), payload, len);
+    ssize_t n;
+    do {
+        n = send(t->fd, buf, total, MSG_DONTWAIT | MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+    if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) return 1;
+    if (n < 0) return -1;
+    ++t->send_sequence;   /* on its way, whole or in part */
+    if ((size_t)n == total) return 0;
+    return send_all(t->fd, buf + n, total - (size_t)n);
+}
+
+int ctm_transport_try_send_msg(ctm_transport_t *t, uint16_t type, uint32_t flags,
+                               uint32_t request_id, const void *payload, size_t len)
+{
+    if (!t || len > CTM_TRY_SEND_MAX) return -1;
+    ctmb_header_t h;
+    fill_header(&h, type, flags, request_id, len);
+
+    /* An ordinary send holds the lock for microseconds; one stuck on a peer
+     * that stopped reading holds it until the link is shut down. */
+    int locked = 0;
+    for (int tries = 0; tries < 50 && !locked; ++tries) {
+        if (pthread_mutex_trylock(&t->send_mutex) == 0) {
+            locked = 1;
+        } else {
+            const struct timespec a_millisecond = {0, 1000000};
+            nanosleep(&a_millisecond, NULL);
+        }
+    }
+    if (!locked) return 1;
+
+    int rc;
+    if (t->fd < 0) {
+        rc = -1;
+    } else {
+        struct pollfd p = {t->fd, POLLOUT, 0};
+        const int n = poll(&p, 1, 0);
+        if (n == 1 && (p.revents & POLLOUT)) {
+            rc = send_now_locked(t, &h, payload, len);
+        } else if (n == 1 && (p.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            rc = -1;
+        } else {
+            rc = 1;   /* no room: the peer is not reading */
+        }
     }
     pthread_mutex_unlock(&t->send_mutex);
     return rc;
@@ -304,11 +369,22 @@ int ctm_transport_connected(const ctm_transport_t *t)
 void ctm_transport_disconnect(ctm_transport_t *t)
 {
     if (!t) return;
-    ctm_transport_set_ready(t, 0);
+    /* ⭐ WAKE A STUCK SEND, THEN CLOSE UNDER THE LOCK (code review,
+     * 2026-10-27). A send blocked on a peer that stopped reading holds the
+     * send lock, so when the lock is busy the socket is shut down first,
+     * which makes that send return. The close is then made under the lock,
+     * so no send can begin on a descriptor being closed and given out again. */
+    if (pthread_mutex_trylock(&t->send_mutex) != 0) {
+        const int fd = t->fd;
+        if (fd >= 0) shutdown(fd, SHUT_RDWR);
+        pthread_mutex_lock(&t->send_mutex);
+    }
+    t->ready = 0;
     if (t->fd >= 0) {
         shutdown(t->fd, SHUT_RDWR);
         close(t->fd);
     }
     t->fd = -1;
     t->kind = CTM_TRANSPORT_NONE;
+    pthread_mutex_unlock(&t->send_mutex);
 }
