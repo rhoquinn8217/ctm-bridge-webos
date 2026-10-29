@@ -296,6 +296,9 @@ struct ctm_controller {
     volatile int unplug_requested;
     /* Scratch values per controller, owned by its type. */
     uint64_t type_state[CTM_TYPE_STATE_SLOTS];
+    /* Feature reports the pad gave no answer to, one bit per report id: they
+     * fail at once from then on (feature_wait_note). The session's thread only. */
+    uint8_t feature_unanswered[32];
 
     pthread_mutex_t hid_mutex;
     pthread_mutex_t settings_mutex;
@@ -3090,17 +3093,32 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
  * ioctl, and on webOS a Bluetooth pad is a uhid device whose answer comes from
  * the system's Bluetooth service, which can take its full 5 s. Measured on the
  * rooted monitor: while a Bluetooth DS4 was being bridged, the app's loop sat
- * 15 s in hidraw_open behind such a request. Which reports do that is logged
- * here, so they can be answered without asking the pad. */
+ * 15 s in hidraw_open behind such a request. A wait is logged.
+ * ⭐ And a report the pad gave no answer to, in the platform's whole wait, is
+ * not asked again on this connection: that DS4 never answers 0x05, its
+ * calibration, and the PC asks three times at every bridge, 5 to 10 s each with
+ * every hidraw node held. Later asks fail at once, as the pad's own did. */
 #define FEATURE_SLOW_US 300000ull
+#define FEATURE_NO_ANSWER_US 4000000ull
 
-static void feature_wait_note(const ctm_controller_t *c, const char *what, unsigned id,
+static bool feature_unanswered(const ctm_controller_t *c, unsigned id)
+{
+    return (c->feature_unanswered[(id & 0xffu) >> 3] >> (id & 7u)) & 1u;
+}
+
+static void feature_wait_note(ctm_controller_t *c, bool get, unsigned id,
                               unsigned len, uint64_t asked_us, int rc)
 {
     const uint64_t took = now_us() - asked_us;
     if (took < FEATURE_SLOW_US) return;
     ctm_gesture_log(c, "feature %s 0x%02x (%u bytes) on %s took %llu ms, rc=%d",
-                    what, id, len, c->dev.path, (unsigned long long)(took / 1000), rc);
+                    get ? "get" : "set", id, len, c->dev.path,
+                    (unsigned long long)(took / 1000), rc);
+    if (get && rc < 0 && took >= FEATURE_NO_ANSWER_US) {
+        c->feature_unanswered[(id & 0xffu) >> 3] |= (uint8_t)(1u << (id & 7u));
+        ctm_gesture_log(c, "feature get 0x%02x on %s: no answer, so it fails at once "
+                        "for the rest of this connection", id, c->dev.path);
+    }
 }
 
 static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
@@ -3132,7 +3150,8 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
         }
     } else if (h->type == CTMB_MSG_FEATURE_GET) {
         int ok = 0;
-        if (h->payload_len > 0 && h->payload_len <= MAX_REPORT) {
+        if (h->payload_len > 0 && h->payload_len <= MAX_REPORT &&
+            !feature_unanswered(c, payload[0])) {
             uint8_t feature[MAX_REPORT];
             memcpy(feature, payload, h->payload_len);
             int fd = feature_fd_for(c, h->request_id);
@@ -3140,7 +3159,7 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
             pthread_mutex_lock(&c->hid_mutex);
             int rc = ioctl(fd, HIDIOCGFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
-            feature_wait_note(c, "get", payload[0], h->payload_len, asked_us, rc);
+            feature_wait_note(c, true, payload[0], h->payload_len, asked_us, rc);
             if (rc >= 0) {
                 ok = c_send(c, CTMB_MSG_FEATURE_REPORT, CTMB_FLAG_OK,
                             h->request_id, feature, h->payload_len) == 0;
@@ -3157,7 +3176,7 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
             pthread_mutex_lock(&c->hid_mutex);
             const int rc = ioctl(fd, HIDIOCSFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
-            feature_wait_note(c, "set", payload[0], h->payload_len, asked_us, rc);
+            feature_wait_note(c, false, payload[0], h->payload_len, asked_us, rc);
             ok = rc >= 0;
         }
         (void)c_send(c, CTMB_MSG_FEATURE_REPORT, ok ? CTMB_FLAG_OK : 0, h->request_id, NULL, 0);

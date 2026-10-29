@@ -10,6 +10,7 @@
 #include "name_list.inl"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -17,6 +18,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 device_info_t *find_or_add_device(scan_result_t *result, const char *hidraw)
@@ -174,7 +176,8 @@ static void part_group_for_device(device_info_t *dev)
  * a node answered is kept, and only a node not seen before, or a new
  * connection on it, is opened and asked. ⓘ Everything is asked once on a
  * miss, and laid onto the device by the same rules as before, so a scan's
- * result is what it was. A node with no link to read is asked every time. */
+ * result is what it was. A node whose device cannot be named is asked every
+ * time, and a node with no device behind it never (hidraw_device_key). */
 typedef struct {
     char node[64];
     char link[160];
@@ -209,18 +212,46 @@ static uint64_t scan_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-/* The HID device behind a hidraw node, by its sysfs link; "" when it cannot be
- * read (an input-only device, or a jail that hides it). */
-static void hidraw_device_link(const char *hidraw, char *out, size_t len)
+typedef enum { NODE_KEYED, NODE_NO_DEVICE, NODE_UNKNOWN } node_key_t;
+
+/* ⭐ THE HID DEVICE BEHIND A HIDRAW NODE, BY NAME (as 0005:054C:05C4.0126),
+ * which changes with every connection (2026-10-29). From its input device when
+ * it has one (the input loop's hid_link); else from /sys/dev/char, the kernel's
+ * map from a device number to its device, which the TV app's jail shows and
+ * which is live: the jail's /dev is a copy made when the app starts, so a node
+ * there can outlive its device. ⛔ A node the map has no device for is not
+ * opened at all: its open could only fail, and only after waiting for the lock
+ * every hidraw node shares. On the rooted monitor three such nodes were opened
+ * on every scan, 5 s each behind a Bluetooth DS4's feature request. */
+static node_key_t hidraw_device_key(const device_info_t *dev, const struct stat *st,
+                                    char *out, size_t len)
 {
     out[0] = '\0';
-    if (!hidraw || !hidraw[0]) {
-        return;
+    if (dev->hid_link[0]) {
+        snprintf(out, len, "%s", dev->hid_link);
+        return NODE_KEYED;
     }
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device", hidraw);
-    const ssize_t n = readlink(path, out, len - 1);
-    out[n > 0 ? n : 0] = '\0';
+    struct stat map;
+    if (!S_ISCHR(st->st_mode) || stat("/sys/dev/char", &map) != 0) {
+        return NODE_UNKNOWN;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/dev/char/%u:%u",
+             (unsigned)major(st->st_rdev), (unsigned)minor(st->st_rdev));
+    char target[PATH_MAX];
+    const ssize_t n = readlink(path, target, sizeof(target) - 1);
+    if (n < 0) {
+        return errno == ENOENT ? NODE_NO_DEVICE : NODE_UNKNOWN;
+    }
+    target[n] = '\0';
+    /* ../../devices/virtual/misc/uhid/0005:054C:05C4.0126/hidraw/hidraw4 */
+    char *cut = strstr(target, "/hidraw/");
+    if (!cut) {
+        return NODE_UNKNOWN;
+    }
+    *cut = '\0';
+    identity_link_leaf(target, out, len);
+    return out[0] ? NODE_KEYED : NODE_UNKNOWN;
 }
 
 /* Opens the node and asks it everything the device is filled from. */
@@ -258,20 +289,17 @@ static void hidraw_ask(const char *node, hidraw_answers_t *a)
 }
 
 /* What the node answered, from the kept answers when its link is unchanged. */
-static void hidraw_answers_for(const device_info_t *dev, hidraw_answers_t *a)
+static void hidraw_answers_for(const device_info_t *dev, const struct stat *st,
+                               hidraw_answers_t *a)
 {
     memset(a, 0, sizeof(*a));
     char link[sizeof(a->link)];
-    /* ⓘ Its input device's link first: inside the TV app's jail
-     * /sys/class/hidraw does not exist (the rooted monitor, 2026-10-28), so
-     * there every node was asked again, and a scan still took 17 s. */
-    if (dev->hid_link[0]) {
-        snprintf(link, sizeof(link), "%s", dev->hid_link);
-    } else {
-        hidraw_device_link(dev->hidraw, link, sizeof(link));
+    const node_key_t key = hidraw_device_key(dev, st, link, sizeof(link));
+    if (key == NODE_NO_DEVICE) {
+        return;
     }
     char kept_link[sizeof(a->link)] = "";
-    if (link[0]) {
+    if (key == NODE_KEYED) {
         pthread_mutex_lock(&s_hidraw_answers_mutex);
         for (int i = 0; i < HIDRAW_ANSWERS_MAX; ++i) {
             const hidraw_answers_t *kept = &s_hidraw_answers[i];
@@ -338,7 +366,7 @@ void inspect_hidraw(device_info_t *dev)
     }
 
     hidraw_answers_t a;
-    hidraw_answers_for(dev, &a);
+    hidraw_answers_for(dev, &st, &a);
     if (a.readable) {
         dev->readable = true;
     }
