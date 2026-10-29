@@ -67,6 +67,10 @@ typedef struct {
     char inputs[TEXT_LEN];
     char events[TEXT_LEN];
     char driver[32];         /* kernel driver the input device hangs off, e.g. "xpad" */
+    /* The HID device behind it, by the leaf of its input device's link, as
+     * 0005:054C:05C4.0126: a new one with every connection. The key of what
+     * the node answered (inspect_hidraw); "" for a node no input reaches. */
+    char hid_link[64];
     char serial[64];         /* identity for rule 2: uniq, or the USB serial (device_identity.inl) */
     int report_descriptor_bytes;
     uint16_t usage_page;     /* top-level HID usage page (interface class) */

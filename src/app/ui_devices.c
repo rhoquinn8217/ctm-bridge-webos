@@ -252,7 +252,14 @@ static void hidraw_answers_for(const device_info_t *dev, hidraw_answers_t *a)
 {
     memset(a, 0, sizeof(*a));
     char link[sizeof(a->link)];
-    hidraw_device_link(dev->hidraw, link, sizeof(link));
+    /* ⓘ Its input device's link first: inside the TV app's jail
+     * /sys/class/hidraw does not exist (the rooted monitor, 2026-10-28), so
+     * there every node was asked again, and a scan still took 17 s. */
+    if (dev->hid_link[0]) {
+        snprintf(link, sizeof(link), "%s", dev->hid_link);
+    } else {
+        hidraw_device_link(dev->hidraw, link, sizeof(link));
+    }
     if (link[0]) {
         pthread_mutex_lock(&s_hidraw_answers_mutex);
         for (int i = 0; i < HIDRAW_ANSWERS_MAX; ++i) {
@@ -854,6 +861,21 @@ void enumerate_devices(scan_result_t *result)
                 continue;
             }
 
+            /* ⭐ The HID device this input hangs off, by its link's leaf
+             * (2026-10-28): what its hidraw nodes answered is kept under it
+             * (inspect_hidraw). ⓘ The TV app's jail has no /sys/class/hidraw,
+             * so it is read here, through /sys/class/input, which it has. */
+            char hid_link[64] = {0};
+            {
+                char target[PATH_MAX];
+                snprintf(child_path, sizeof(child_path), "%s/device", input_path);
+                const ssize_t n = readlink(child_path, target, sizeof(target) - 1);
+                if (n > 0) {
+                    target[n] = '\0';
+                    identity_link_leaf(target, hid_link, sizeof(hid_link));
+                }
+            }
+
             struct dirent *hidraw_ent;
             while ((hidraw_ent = readdir(hidraw_dir)) != NULL) {
                 if (!starts_with(hidraw_ent->d_name, "hidraw")) {
@@ -863,6 +885,7 @@ void enumerate_devices(scan_result_t *result)
                 if (!dev) {
                     continue;
                 }
+                if (!dev->hid_link[0]) snprintf(dev->hid_link, sizeof(dev->hid_link), "%s", hid_link);
                 if (!dev->name[0]) snprintf(dev->name, sizeof(dev->name), "%s", name);
                 if (!dev->phys[0]) snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
                 if (!dev->bus[0]) snprintf(dev->bus, sizeof(dev->bus), "%s", bus);
