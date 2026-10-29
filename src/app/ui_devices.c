@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 device_info_t *find_or_add_device(scan_result_t *result, const char *hidraw)
 {
@@ -199,6 +200,15 @@ typedef struct {
 static hidraw_answers_t s_hidraw_answers[HIDRAW_ANSWERS_MAX];
 static pthread_mutex_t s_hidraw_answers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+#define SCAN_ASK_SLOW_MS 300u
+
+static uint64_t scan_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
 /* The HID device behind a hidraw node, by its sysfs link; "" when it cannot be
  * read (an input-only device, or a jail that hides it). */
 static void hidraw_device_link(const char *hidraw, char *out, size_t len)
@@ -260,19 +270,40 @@ static void hidraw_answers_for(const device_info_t *dev, hidraw_answers_t *a)
     } else {
         hidraw_device_link(dev->hidraw, link, sizeof(link));
     }
+    char kept_link[sizeof(a->link)] = "";
     if (link[0]) {
         pthread_mutex_lock(&s_hidraw_answers_mutex);
         for (int i = 0; i < HIDRAW_ANSWERS_MAX; ++i) {
             const hidraw_answers_t *kept = &s_hidraw_answers[i];
-            if (kept->node[0] && strcmp(kept->node, dev->node) == 0 && strcmp(kept->link, link) == 0) {
-                *a = *kept;
-                pthread_mutex_unlock(&s_hidraw_answers_mutex);
-                return;
+            if (kept->node[0] && strcmp(kept->node, dev->node) == 0) {
+                if (strcmp(kept->link, link) == 0) {
+                    *a = *kept;
+                    pthread_mutex_unlock(&s_hidraw_answers_mutex);
+                    return;
+                }
+                snprintf(kept_link, sizeof(kept_link), "%s", kept->link);
             }
         }
         pthread_mutex_unlock(&s_hidraw_answers_mutex);
     }
+    /* ⓘ An ask that waited is logged with why the node was asked (2026-10-29):
+     * the rooted monitor's loop sat 15 s in hidraw_open during a scan, behind a
+     * Bluetooth pad's feature request, and the node it opened was not known. */
+    const uint64_t asked_ms = scan_now_ms();
     hidraw_ask(dev->node, a);
+    const uint64_t took_ms = scan_now_ms() - asked_ms;
+    if (took_ms >= SCAN_ASK_SLOW_MS) {
+        if (!link[0]) {
+            log_append("device scan: asking %s took %llu ms (no link to key it by)",
+                       dev->node, (unsigned long long)took_ms);
+        } else if (kept_link[0]) {
+            log_append("device scan: asking %s took %llu ms (kept under %s, now %s)",
+                       dev->node, (unsigned long long)took_ms, kept_link, link);
+        } else {
+            log_append("device scan: asking %s took %llu ms (not kept yet, %s)",
+                       dev->node, (unsigned long long)took_ms, link);
+        }
+    }
     if (!link[0] || !a->opened) {
         return;
     }
