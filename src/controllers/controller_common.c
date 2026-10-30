@@ -73,6 +73,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "pointer_layout.inl"
 #include "pad_blank.inl"
 #include "switch_hold.inl"
+#include "feature_memory.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -296,6 +297,10 @@ struct ctm_controller {
     volatile int unplug_requested;
     /* Scratch values per controller, owned by its type. */
     uint64_t type_state[CTM_TYPE_STATE_SLOTS];
+    /* Feature reports the pad gave no answer to on this connection, or on an
+     * earlier one (feature_memory.inl): they fail at once. The session's
+     * thread only. */
+    feature_set_t feature_unanswered;
 
     pthread_mutex_t hid_mutex;
     pthread_mutex_t settings_mutex;
@@ -3085,6 +3090,53 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
 /* How long a connection waits for the listener to answer its greeting. */
 #define CTM_HOST_ANSWER_US 5000000ull
 
+/* ⭐ A FEATURE REQUEST THAT KEPT THE PAD'S NODE WAITING (2026-10-29). The
+ * kernel holds one lock over every hidraw node for the whole of a feature
+ * ioctl, and on webOS a Bluetooth pad is a uhid device whose answer comes from
+ * the system's Bluetooth service, which can take its full 5 s. Measured on the
+ * rooted monitor: while a Bluetooth DS4 was being bridged, the app's loop sat
+ * 15 s in hidraw_open behind such a request. A wait is logged, and a report
+ * the pad never answers is not asked again (feature_memory.inl). */
+#define FEATURE_SLOW_US 300000ull
+
+static void feature_key_of(const ctm_controller_t *c, char *key, size_t len)
+{
+    feature_pad_key(c->dev.vid, c->dev.pid, c->dev.serial, c->dev.mac, key, len);
+}
+
+/* Not to be asked: left unanswered on this connection, or on an earlier one of
+ * the same pad, which is logged once per connection. */
+static bool feature_unanswered(ctm_controller_t *c, unsigned id)
+{
+    if (feature_set_has(&c->feature_unanswered, id)) return true;
+    char key[FEATURE_KEY_LEN];
+    feature_key_of(c, key, sizeof(key));
+    if (!feature_pad_remembers(key, id)) return false;
+    feature_set_add(&c->feature_unanswered, id);
+    ctm_gesture_log(c, "feature get 0x%02x on %s: not asked, %s gave no answer to it "
+                    "on an earlier connection", id, c->dev.path, key);
+    return true;
+}
+
+static void feature_wait_note(ctm_controller_t *c, bool get, unsigned id,
+                              unsigned len, uint64_t asked_us, int rc)
+{
+    const uint64_t took = now_us() - asked_us;
+    if (took < FEATURE_SLOW_US) return;
+    ctm_gesture_log(c, "feature %s 0x%02x (%u bytes) on %s took %llu ms, rc=%d",
+                    get ? "get" : "set", id, len, c->dev.path,
+                    (unsigned long long)(took / 1000), rc);
+    if (get && rc < 0 && took >= FEATURE_NO_ANSWER_US) {
+        feature_set_add(&c->feature_unanswered, id);
+        char key[FEATURE_KEY_LEN];
+        feature_key_of(c, key, sizeof(key));
+        feature_pad_remember(key, id);
+        ctm_gesture_log(c, "feature get 0x%02x on %s: no answer, so it fails at once "
+                        "from now on, for %s", id, c->dev.path,
+                        key[0] ? key : "this connection");
+    }
+}
+
 static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
                            queued_report_t *paced_q, int *paced_head, int *paced_count,
                            const ctmb_header_t *h, uint8_t *payload)
@@ -3114,13 +3166,16 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
         }
     } else if (h->type == CTMB_MSG_FEATURE_GET) {
         int ok = 0;
-        if (h->payload_len > 0 && h->payload_len <= MAX_REPORT) {
+        if (h->payload_len > 0 && h->payload_len <= MAX_REPORT &&
+            !feature_unanswered(c, payload[0])) {
             uint8_t feature[MAX_REPORT];
             memcpy(feature, payload, h->payload_len);
             int fd = feature_fd_for(c, h->request_id);
+            const uint64_t asked_us = now_us();
             pthread_mutex_lock(&c->hid_mutex);
             int rc = ioctl(fd, HIDIOCGFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
+            feature_wait_note(c, true, payload[0], h->payload_len, asked_us, rc);
             if (rc >= 0) {
                 ok = c_send(c, CTMB_MSG_FEATURE_REPORT, CTMB_FLAG_OK,
                             h->request_id, feature, h->payload_len) == 0;
@@ -3133,9 +3188,12 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
             uint8_t feature[MAX_REPORT];
             memcpy(feature, payload, h->payload_len);
             int fd = feature_fd_for(c, h->request_id);
+            const uint64_t asked_us = now_us();
             pthread_mutex_lock(&c->hid_mutex);
-            ok = ioctl(fd, HIDIOCSFEATURE(h->payload_len), feature) >= 0;
+            const int rc = ioctl(fd, HIDIOCSFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
+            feature_wait_note(c, false, payload[0], h->payload_len, asked_us, rc);
+            ok = rc >= 0;
         }
         (void)c_send(c, CTMB_MSG_FEATURE_REPORT, ok ? CTMB_FLAG_OK : 0, h->request_id, NULL, 0);
     } else if (h->type == CTMB_MSG_HOST_CONFIG && h->payload_len >= sizeof(*host_cfg)) {

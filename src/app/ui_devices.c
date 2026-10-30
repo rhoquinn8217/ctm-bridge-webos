@@ -10,6 +10,7 @@
 #include "name_list.inl"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -17,6 +18,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <time.h>
 #include <unistd.h>
 device_info_t *find_or_add_device(scan_result_t *result, const char *hidraw)
 {
@@ -162,6 +165,195 @@ static void part_group_for_device(device_info_t *dev)
     snprintf(dev->group, sizeof(dev->group), "node:%s", dev->node[0] ? dev->node : dev->hidraw);
 }
 
+/* ⭐ WHAT A NODE ANSWERED, KEPT WHILE IT IS THE SAME CONNECTION (2026-10-28).
+ * A scan opened every hidraw node and asked it six questions, and the kernel
+ * takes one lock over every hidraw node for each of those and for each write.
+ * With a Bluetooth DS4 bridged, whose writes take up to five seconds, one scan
+ * took 17 s on the rooted monitor, all of it on the TV app's loop. A node is
+ * the same connection while its sysfs `device` link names the same HID device
+ * (the link ends in an instance number, as 0005:054C:05C4.000B, that changes
+ * with every connection), and reading the link takes no hidraw lock. So what
+ * a node answered is kept, and only a node not seen before, or a new
+ * connection on it, is opened and asked. ⓘ Everything is asked once on a
+ * miss, and laid onto the device by the same rules as before, so a scan's
+ * result is what it was. A node whose device cannot be named is asked every
+ * time, and a node with no device behind it never (hidraw_device_key). */
+typedef struct {
+    char node[64];
+    char link[160];
+    bool readable;
+    bool writable;
+    bool opened;
+    bool have_info;
+    struct hidraw_devinfo info;
+    bool have_name;
+    char name[TEXT_LEN];
+    bool have_phys;
+    char phys[TEXT_LEN];
+    bool have_uniq;
+    char uniq[64];
+    int desc_size;
+    bool have_top;
+    uint16_t usage_page;
+    uint16_t usage;
+    uint32_t max_bytes;
+} hidraw_answers_t;
+
+#define HIDRAW_ANSWERS_MAX 64
+static hidraw_answers_t s_hidraw_answers[HIDRAW_ANSWERS_MAX];
+static pthread_mutex_t s_hidraw_answers_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define SCAN_ASK_SLOW_MS 300u
+
+static uint64_t scan_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+typedef enum { NODE_KEYED, NODE_NO_DEVICE, NODE_UNKNOWN } node_key_t;
+
+/* ⭐ THE HID DEVICE BEHIND A HIDRAW NODE, BY NAME (as 0005:054C:05C4.0126),
+ * which changes with every connection (2026-10-29). From its input device when
+ * it has one (the input loop's hid_link); else from /sys/dev/char, the kernel's
+ * map from a device number to its device, which the TV app's jail shows and
+ * which is live: the jail's /dev is a copy made when the app starts, so a node
+ * there can outlive its device. ⛔ A node the map has no device for is not
+ * opened at all: its open could only fail, and only after waiting for the lock
+ * every hidraw node shares. On the rooted monitor three such nodes were opened
+ * on every scan, 5 s each behind a Bluetooth DS4's feature request. */
+static node_key_t hidraw_device_key(const device_info_t *dev, const struct stat *st,
+                                    char *out, size_t len)
+{
+    out[0] = '\0';
+    if (dev->hid_link[0]) {
+        snprintf(out, len, "%s", dev->hid_link);
+        return NODE_KEYED;
+    }
+    struct stat map;
+    if (!S_ISCHR(st->st_mode) || stat("/sys/dev/char", &map) != 0) {
+        return NODE_UNKNOWN;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/dev/char/%u:%u",
+             (unsigned)major(st->st_rdev), (unsigned)minor(st->st_rdev));
+    char target[PATH_MAX];
+    const ssize_t n = readlink(path, target, sizeof(target) - 1);
+    if (n < 0) {
+        return errno == ENOENT ? NODE_NO_DEVICE : NODE_UNKNOWN;
+    }
+    target[n] = '\0';
+    /* ../../devices/virtual/misc/uhid/0005:054C:05C4.0126/hidraw/hidraw4 */
+    char *cut = strstr(target, "/hidraw/");
+    if (!cut) {
+        return NODE_UNKNOWN;
+    }
+    *cut = '\0';
+    identity_link_leaf(target, out, len);
+    return out[0] ? NODE_KEYED : NODE_UNKNOWN;
+}
+
+/* Opens the node and asks it everything the device is filled from. */
+static void hidraw_ask(const char *node, hidraw_answers_t *a)
+{
+    int fd = open(node, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0) {
+        a->readable = true;
+        a->writable = true;
+    } else {
+        fd = open(node, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) {
+            a->readable = true;
+        }
+    }
+    if (fd < 0) {
+        return;
+    }
+    a->opened = true;
+    a->have_info = ioctl(fd, HIDIOCGRAWINFO, &a->info) == 0;
+    a->have_name = ioctl(fd, HIDIOCGRAWNAME(sizeof(a->name) - 1), a->name) >= 0;
+    a->have_phys = ioctl(fd, HIDIOCGRAWPHYS(sizeof(a->phys) - 1), a->phys) >= 0;
+    a->have_uniq = ioctl(fd, HIDIOCGRAWUNIQ(sizeof(a->uniq) - 1), a->uniq) >= 0;
+    int desc_size = 0;
+    if (ioctl(fd, HIDIOCGRDESCSIZE, &desc_size) == 0 && desc_size > 0) {
+        a->desc_size = desc_size;
+    }
+    uint8_t desc[4096];
+    const uint32_t dlen = read_report_descriptor(fd, desc, sizeof(desc));
+    if (dlen) {
+        ctm_hid_top_usage(desc, dlen, &a->usage_page, &a->usage, &a->max_bytes);
+        a->have_top = true;
+    }
+    close(fd);
+}
+
+/* What the node answered, from the kept answers when its link is unchanged. */
+static void hidraw_answers_for(const device_info_t *dev, const struct stat *st,
+                               hidraw_answers_t *a)
+{
+    memset(a, 0, sizeof(*a));
+    char link[sizeof(a->link)];
+    const node_key_t key = hidraw_device_key(dev, st, link, sizeof(link));
+    if (key == NODE_NO_DEVICE) {
+        return;
+    }
+    char kept_link[sizeof(a->link)] = "";
+    if (key == NODE_KEYED) {
+        pthread_mutex_lock(&s_hidraw_answers_mutex);
+        for (int i = 0; i < HIDRAW_ANSWERS_MAX; ++i) {
+            const hidraw_answers_t *kept = &s_hidraw_answers[i];
+            if (kept->node[0] && strcmp(kept->node, dev->node) == 0) {
+                if (strcmp(kept->link, link) == 0) {
+                    *a = *kept;
+                    pthread_mutex_unlock(&s_hidraw_answers_mutex);
+                    return;
+                }
+                snprintf(kept_link, sizeof(kept_link), "%s", kept->link);
+            }
+        }
+        pthread_mutex_unlock(&s_hidraw_answers_mutex);
+    }
+    /* ⓘ An ask that waited is logged with why the node was asked (2026-10-29):
+     * the rooted monitor's loop sat 15 s in hidraw_open during a scan, behind a
+     * Bluetooth pad's feature request, and the node it opened was not known. */
+    const uint64_t asked_ms = scan_now_ms();
+    hidraw_ask(dev->node, a);
+    const uint64_t took_ms = scan_now_ms() - asked_ms;
+    if (took_ms >= SCAN_ASK_SLOW_MS) {
+        if (!link[0]) {
+            log_append("device scan: asking %s took %llu ms (no link to key it by)",
+                       dev->node, (unsigned long long)took_ms);
+        } else if (kept_link[0]) {
+            log_append("device scan: asking %s took %llu ms (kept under %s, now %s)",
+                       dev->node, (unsigned long long)took_ms, kept_link, link);
+        } else {
+            log_append("device scan: asking %s took %llu ms (not kept yet, %s)",
+                       dev->node, (unsigned long long)took_ms, link);
+        }
+    }
+    if (!link[0] || !a->opened) {
+        return;
+    }
+    snprintf(a->node, sizeof(a->node), "%s", dev->node);
+    snprintf(a->link, sizeof(a->link), "%s", link);
+    pthread_mutex_lock(&s_hidraw_answers_mutex);
+    int slot = -1;
+    for (int i = 0; i < HIDRAW_ANSWERS_MAX; ++i) {
+        if (strcmp(s_hidraw_answers[i].node, dev->node) == 0) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 && !s_hidraw_answers[i].node[0]) {
+            slot = i;
+        }
+    }
+    if (slot >= 0) {
+        s_hidraw_answers[slot] = *a;
+    }
+    pthread_mutex_unlock(&s_hidraw_answers_mutex);
+}
+
 void inspect_hidraw(device_info_t *dev)
 {
     if (!dev || !dev->node[0]) {
@@ -173,51 +365,44 @@ void inspect_hidraw(device_info_t *dev)
         return;
     }
 
-    int fd = open(dev->node, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-    if (fd >= 0) {
+    hidraw_answers_t a;
+    hidraw_answers_for(dev, &st, &a);
+    if (a.readable) {
         dev->readable = true;
-        dev->writable = true;
-    } else {
-        fd = open(dev->node, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd >= 0) {
-            dev->readable = true;
-        }
     }
-    if (fd < 0) {
+    if (a.writable) {
+        dev->writable = true;
+    }
+    if (!a.opened) {
         return;
     }
 
-    struct hidraw_devinfo info;
-    memset(&info, 0, sizeof(info));
     bool on_usb = false;
-    if (ioctl(fd, HIDIOCGRAWINFO, &info) == 0) {
-        if (!dev->bus[0]) snprintf(dev->bus, sizeof(dev->bus), "%04x", info.bustype);
-        if (!dev->vid[0]) snprintf(dev->vid, sizeof(dev->vid), "%04x", (unsigned short)info.vendor);
-        if (!dev->pid[0]) snprintf(dev->pid, sizeof(dev->pid), "%04x", (unsigned short)info.product);
-        on_usb = info.bustype == 0x03;   /* BUS_USB */
+    if (a.have_info) {
+        if (!dev->bus[0]) snprintf(dev->bus, sizeof(dev->bus), "%04x", a.info.bustype);
+        if (!dev->vid[0]) snprintf(dev->vid, sizeof(dev->vid), "%04x", (unsigned short)a.info.vendor);
+        if (!dev->pid[0]) snprintf(dev->pid, sizeof(dev->pid), "%04x", (unsigned short)a.info.product);
+        on_usb = a.info.bustype == 0x03;   /* BUS_USB */
     }
 
-    char raw_name[TEXT_LEN] = {0};
-    if (ioctl(fd, HIDIOCGRAWNAME(sizeof(raw_name) - 1), raw_name) >= 0) {
+    if (a.have_name) {
         if (!dev->name[0]) {
-            snprintf(dev->name, sizeof(dev->name), "%s", raw_name);
+            snprintf(dev->name, sizeof(dev->name), "%s", a.name);
         }
         /* ⓘ On USB the HID driver builds this name from the device's maker and
          * product strings, so it stands in for sysfs when a part has no input
          * node to reach the USB device through. */
         if (on_usb && !dev->device_name[0]) {
-            snprintf(dev->device_name, sizeof(dev->device_name), "%s", raw_name);
+            snprintf(dev->device_name, sizeof(dev->device_name), "%s", a.name);
         }
     }
 
-    char raw_phys[TEXT_LEN] = {0};
-    if (!dev->phys[0] && ioctl(fd, HIDIOCGRAWPHYS(sizeof(raw_phys) - 1), raw_phys) >= 0) {
-        snprintf(dev->phys, sizeof(dev->phys), "%s", raw_phys);
+    if (!dev->phys[0] && a.have_phys) {
+        snprintf(dev->phys, sizeof(dev->phys), "%s", a.phys);
     }
 
-    char raw_uniq[64] = {0};
-    if (!dev->mac[0] && ioctl(fd, HIDIOCGRAWUNIQ(sizeof(raw_uniq) - 1), raw_uniq) >= 0) {
-        snprintf(dev->mac, sizeof(dev->mac), "%s", raw_uniq);
+    if (!dev->mac[0] && a.have_uniq) {
+        snprintf(dev->mac, sizeof(dev->mac), "%s", a.uniq);
     }
     /* ⓘ The same for the serial: on USB the HID driver copies the device's
      * serial into uniq, unless a driver put a MAC there instead (a DualSense). */
@@ -225,29 +410,19 @@ void inspect_hidraw(device_info_t *dev)
         snprintf(dev->usb_serial, sizeof(dev->usb_serial), "%s", dev->mac);
     }
 
-    int desc_size = 0;
-    if (dev->report_descriptor_bytes <= 0 && ioctl(fd, HIDIOCGRDESCSIZE, &desc_size) == 0 && desc_size > 0) {
-        dev->report_descriptor_bytes = desc_size;
+    if (dev->report_descriptor_bytes <= 0 && a.desc_size > 0) {
+        dev->report_descriptor_bytes = a.desc_size;
     }
 
     /* Classify the interface from its report descriptor (top-level usage), so
      * composite devices (Steam Controller: keyboard/mouse/vendor) are legible
      * and we can pick the gamepad-bearing (vendor) interface. */
-    if (!dev->iface[0]) {
-        uint8_t desc[4096];
-        uint32_t dlen = read_report_descriptor(fd, desc, sizeof(desc));
-        if (dlen) {
-            uint16_t up = 0, us = 0;
-            uint32_t mb = 0;
-            ctm_hid_top_usage(desc, dlen, &up, &us, &mb);
-            dev->usage_page = up;
-            dev->usage = us;
-            snprintf(dev->iface, sizeof(dev->iface), "%s %uB",
-                     ctm_hid_usage_label(up, us), (unsigned)mb);
-        }
+    if (!dev->iface[0] && a.have_top) {
+        dev->usage_page = a.usage_page;
+        dev->usage = a.usage;
+        snprintf(dev->iface, sizeof(dev->iface), "%s %uB",
+                 ctm_hid_usage_label(a.usage_page, a.usage), (unsigned)a.max_bytes);
     }
-
-    close(fd);
 }
 
 const char *bus_label(const char *bus)
@@ -745,6 +920,21 @@ void enumerate_devices(scan_result_t *result)
                 continue;
             }
 
+            /* ⭐ The HID device this input hangs off, by its link's leaf
+             * (2026-10-28): what its hidraw nodes answered is kept under it
+             * (inspect_hidraw). ⓘ The TV app's jail has no /sys/class/hidraw,
+             * so it is read here, through /sys/class/input, which it has. */
+            char hid_link[64] = {0};
+            {
+                char target[PATH_MAX];
+                snprintf(child_path, sizeof(child_path), "%s/device", input_path);
+                const ssize_t n = readlink(child_path, target, sizeof(target) - 1);
+                if (n > 0) {
+                    target[n] = '\0';
+                    identity_link_leaf(target, hid_link, sizeof(hid_link));
+                }
+            }
+
             struct dirent *hidraw_ent;
             while ((hidraw_ent = readdir(hidraw_dir)) != NULL) {
                 if (!starts_with(hidraw_ent->d_name, "hidraw")) {
@@ -754,6 +944,7 @@ void enumerate_devices(scan_result_t *result)
                 if (!dev) {
                     continue;
                 }
+                if (!dev->hid_link[0]) snprintf(dev->hid_link, sizeof(dev->hid_link), "%s", hid_link);
                 if (!dev->name[0]) snprintf(dev->name, sizeof(dev->name), "%s", name);
                 if (!dev->phys[0]) snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
                 if (!dev->bus[0]) snprintf(dev->bus, sizeof(dev->bus), "%s", bus);
