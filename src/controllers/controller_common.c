@@ -73,6 +73,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "pointer_layout.inl"
 #include "pad_blank.inl"
 #include "switch_hold.inl"
+#include "feature_memory.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -296,9 +297,10 @@ struct ctm_controller {
     volatile int unplug_requested;
     /* Scratch values per controller, owned by its type. */
     uint64_t type_state[CTM_TYPE_STATE_SLOTS];
-    /* Feature reports the pad gave no answer to, one bit per report id: they
-     * fail at once from then on (feature_wait_note). The session's thread only. */
-    uint8_t feature_unanswered[32];
+    /* Feature reports the pad gave no answer to on this connection, or on an
+     * earlier one (feature_memory.inl): they fail at once. The session's
+     * thread only. */
+    feature_set_t feature_unanswered;
 
     pthread_mutex_t hid_mutex;
     pthread_mutex_t settings_mutex;
@@ -3093,17 +3095,27 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
  * ioctl, and on webOS a Bluetooth pad is a uhid device whose answer comes from
  * the system's Bluetooth service, which can take its full 5 s. Measured on the
  * rooted monitor: while a Bluetooth DS4 was being bridged, the app's loop sat
- * 15 s in hidraw_open behind such a request. A wait is logged.
- * ⭐ And a report the pad gave no answer to, in the platform's whole wait, is
- * not asked again on this connection: that DS4 never answers 0x05, its
- * calibration, and the PC asks three times at every bridge, 5 to 10 s each with
- * every hidraw node held. Later asks fail at once, as the pad's own did. */
+ * 15 s in hidraw_open behind such a request. A wait is logged, and a report
+ * the pad never answers is not asked again (feature_memory.inl). */
 #define FEATURE_SLOW_US 300000ull
-#define FEATURE_NO_ANSWER_US 4000000ull
 
-static bool feature_unanswered(const ctm_controller_t *c, unsigned id)
+static void feature_key_of(const ctm_controller_t *c, char *key, size_t len)
 {
-    return (c->feature_unanswered[(id & 0xffu) >> 3] >> (id & 7u)) & 1u;
+    feature_pad_key(c->dev.vid, c->dev.pid, c->dev.serial, c->dev.mac, key, len);
+}
+
+/* Not to be asked: left unanswered on this connection, or on an earlier one of
+ * the same pad, which is logged once per connection. */
+static bool feature_unanswered(ctm_controller_t *c, unsigned id)
+{
+    if (feature_set_has(&c->feature_unanswered, id)) return true;
+    char key[FEATURE_KEY_LEN];
+    feature_key_of(c, key, sizeof(key));
+    if (!feature_pad_remembers(key, id)) return false;
+    feature_set_add(&c->feature_unanswered, id);
+    ctm_gesture_log(c, "feature get 0x%02x on %s: not asked, %s gave no answer to it "
+                    "on an earlier connection", id, c->dev.path, key);
+    return true;
 }
 
 static void feature_wait_note(ctm_controller_t *c, bool get, unsigned id,
@@ -3115,9 +3127,13 @@ static void feature_wait_note(ctm_controller_t *c, bool get, unsigned id,
                     get ? "get" : "set", id, len, c->dev.path,
                     (unsigned long long)(took / 1000), rc);
     if (get && rc < 0 && took >= FEATURE_NO_ANSWER_US) {
-        c->feature_unanswered[(id & 0xffu) >> 3] |= (uint8_t)(1u << (id & 7u));
+        feature_set_add(&c->feature_unanswered, id);
+        char key[FEATURE_KEY_LEN];
+        feature_key_of(c, key, sizeof(key));
+        feature_pad_remember(key, id);
         ctm_gesture_log(c, "feature get 0x%02x on %s: no answer, so it fails at once "
-                        "for the rest of this connection", id, c->dev.path);
+                        "from now on, for %s", id, c->dev.path,
+                        key[0] ? key : "this connection");
     }
 }
 
