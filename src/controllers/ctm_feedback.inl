@@ -214,6 +214,9 @@ static int feedback_breathe_wired(ctm_controller_t *c, btsig_pattern_t pattern, 
     return 1;
 }
 
+/* How long a bridge's signal waits on Bluetooth, from the session opening. */
+#define BT_BRIDGE_SIGNAL_WAIT_MS 1500
+
 static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool wait_out,
                           btsig_pattern_t pattern)
 {
@@ -244,6 +247,20 @@ static void feedback_play(ctm_controller_t *c, int beeps, const char *what, bool
         if (!wait_out) {
             ctl_log(c, "feedback: %s -- not signalled, wrong thread to wait on", what);
             return;
+        }
+        /* ⭐⭐ A BRIDGE'S SIGNAL WAITS FOR THE BRIDGE TO OPEN (rhoquinn8217's B4,
+         * 2026-10-30). A second Bluetooth pad, or a pad just connected, restarted
+         * webOS's Bluetooth service as its signal started, and every pad on the set
+         * went with it: 4 fresh connections of 6, within 0.6 s. The signal began
+         * as the session opened, on top of the PC's first requests to the pad, its
+         * first report about 1.2 s later. With the signal after that, 25 bridges of
+         * 25 held, two pads connected, and a signal on a settled pad never hurt.
+         * ⚠️ Not a proof of the cause: one crash came before any report of a signal. */
+        if (pattern == BTSIG_HANDING_OVER) {
+            for (int waited = 0; waited < BT_BRIDGE_SIGNAL_WAIT_MS && !controller_signal_cancelled(c); waited += 20) {
+                struct timespec st = {0, 20 * 1000000L};
+                nanosleep(&st, NULL);
+            }
         }
         /* Magenta going to the host, yellow coming back -- the same
          * vocabulary the app's own patterns used, so nothing is relearned. */

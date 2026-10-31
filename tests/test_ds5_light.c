@@ -149,6 +149,17 @@ int main(void)
     ok(signed_right(r, n), "signed as the pad checks it");
     ok(ds5_light_bt_takeover_report(r, 77, 0) == 0, "no report into too small a buffer");
 
+    printf("\nthe light's switch, which a fresh connection can leave off (rhoquinn8217's B4, 2026-10-30)\n");
+    n = ds5_light_bt_on_report(r, sizeof(r), 0x15);
+    ok(n == 78 && r[0] == 0x31 && r[1] == 0x50 && r[2] == 0x10, "report 0x31, its count and tag as the colour's");
+    ok(r[3 + 38] == 0x02 && r[3 + 41] == 0x01, "the third claim panel's bit 1, the setup byte at on");
+    ok(r[3] == 0 && r[4] == 0, "claims nothing in the first two panels, the takeover above all");
+    ok(r[47] == 0 && r[48] == 0 && r[49] == 0 && !ds5_report_sets_light(r, n),
+       "carries no colour and does not count as setting the light");
+    bt_sign_output(r, n);
+    ok(signed_right(r, n), "signed as the pad checks it");
+    ok(ds5_light_bt_on_report(r, 77, 0) == 0, "no report into too small a buffer");
+
     printf("\nthe pad's clock, which says when its connection animation is over\n");
     uint32_t clock = 0;
     memset(r, 0, sizeof(r));
@@ -190,10 +201,14 @@ int main(void)
     const char *take = play ? strstr(play, "ds5_light_bt_takeover_report(take, sizeof take") : NULL;
     const char *prime = play ? strstr(play, "for (int i = 0; i < prime_frames; ++i) {") : NULL;
     ok(take && prime && take < prime, "every Bluetooth signal sends it before its first report");
+    const char *play_on = play ? strstr(play, "ds5_light_bt_on_report(") : NULL;
+    ok(play_on && take && play_on < take, "with the light's switch in front of it");
     char *paint = between(sig, "int ctm_ds5_bt_paint(", "\n}");
     const char *paint_take = paint ? strstr(paint, "ds5_light_bt_takeover_report(") : NULL;
     const char *paint_colour = paint ? strstr(paint, "ds5_light_bt_report(") : NULL;
     ok(paint_take && paint_colour && paint_take < paint_colour, "and the app's own colours, before the colour");
+    const char *paint_on = paint ? strstr(paint, "ds5_light_bt_on_report(") : NULL;
+    ok(paint_on && paint_take && paint_on < paint_take, "with the light's switch in front of it");
     char *ds5_ops = between(ds5, "const ctm_controller_ops_t ctm_controller_ds5_ops = {", "\n};");
     char *ds5e_ops = between(ds5, "const ctm_controller_ops_t ctm_controller_ds5e_ops = {", "\n};");
     ok(ds5_ops && strstr(ds5_ops, ".on_input_report = ds5_input_hook") != NULL &&
@@ -203,6 +218,9 @@ int main(void)
     ok(when && strstr(when, "clock < DS5L_ANIMATION_DONE") != NULL &&
        strstr(when, "ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 1)") != NULL,
        "and send it once a bridge, when the animation is over");
+    const char *when_on = when ? strstr(when, "ds5_light_bt_on_report(") : NULL;
+    const char *when_take = when ? strstr(when, "ds5_light_bt_takeover_report(") : NULL;
+    ok(when_on && when_take && when_on < when_take, "with the light's switch in front of it");
     char *over = between(sig, "int ctm_ds5_animation_over(", "\n}");
     ok(over && strstr(over, "ds5_report_animation_over(") != NULL && strstr(over, "read(fd") != NULL &&
        strstr(over, "poll(") == NULL && strstr(over, "sleep") == NULL,
