@@ -7,6 +7,7 @@
  * three times at every bridge, and the app's loop waited behind them. A report
  * left unanswered is asked once, then fails at once: for the rest of the
  * connection, and on the same pad's later connections until the app stops.
+ * A DualSense is the exception: it is always asked (2026-10-30).
  * These pin that, and read controller_common.c for where the session uses it.
  *
  * ➡️ Build and run:  cc tests/test_feature_memory.c && ./a.out
@@ -117,6 +118,15 @@ int main(void)
        "past it, a pad is kept for its connection only");
     ok(feature_pad_remembers(ds4, 0x05), "and the pads already kept stay kept");
 
+    printf("== a DualSense is always asked\n");
+    ok(feature_pad_always_asked("054c", "0ce6"), "a DualSense");
+    ok(feature_pad_always_asked("054c", "0df2"), "an Edge");
+    ok(!feature_pad_always_asked("054c", "05c4") && !feature_pad_always_asked("054c", "09cc"),
+       "not either DS4");
+    ok(!feature_pad_always_asked("045e", "0ce6"), "not another vendor's 0ce6");
+    ok(!feature_pad_always_asked(NULL, "0ce6") && !feature_pad_always_asked("054c", NULL),
+       "not a pad with no ids");
+
     printf("== where the session uses it (controller_common.c)\n");
     char *common = load("src/controllers/controller_common.c");
     ok(common != NULL, "controller_common.c read");
@@ -130,11 +140,19 @@ int main(void)
     ok(unanswered && strstr(unanswered, "feature_set_has(&c->feature_unanswered, id)") != NULL &&
        strstr(unanswered, "feature_pad_remembers(key, id)") != NULL,
        "this connection's set first, then the pad's earlier connections");
+    ok(unanswered && strstr(unanswered, "feature_pad_always_asked(c->dev.vid, c->dev.pid)") != NULL &&
+       strstr(unanswered, "feature_pad_always_asked(c->dev.vid, c->dev.pid)") <
+           strstr(unanswered, "feature_set_has(&c->feature_unanswered, id)"),
+       "a DualSense is let through before either is read");
     char *note = between(common, "static void feature_wait_note(", "\n}");
     ok(note && strstr(note, "took >= FEATURE_NO_ANSWER_US") != NULL &&
        strstr(note, "feature_set_add(&c->feature_unanswered, id)") != NULL &&
        strstr(note, "feature_pad_remember(key, id)") != NULL,
        "a failed ask of the platform's whole wait is kept for the connection and the pad");
+    ok(note && strstr(note, "!feature_pad_always_asked(c->dev.vid, c->dev.pid)") != NULL &&
+       strstr(note, "!feature_pad_always_asked(c->dev.vid, c->dev.pid)") <
+           strstr(note, "feature_set_add(&c->feature_unanswered, id)"),
+       "and a DualSense's failed ask is only logged");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

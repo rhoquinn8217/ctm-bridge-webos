@@ -3096,7 +3096,8 @@ static int feature_fd_for(ctm_controller_t *c, uint32_t request_id)
  * the system's Bluetooth service, which can take its full 5 s. Measured on the
  * rooted monitor: while a Bluetooth DS4 was being bridged, the app's loop sat
  * 15 s in hidraw_open behind such a request. A wait is logged, and a report
- * the pad never answers is not asked again (feature_memory.inl). */
+ * the pad never answers is not asked again, a DualSense's excepted
+ * (feature_memory.inl). */
 #define FEATURE_SLOW_US 300000ull
 
 static void feature_key_of(const ctm_controller_t *c, char *key, size_t len)
@@ -3108,6 +3109,7 @@ static void feature_key_of(const ctm_controller_t *c, char *key, size_t len)
  * the same pad, which is logged once per connection. */
 static bool feature_unanswered(ctm_controller_t *c, unsigned id)
 {
+    if (feature_pad_always_asked(c->dev.vid, c->dev.pid)) return false;
     if (feature_set_has(&c->feature_unanswered, id)) return true;
     char key[FEATURE_KEY_LEN];
     feature_key_of(c, key, sizeof(key));
@@ -3126,7 +3128,8 @@ static void feature_wait_note(ctm_controller_t *c, bool get, unsigned id,
     ctm_gesture_log(c, "feature %s 0x%02x (%u bytes) on %s took %llu ms, rc=%d",
                     get ? "get" : "set", id, len, c->dev.path,
                     (unsigned long long)(took / 1000), rc);
-    if (get && rc < 0 && took >= FEATURE_NO_ANSWER_US) {
+    if (get && rc < 0 && took >= FEATURE_NO_ANSWER_US &&
+        !feature_pad_always_asked(c->dev.vid, c->dev.pid)) {
         feature_set_add(&c->feature_unanswered, id);
         char key[FEATURE_KEY_LEN];
         feature_key_of(c, key, sizeof(key));

@@ -12,6 +12,13 @@
  *   - on the same pad's later connections, known by its vendor and product ids
  *     and its serial or MAC, until the app stops. A new start asks once again.
  *
+ * ⭐ A DUALSENSE IS ALWAYS ASKED (rhoquinn8217, 2026-10-30: "the DualSense take
+ * precedence over any other controller"). On the B4 the Bluetooth service
+ * stopped answering every feature request for a while, and a healthy DualSense,
+ * which had answered these reports minutes before, was kept as not answering
+ * its calibration, its MAC and its firmware until the app stopped. So a
+ * DualSense or an Edge waits as it always did, and the wait is only logged.
+ *
  * ⓘ Bits and one lock, no I/O, so tests/test_feature_memory.c can hold it. */
 
 #ifndef FEATURE_MEMORY_INL
@@ -56,6 +63,13 @@ static inline void feature_pad_key(const char *vid, const char *pid, const char 
         return;
     }
     snprintf(out, len, "%s:%s %s", vid ? vid : "", pid ? pid : "", who);
+}
+
+/* Never kept as unanswered: a DualSense or an Edge, by its ids. */
+static inline bool feature_pad_always_asked(const char *vid, const char *pid)
+{
+    return vid && pid && strcmp(vid, "054c") == 0 &&
+           (strcmp(pid, "0ce6") == 0 || strcmp(pid, "0df2") == 0);
 }
 
 typedef struct {
