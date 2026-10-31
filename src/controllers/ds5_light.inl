@@ -105,6 +105,42 @@ static inline size_t ds5_light_bt_takeover_report(uint8_t *out, size_t cap, unsi
     return DS5L_BT_LEN;
 }
 
+/* ⭐⭐ THE LIGHT HAS A SWITCH OF ITS OWN, AND A FRESH CONNECTION CAN LEAVE IT OFF
+ * (rhoquinn8217's B4, 2026-10-30). Two DualSenses connected over Bluetooth on the
+ * same settings came up one lit and one dark. A dark one ignores every colour, from
+ * the PC or the TV, in a 0x31 or a 0x36, the whole signal included, and a web page's
+ * too, while its rumble, its speaker and its player LEDs all work. Nothing this side
+ * chooses which: every report went out, and only a reconnect that happened to land
+ * the other way cleared it.
+ * ➡️ This report turns it back on: the third claim panel's bit 1 and the light's
+ * setup byte at 1, the pair the Linux driver's tools use. Three things, measured on
+ * the dark pad:
+ *   - Alone, it shows the pad's own blue and still ignores colours. The takeover has
+ *     to follow it.
+ *   - It has to be a report of its own: with the takeover in the same one, nothing
+ *     happened at all.
+ *   - A few milliseconds apart, this, the takeover and a colour went straight from
+ *     dark to the colour, with no blue to see.
+ * ⓘ So it goes in front of every takeover. On a lit pad the takeover blanks the light
+ * until the next colour anyway, and a report in front of it changes nothing to see. */
+#define DS5L_BLOCK_FLAG2     38     /* within the output block: the third claim panel */
+#define DS5L_FLAG2_SETUP     0x02   /* its bit 1: the light's setup byte */
+#define DS5L_BLOCK_SETUP     41
+#define DS5L_SETUP_LIGHT_ON  0x01
+
+/* The light's switch turned on and nothing else, UNSIGNED like the two above. */
+static inline size_t ds5_light_bt_on_report(uint8_t *out, size_t cap, unsigned seq)
+{
+    if (!out || cap < DS5L_BT_LEN) return 0;
+    memset(out, 0, DS5L_BT_LEN);
+    out[0] = DS5L_BT_ID;
+    out[1] = (uint8_t)((seq & 0x0fu) << 4);
+    out[2] = DS5L_BT_TAG;
+    out[DS5L_BT_BLOCK + DS5L_BLOCK_FLAG2] = DS5L_FLAG2_SETUP;
+    out[DS5L_BT_BLOCK + DS5L_BLOCK_SETUP] = DS5L_SETUP_LIGHT_ON;
+    return DS5L_BT_LEN;
+}
+
 /* The pad's own clock, from one of its input reports: a cable's 0x01 at full
  * size, or Bluetooth's 0x31. False for any other report. */
 static inline bool ds5_input_clock(const uint8_t *d, size_t len, uint32_t *clock)

@@ -474,11 +474,16 @@ static void ds5_take_light_when_ready(ctm_controller_t *c, const uint8_t *data, 
     ctm_controller_set_type_state(c, DS5_SLOT_LIGHT, 1);
     static unsigned s_seq;
     uint8_t rep[DS5L_BT_LEN];
-    const size_t n = ds5_light_bt_takeover_report(rep, sizeof rep, s_seq++);
+    /* The light's switch first: a fresh connection can leave it off (ds5_light.inl). */
+    size_t n = ds5_light_bt_on_report(rep, sizeof rep, s_seq++);
+    if (!n) return;
+    ctm_bt_sign_output(rep, n);
+    const int on_rc = ctm_controller_write_raw(c, rep, n);
+    n = ds5_light_bt_takeover_report(rep, sizeof rep, s_seq++);
     if (!n) return;
     ctm_bt_sign_output(rep, n);
     const int rc = ctm_controller_write_raw(c, rep, n);
-    ctl_log(c, "lightbar: taken over at the pad's clock %u (rc=%d)", clock, rc);
+    ctl_log(c, "lightbar: switched on (rc=%d) and taken over (rc=%d) at the pad's clock %u", on_rc, rc, clock);
 }
 
 /* on_input_report for a DualSense: the takeover above, then the gesture. */

@@ -252,10 +252,17 @@ static int btsig_play_fd(int fd, btsig_pattern_t pattern, ctm_controller_t *log_
     bool stopped = false;
     /* ⭐ THE LIGHT TAKEN OVER FIRST (ds5_light.inl): one report before any
      * colour, or a pad nobody released from its connection animation ignores
-     * them all. Harmless when SDL has sent it already. */
+     * them all. Harmless when SDL has sent it already. The light's switch goes
+     * in front of it: a fresh connection can leave that off, and a signal with no
+     * session has nothing else to turn it on (ds5_light.inl). */
     {
         uint8_t take[DS5L_BT_LEN];
-        const size_t tn = ds5_light_bt_takeover_report(take, sizeof take, call);
+        const size_t on = ds5_light_bt_on_report(take, sizeof take, call * 2u);
+        if (on) {
+            ctm_bt_sign_output(take, on);
+            if (write(fd, take, on) != (ssize_t)on) ++failed;
+        }
+        const size_t tn = ds5_light_bt_takeover_report(take, sizeof take, call * 2u + 1u);
         if (tn) {
             ctm_bt_sign_output(take, tn);
             if (write(fd, take, tn) != (ssize_t)tn) ++failed;
@@ -589,6 +596,10 @@ int ctm_ds5_bt_paint(const char *node, uint8_t r, uint8_t g, uint8_t b, int take
     int rc = 0;
     size_t n;
     if (take_over) {
+        /* The light's switch first: a fresh connection can leave it off. */
+        n = ds5_light_bt_on_report(rep, sizeof rep, s_seq++);
+        ctm_bt_sign_output(rep, n);
+        if (write(fd, rep, n) != (ssize_t)n) rc = -1;
         n = ds5_light_bt_takeover_report(rep, sizeof rep, s_seq++);
         ctm_bt_sign_output(rep, n);
         if (write(fd, rep, n) != (ssize_t)n) rc = -1;
