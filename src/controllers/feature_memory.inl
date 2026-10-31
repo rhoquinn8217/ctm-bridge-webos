@@ -116,4 +116,83 @@ static inline void feature_pad_remember(const char *key, unsigned id)
     pthread_mutex_unlock(&s_feature_pads_mutex);
 }
 
+/* ⭐⭐ WHAT A BLUETOOTH DUALSENSE HAS ANSWERED IS KEPT, SO IT IS NOT ASKED AGAIN
+ * (rhoquinn8217's B4, 2026-10-30). Every drop of both pads with a log to read began
+ * with a feature request the Bluetooth service left unanswered, 5 s at a time, and
+ * the service itself died within seconds of it: 10 s after the first, on the
+ * clearest run. One bridge in about 25 did it, with the signal waiting well clear.
+ * And each bridge asked the pad the same three things, none of which changes while
+ * it is on: its calibration (0x05), its MAC and pairing (0x09), its firmware (0x20).
+ * So the first answer stands for that pad until the app stops, in the same bytes. */
+#define FEATURE_ANSWER_BYTES 64
+
+typedef struct {
+    bool have;
+    uint16_t len;
+    uint8_t data[FEATURE_ANSWER_BYTES];
+} feature_answer_t;
+
+typedef struct {
+    char key[FEATURE_KEY_LEN];
+    feature_answer_t answer[3];
+} feature_answers_t;
+
+static feature_answers_t s_feature_answers[FEATURE_PADS_MAX];
+
+/* Where `id` is kept, or -1 for a report that may change and is always asked. */
+static inline int feature_answer_slot(unsigned id)
+{
+    switch (id) {
+    case 0x05: return 0;
+    case 0x09: return 1;
+    case 0x20: return 2;
+    default:   return -1;
+    }
+}
+
+/* ⓘ With every slot taken by other pads, this pad is simply asked each time. */
+static inline void feature_answer_keep(const char *key, unsigned id, const uint8_t *data, size_t len)
+{
+    const int at = feature_answer_slot(id);
+    if (!key || !key[0] || !data || at < 0 || len == 0 || len > FEATURE_ANSWER_BYTES) return;
+    pthread_mutex_lock(&s_feature_pads_mutex);
+    int slot = -1;
+    for (int i = 0; i < FEATURE_PADS_MAX && slot < 0; ++i) {
+        if (strcmp(s_feature_answers[i].key, key) == 0) slot = i;
+    }
+    for (int i = 0; i < FEATURE_PADS_MAX && slot < 0; ++i) {
+        if (!s_feature_answers[i].key[0]) slot = i;
+    }
+    if (slot >= 0) {
+        snprintf(s_feature_answers[slot].key, sizeof(s_feature_answers[slot].key), "%s", key);
+        feature_answer_t *a = &s_feature_answers[slot].answer[at];
+        a->have = true;
+        a->len = (uint16_t)len;
+        memcpy(a->data, data, len);
+    }
+    pthread_mutex_unlock(&s_feature_pads_mutex);
+}
+
+/* Copies out what the pad said to the same question: the same report, the same
+ * length. False when it has not been asked that. */
+static inline bool feature_answer_recall(const char *key, unsigned id, size_t len, uint8_t *out)
+{
+    const int at = feature_answer_slot(id);
+    if (!key || !key[0] || !out || at < 0) return false;
+    bool found = false;
+    pthread_mutex_lock(&s_feature_pads_mutex);
+    for (int i = 0; i < FEATURE_PADS_MAX; ++i) {
+        if (strcmp(s_feature_answers[i].key, key) == 0) {
+            const feature_answer_t *a = &s_feature_answers[i].answer[at];
+            if (a->have && a->len == len) {
+                memcpy(out, a->data, len);
+                found = true;
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_feature_pads_mutex);
+    return found;
+}
+
 #endif /* FEATURE_MEMORY_INL */

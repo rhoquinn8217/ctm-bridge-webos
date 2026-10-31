@@ -74,6 +74,7 @@ struct hidraw_devinfo { unsigned int bustype; short vendor; short product; };
 #include "pad_blank.inl"
 #include "switch_hold.inl"
 #include "feature_memory.inl"
+#include "ds5_light.inl"
 
 /* ------------------------------------------------------------------
  * DS5 output report layout
@@ -1677,6 +1678,25 @@ static void *request_full_bt_mode_thread(void *arg)
     return NULL;
 }
 
+/* Is this Bluetooth pad already sending its full reports? Read off the next few
+ * on its node, waiting a moment for each; a pad sends them hundreds of times a
+ * second. False when that does not settle it. */
+static bool bt_pad_sends_full_reports(int fd)
+{
+    struct pollfd p;
+    p.fd = fd;
+    p.events = POLLIN;
+    p.revents = 0;
+    uint8_t rep[128];
+    for (int tries = 0; tries < 3; ++tries) {
+        if (poll(&p, 1, 30) <= 0) return false;
+        const ssize_t n = read(fd, rep, sizeof rep);
+        if (n <= 0) return false;
+        if (rep[0] == DS5L_BT_INPUT_ID && n >= DS5L_BT_LEN) return true;
+    }
+    return false;
+}
+
 static void request_full_bt_mode(int fd)
 {
     int dup_fd = dup(fd);
@@ -1963,7 +1983,14 @@ static int open_hid(ctm_controller_t *c, ctmb_device_caps_t *caps,
         if (caps->output_report_len < 1024) caps->output_report_len = 1024;
     }
 
-    if (c->ops->request_bt_mode) request_full_bt_mode(fd);
+    /* ⭐ A Bluetooth pad already sending its full reports is not asked for them
+     * (rhoquinn8217's B4, 2026-10-30). The ask is a feature request, and one left
+     * unanswered here, as a session opened, began the drop of both pads. The app
+     * asks once per connection, as the pad arrives (request_full_report). */
+    if (c->ops->request_bt_mode &&
+        !(strcmp(c->dev.bus, "BT") == 0 && bt_pad_sends_full_reports(fd))) {
+        request_full_bt_mode(fd);
+    }
     return fd;
 }
 
@@ -3105,6 +3132,21 @@ static void feature_key_of(const ctm_controller_t *c, char *key, size_t len)
     feature_pad_key(c->dev.vid, c->dev.pid, c->dev.serial, c->dev.mac, key, len);
 }
 
+/* A Bluetooth DualSense's or Edge's answers are kept (feature_memory.inl). */
+static bool feature_answers_kept_for(const ctm_controller_t *c)
+{
+    return c->ops && c->ops->speaks_ds5 && strcmp(c->dev.bus, "BT") == 0;
+}
+
+/* The answer this pad gave to the same question earlier, if it did. */
+static bool feature_answer_earlier(const ctm_controller_t *c, unsigned id, size_t len, uint8_t *out)
+{
+    if (!feature_answers_kept_for(c)) return false;
+    char key[FEATURE_KEY_LEN];
+    feature_key_of(c, key, sizeof(key));
+    return feature_answer_recall(key, id, len, out);
+}
+
 /* Not to be asked: left unanswered on this connection, or on an earlier one of
  * the same pad, which is logged once per connection. */
 static bool feature_unanswered(ctm_controller_t *c, unsigned id)
@@ -3169,7 +3211,14 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
         }
     } else if (h->type == CTMB_MSG_FEATURE_GET) {
         int ok = 0;
-        if (h->payload_len > 0 && h->payload_len <= MAX_REPORT &&
+        uint8_t earlier[FEATURE_ANSWER_BYTES];
+        if (h->payload_len > 0 && h->payload_len <= sizeof earlier &&
+            feature_answer_earlier(c, payload[0], h->payload_len, earlier)) {
+            ctl_log(c, "feature get 0x%02x (%u bytes): the pad's earlier answer, not asked",
+                    payload[0], h->payload_len);
+            ok = c_send(c, CTMB_MSG_FEATURE_REPORT, CTMB_FLAG_OK,
+                        h->request_id, earlier, h->payload_len) == 0;
+        } else if (h->payload_len > 0 && h->payload_len <= MAX_REPORT &&
             !feature_unanswered(c, payload[0])) {
             uint8_t feature[MAX_REPORT];
             memcpy(feature, payload, h->payload_len);
@@ -3179,7 +3228,17 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
             int rc = ioctl(fd, HIDIOCGFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
             feature_wait_note(c, true, payload[0], h->payload_len, asked_us, rc);
+            if (feature_answers_kept_for(c)) {
+                ctl_log(c, "feature get 0x%02x (%u bytes): asked of the pad, rc=%d after %llu ms",
+                        payload[0], h->payload_len, rc,
+                        (unsigned long long)((now_us() - asked_us) / 1000));
+            }
             if (rc >= 0) {
+                if (feature_answers_kept_for(c)) {
+                    char key[FEATURE_KEY_LEN];
+                    feature_key_of(c, key, sizeof(key));
+                    feature_answer_keep(key, payload[0], feature, h->payload_len);
+                }
                 ok = c_send(c, CTMB_MSG_FEATURE_REPORT, CTMB_FLAG_OK,
                             h->request_id, feature, h->payload_len) == 0;
             }
@@ -3196,6 +3255,11 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
             const int rc = ioctl(fd, HIDIOCSFEATURE(h->payload_len), feature);
             pthread_mutex_unlock(&c->hid_mutex);
             feature_wait_note(c, false, payload[0], h->payload_len, asked_us, rc);
+            if (feature_answers_kept_for(c)) {
+                ctl_log(c, "feature set 0x%02x (%u bytes): sent to the pad, rc=%d after %llu ms",
+                        payload[0], h->payload_len, rc,
+                        (unsigned long long)((now_us() - asked_us) / 1000));
+            }
             ok = rc >= 0;
         }
         (void)c_send(c, CTMB_MSG_FEATURE_REPORT, ok ? CTMB_FLAG_OK : 0, h->request_id, NULL, 0);

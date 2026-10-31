@@ -127,6 +127,37 @@ int main(void)
     ok(!feature_pad_always_asked(NULL, "0ce6") && !feature_pad_always_asked("054c", NULL),
        "not a pad with no ids");
 
+    printf("== what a Bluetooth DualSense has answered is kept (rhoquinn8217's B4, 2026-10-30)\n");
+    char frost[FEATURE_KEY_LEN], cheat[FEATURE_KEY_LEN];
+    feature_pad_key("054c", "0ce6", "7c:66:ef:82:10:ed", "", frost, sizeof(frost));
+    feature_pad_key("054c", "0ce6", "a0:fa:9c:ef:9b:30", "", cheat, sizeof(cheat));
+    uint8_t said[41], back[64];
+    for (unsigned i = 0; i < sizeof(said); ++i) said[i] = (uint8_t)(i + 1);
+    ok(!feature_answer_recall(frost, 0x05, sizeof(said), back), "nothing is known before it answers");
+    feature_answer_keep(frost, 0x05, said, sizeof(said));
+    memset(back, 0, sizeof(back));
+    ok(feature_answer_recall(frost, 0x05, sizeof(said), back) && memcmp(back, said, sizeof(said)) == 0,
+       "the same question has the same bytes back");
+    ok(!feature_answer_recall(frost, 0x05, 64, back), "a question of another length is asked");
+    ok(!feature_answer_recall(frost, 0x09, 20, back) && !feature_answer_recall(frost, 0x20, 64, back),
+       "its other reports are not answered by this one");
+    ok(!feature_answer_recall(cheat, 0x05, sizeof(said), back), "another pad is asked for its own");
+    feature_answer_keep(frost, 0x09, said, 20);
+    feature_answer_keep(frost, 0x20, said, 41);
+    ok(feature_answer_recall(frost, 0x09, 20, back) && feature_answer_recall(frost, 0x20, 41, back) &&
+       feature_answer_recall(frost, 0x05, 41, back), "its MAC and firmware are kept beside its calibration");
+    feature_answer_keep(frost, 0x08, said, 20);
+    feature_answer_keep(frost, 0x80, said, 20);
+    ok(!feature_answer_recall(frost, 0x08, 20, back) && !feature_answer_recall(frost, 0x80, 20, back),
+       "a report that may change is never kept");
+    uint8_t big[FEATURE_ANSWER_BYTES + 1];
+    memset(big, 7, sizeof(big));
+    feature_answer_keep(cheat, 0x05, big, sizeof(big));
+    feature_answer_keep("", 0x05, said, sizeof(said));
+    feature_answer_keep(NULL, 0x05, said, sizeof(said));
+    ok(!feature_answer_recall(cheat, 0x05, sizeof(big), back) && !feature_answer_recall("", 0x05, sizeof(said), back) &&
+       !feature_answer_recall(NULL, 0x05, sizeof(said), back), "too long to keep, or a pad with no key: asked");
+
     printf("== where the session uses it (controller_common.c)\n");
     char *common = load("src/controllers/controller_common.c");
     ok(common != NULL, "controller_common.c read");
@@ -153,6 +184,18 @@ int main(void)
        strstr(note, "!feature_pad_always_asked(c->dev.vid, c->dev.pid)") <
            strstr(note, "feature_set_add(&c->feature_unanswered, id)"),
        "and a DualSense's failed ask is only logged");
+
+    ok(get && strstr(get, "feature_answer_earlier(c, payload[0], h->payload_len, earlier)") != NULL &&
+       strstr(get, "feature_answer_earlier(c, payload[0], h->payload_len, earlier)") < strstr(get, "HIDIOCGFEATURE"),
+       "the pad's earlier answer is looked for before it is asked");
+    ok(get && strstr(get, "feature_answer_keep(key, payload[0], feature, h->payload_len)") != NULL &&
+       strstr(get, "HIDIOCGFEATURE") < strstr(get, "feature_answer_keep(key, payload[0], feature, h->payload_len)"),
+       "and only an answer it really gave is kept");
+    char *kept_for = between(common, "static bool feature_answers_kept_for(", "\n}");
+    ok(kept_for && strstr(kept_for, "c->ops->speaks_ds5") != NULL && strstr(kept_for, "\"BT\"") != NULL,
+       "only for a DualSense or an Edge, only over Bluetooth");
+    ok(strstr(common, "!(strcmp(c->dev.bus, \"BT\") == 0 && bt_pad_sends_full_reports(fd))") != NULL,
+       "a Bluetooth pad already sending its full reports is not asked for them");
 
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
