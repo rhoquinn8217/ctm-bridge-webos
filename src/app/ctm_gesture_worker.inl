@@ -222,6 +222,7 @@ void ctm_agent_probe_park(bool parked)
          * refused twice, with no wait at all. Unknown now, until the probe asks. */
         g_agent_probed = false;
         g_agent_compat = PROTOCOL_UNKNOWN;
+        g_agent_locked = 0;
         g_probe_now = true;
     }
 }
@@ -233,6 +234,7 @@ static void *agent_probe_thread(void *arg)
     bool said = false;          /* has a reading been logged yet */
     bool last_online = false;   /* the reading logged last */
     int last_compat = PROTOCOL_UNKNOWN;   /* the protocol verdict logged last */
+    int last_locked = 0;   /* whether Windows was locked, as logged last */
     for (;;) {
         if (g_agent_host[0] && !g_probe_parked) {
             char probe[256];
@@ -268,6 +270,14 @@ static void *agent_probe_thread(void *arg)
             }
             if (compat != PROTOCOL_UNKNOWN) last_compat = compat;
             g_agent_compat = compat;
+            /* ⭐ And whether Windows is locked there, logged when that changes. */
+            const int locked = g_agent_online && protocol_windows_locked(probe);
+            if (locked != last_locked) {
+                ctm_gesture_log(NULL, "agent probe: Windows is %s",
+                                locked ? "locked: nothing bridges until it is unlocked" : "unlocked");
+                last_locked = locked;
+            }
+            g_agent_locked = locked;
         }
         /* ⓘ Slept in short steps so a request can be answered promptly without
          * probing any harder when nobody has asked. A tenth of a second each,

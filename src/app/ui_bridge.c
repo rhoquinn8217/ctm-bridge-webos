@@ -527,6 +527,10 @@ static int bridge_start_command(const char *kind, const char *busid, int *port,
         g_agent_compat = PROTOCOL_UPDATE_TV;   /* the panel says so until the next probe */
         return rc;
     }
+    if (rc == -1 && protocol_refused_locked(response)) {
+        g_agent_locked = 1;   /* newer than the last probe's answer */
+        return rc;
+    }
     if (rc == 0) {
         const int given = agent_reply_port(response);
         if (given > 0) {

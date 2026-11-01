@@ -90,4 +90,18 @@ static inline bool protocol_refused_tv(const char *reply)
     return reply != NULL && strncmp(reply, "ERR update the TV app", 21) == 0;
 }
 
+/* ⭐ Is Windows locked on the PC (rhoquinn8217, 2026-11-01)? Nothing bridges while
+ * it is, and only the listener can see it: "locked=1" in its STATUS answer. A
+ * listener that says nothing is not locked, as none was before it could say. */
+static inline bool protocol_windows_locked(const char *status_reply)
+{
+    return status_reply && strncmp(status_reply, "OK", 2) == 0 && protocol_word(status_reply, " locked=", 0) != 0;
+}
+
+/* Its refusal of a bridge while Windows is locked, read by its first words. */
+static inline bool protocol_refused_locked(const char *reply)
+{
+    return reply && strncmp(reply, "ERR Windows is locked", 21) == 0;
+}
+
 #endif
