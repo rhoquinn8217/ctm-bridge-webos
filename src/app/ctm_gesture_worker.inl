@@ -214,6 +214,14 @@ void ctm_agent_probe_park(bool parked)
 {
     g_probe_parked = parked;
     if (!parked) {
+        /* ⭐ WAKING FORGETS WHAT IT READ BEFORE THE PARK (2026-11-01). That reading
+         * is from the last stream, which can be hours and a restart of the PC ago,
+         * and the same address keeps it (agent_endpoint.inl). Auto Bridge took last
+         * night's ONLINE for an answer from a PC nobody had signed in to, where
+         * Vibepollo holds the start command that starts the listener: the pad was
+         * refused twice, with no wait at all. Unknown now, until the probe asks. */
+        g_agent_probed = false;
+        g_agent_compat = PROTOCOL_UNKNOWN;
         g_probe_now = true;
     }
 }
@@ -262,9 +270,10 @@ static void *agent_probe_thread(void *arg)
             g_agent_compat = compat;
         }
         /* ⓘ Slept in short steps so a request can be answered promptly without
-         * probing any harder when nobody has asked. */
-        for (int i = 0; i < 20 && !g_probe_now; ++i) {
-            usleep(AGENT_PROBE_INTERVAL_US / 20);
+         * probing any harder when nobody has asked. A tenth of a second each,
+         * since every stream's Auto Bridge waits for the first answer. */
+        for (int i = 0; i < 100 && !g_probe_now; ++i) {
+            usleep(AGENT_PROBE_INTERVAL_US / 100);
         }
         g_probe_now = false;
     }
