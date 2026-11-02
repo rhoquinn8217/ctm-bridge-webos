@@ -357,6 +357,12 @@ static int send_agent_line(const char *command, char *response, size_t response_
      * it either way, which is what makes pressing a row a reasonable thing to
      * do before anything has been probed. */
     if (n > 0) {
+        /* ⭐ BEFORE IT READS ONLINE. Auto Bridge goes the moment it does, and with
+         * this read after, by the probe, it went at a locked Windows in 3 runs of
+         * 6 (the rooted monitor, 2026-11-01). */
+        if (strncmp(command, "STATUS", 6) == 0) {
+            g_agent_locked = protocol_windows_locked(response);
+        }
         g_agent_online = true;
         g_agent_probed = true;
     }
@@ -525,6 +531,10 @@ static int bridge_start_command(const char *kind, const char *busid, int *port,
     int rc = send_agent_command(cmd, response, response_len);
     if (rc == -1 && protocol_refused_tv(response)) {
         g_agent_compat = PROTOCOL_UPDATE_TV;   /* the panel says so until the next probe */
+        return rc;
+    }
+    if (rc == -1 && protocol_refused_locked(response)) {
+        g_agent_locked = 1;   /* newer than the last probe's answer */
         return rc;
     }
     if (rc == 0) {

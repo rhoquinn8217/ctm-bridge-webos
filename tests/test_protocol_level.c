@@ -128,6 +128,15 @@ int main(void)
     ok(strstr(worker, "protocol_compat(probe)") != NULL && strstr(worker, "g_agent_compat = compat;") != NULL,
        "every probe of the listener decides it again");
 
+    printf("\nwhether Windows is locked on the PC\n");
+    ok(protocol_windows_locked("OK CTM_AGENT_V1 level=1 min_tv=1 locked=1\n"), "locked=1 says it is");
+    ok(!protocol_windows_locked("OK CTM_AGENT_V1 level=1 min_tv=1 locked=0\n"), "locked=0 says it is not");
+    ok(!protocol_windows_locked("OK CTM_AGENT_V1 level=1 min_tv=1\n"), "a listener that says nothing: not locked");
+    ok(!protocol_windows_locked("ERR nothing locked=1\n"), "only from an OK");
+    ok(!protocol_windows_locked(NULL), "nothing from nothing");
+    ok(protocol_refused_locked("ERR Windows is locked\n"), "its refusal, by its first words");
+    ok(!protocol_refused_locked("ERR bad bridge args\n"), "not another refusal");
+
     printf("\n%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

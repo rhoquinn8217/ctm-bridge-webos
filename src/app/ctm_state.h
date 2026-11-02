@@ -201,6 +201,9 @@ extern bool g_agent_probed;
  * protocol_compat_t (shared/protocol_level.inl), from the listener's STATUS
  * answer, or from its refusal of a bridge. 0, unknown, until one has come. */
 extern volatile int g_agent_compat;
+/* ⭐ Windows is locked on the PC, from the listener's STATUS answer or its refusal
+ * of a bridge (shared/protocol_level.inl). Nothing bridges while it is. */
+extern volatile int g_agent_locked;
 /* ⓘ Whether the last plug failed because the listener could not be REACHED
  * (its connect failed), as against refused or answered wrongly. One lost
  * packet on a busy Wi-Fi link at a stream's start is enough to fail a connect,
