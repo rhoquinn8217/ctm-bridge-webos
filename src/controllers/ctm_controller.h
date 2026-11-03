@@ -163,6 +163,13 @@ typedef struct {
      * thread, before the blank. Must not block. */
     bool (*read_touch)(const uint8_t *data, size_t len, uint32_t *word);
 
+    /* ⭐ The d-pad, Cross and Circle and the left stick, read from this pad's
+     * own report while the TV holds input, for a webOS pop-up (held_nav.inl):
+     * one packed word. Returns false for a report it does not read. NULL => a
+     * pad whose layout is not read, which still answers unbridged. When: the
+     * input thread, before the blank. Must not block. */
+    bool (*read_nav)(const uint8_t *data, size_t len, uint32_t *word);
+
     /* Patch an outbound report in place before it reaches the device (DS audio
      * route / volume / CRC). Returns nonzero to DROP the report (suppress the
      * write), 0 to write `*len` bytes. NULL => verbatim forward. */
@@ -307,6 +314,12 @@ typedef struct {
      * overlay opened, the overlay is closed, or its touch is not read. */
     bool held_touch;
     uint32_t held_touch_word;
+    /* ⭐ The d-pad, Cross and Circle and the left stick while the TV holds
+     * input, for a webOS pop-up (held_nav.inl): one word, read with the
+     * HELD_NAV_ macros. `held_nav` false: the pad has not reported since the
+     * hold began, there is no hold, or its layout is not read. */
+    bool held_nav;
+    uint32_t held_nav_word;
 } ctm_controller_status_t;
 
 /* --- lifecycle (controller_common.c) ----------------------------------------

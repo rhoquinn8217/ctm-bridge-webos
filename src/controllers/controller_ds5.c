@@ -7,6 +7,7 @@
 #include "ctm_controller.h"
 #include "switch_hold.inl"
 #include "held_stick.inl"   /* the overlay's volume */
+#include "held_nav.inl"     /* a webOS pop-up */
 #include "held_touch.inl"   /* the TV's pointer */
 #include "ds5_light.inl"
 
@@ -535,6 +536,7 @@ const ctm_controller_ops_t ctm_controller_ds5_ops = {
     .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .read_right_stick = held_stick_ds5,
+    .read_nav = held_nav_ds5,
     .read_touch = held_touch_ds5,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,   /* live values read via get_settings in patch_output */
@@ -562,6 +564,7 @@ const ctm_controller_ops_t ctm_controller_ds5e_ops = {
     .on_input_report = ds5_input_hook,
     .blank_input = ds5_blank_input,
     .read_right_stick = held_stick_ds5,
+    .read_nav = held_nav_ds5,
     .read_touch = held_touch_ds5,
     .patch_output = ds5_patch_output,
     .set_settings = NULL,
