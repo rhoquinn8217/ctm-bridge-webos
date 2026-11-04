@@ -348,6 +348,11 @@ struct ctm_controller {
      * whole, and the hold it was read in (held_touch_note, held_touch.inl). */
     volatile uint32_t held_touch_word;
     volatile unsigned held_touch_gen;
+    /* ⭐ The d-pad, Cross and Circle and the left stick while input is held,
+     * for a webOS pop-up, one word, and the hold it was read in
+     * (held_nav_note, held_nav.inl). */
+    volatile uint32_t held_nav_word;
+    volatile unsigned held_nav_gen;
     /* ⭐ How to blank a gamepad's reports while the TV's overlay holds input,
      * for a type with no blank of its own (pad_blank.inl). present only when its
      * descriptor gave something to blank, or it is a Pro Controller. ⓘ Built
@@ -971,6 +976,17 @@ static void held_touch_note(ctm_controller_t *c, const uint8_t *buf, size_t n)
     if (!c->ops->read_touch(buf, n, &word)) return;
     c->held_touch_word = word;
     c->held_touch_gen = g_input_hold_gen;
+}
+
+/* ⭐ A bridged pad's d-pad, Cross and Circle and its left stick while input
+ * is held, for a webOS pop-up, as the touchpad is above: kept with the hold
+ * it was read in. */
+static void held_nav_note(ctm_controller_t *c, const uint8_t *buf, size_t n)
+{
+    uint32_t word = 0;
+    if (!c->ops->read_nav(buf, n, &word)) return;
+    c->held_nav_word = word;
+    c->held_nav_gen = g_input_hold_gen;
 }
 
 const char *ctm_controller_bus(const ctm_controller_t *c)
@@ -3022,6 +3038,12 @@ static void *input_thread_main(void *arg)
                 if (held && c->ops && c->ops->read_touch) {
                     held_touch_note(c, buf, (size_t)n);
                 }
+                /* ⭐ A webOS pop-up: the d-pad, Cross and Circle and the left
+                 * stick, read from the real report before the blank
+                 * (held_nav.inl). */
+                if (held && c->ops && c->ops->read_nav) {
+                    held_nav_note(c, buf, (size_t)n);
+                }
                 /* ⭐ A still pad's state is kept as the pad sent it, before a
                  * hold blanks it, so what is sent again after the overlay
                  * closes is what the pad still holds. */
@@ -4237,6 +4259,10 @@ void ctm_controller_get_status(ctm_controller_t *c, ctm_controller_status_t *out
     if (ctm_input_is_held() && c->held_touch_gen == g_input_hold_gen) {
         out->held_touch = true;
         out->held_touch_word = c->held_touch_word;
+    }
+    if (ctm_input_is_held() && c->held_nav_gen == g_input_hold_gen) {
+        out->held_nav = true;
+        out->held_nav_word = c->held_nav_word;
     }
 }
 
