@@ -810,6 +810,20 @@ static bool ds4_usb_host_sets_light(const uint8_t *data, size_t len)
  * so both sides' logs name the path the same way, and "ds4" stays the
  * Bluetooth type's: its chord lines in ctm-gesture.log are the untested ones,
  * and a line has to say which of the two wrote it. */
+
+/* ⭐ ITS OWN SOUND CARD (2026-11-03). A second-model DS4 (054c:09cc) is a USB
+ * audio device on a cable: the speaker and headphone jack as 2 channels at
+ * 32 kHz, the headset microphone as 1 channel at 16 kHz. Read off a DS4Dongle,
+ * which copies that pad's USB side byte for byte, on the C1:
+ * /proc/asound/cardN/stream0. ⓘ A first-model DS4 (05c4) has no sound card on
+ * a cable, so for it the card is simply not found. */
+static const ctm_sound_card_t ds4_usb_sound_card = {
+    .play_channels = 2,
+    .play_rate = 32000,
+    .mic_channels = 1,
+    .mic_rate = 16000,
+};
+
 const ctm_controller_ops_t controller_ds4_usb_ops = {
     /* What a bridge keeps released: switch_hold.inl. */
     .switch_layout = swh_layout_ds4,
@@ -820,6 +834,7 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .grab_skips_gamepads = true,
     .request_bt_mode = false,
     .speaks_ds5 = false,
+    .sound_card = &ds4_usb_sound_card,
     .matches = ds4_usb_matches,
     .read_pad_mac = ds4_usb_read_pad_mac,
     .on_input_report = ds4_on_input_report,

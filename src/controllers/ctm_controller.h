@@ -50,6 +50,15 @@ typedef enum {
     CTM_UNPLUG_REPLACED         /* a stale controller displaced by a new one */
 } ctm_unplug_reason_t;
 
+/* A pad's own USB sound card, as a type that has one describes it: the speaker
+ * side and the microphone side, each S16_LE at one rate. */
+typedef struct {
+    unsigned play_channels;
+    unsigned play_rate;
+    unsigned mic_channels;
+    unsigned mic_rate;
+} ctm_sound_card_t;
+
 typedef struct {
     const char *kind;   /* "ds5" / "ds4" / "ds4_usb" / "xbox" / "xpad" / "steam_puck" / "generic" */
 
@@ -91,6 +100,15 @@ typedef struct {
      * ⚠️ Not the same question as grab_evdev or needs_host_config, which a DS4
      * also answers yes to. A DS4 speaks its own protocol, not this one. */
     bool speaks_ds5;
+
+    /* ⭐ A SOUND CARD OF ITS OWN THAT IS NOT A DUALSENSE'S (2026-11-03): its
+     * formats, for a type whose pad is a USB audio device on a cable, a
+     * second-model DS4. The session finds the card by the pad's USB id, sets
+     * its volume, writes the host's speaker sound to it and sends its
+     * microphone to the host, as it does for a DualSense. NULL => none, and
+     * none is what a first-model DS4 has: its card is simply not found.
+     * ⓘ A DualSense's card is speaks_ds5's business, not this. */
+    const ctm_sound_card_t *sound_card;
 
     /* ⭐⭐ NOTHING HELD AT A SWITCH REACHES THE PC (rhoquinn8217, 2026-10-09;
      * switch_hold.inl). The type's input report as fields, for a type that

@@ -139,8 +139,10 @@ typedef struct {
 
 /* Open one specific card for capture. The scan version picks a card; this
  * one is told which. Same hardware parameters -- deliberately a copy rather
- * than a refactor of the shared opener, so upstream's function is untouched. */
-static int cardmatch_open_card(int card)
+ * than a refactor of the shared opener, so upstream's function is untouched.
+ * ⓘ `channels` and `rate` are a DualSense's MIC_CAP_CHANNELS and MIC_CAP_RATE,
+ * or a type's own card's (a DS4's headset mic: 1 channel at 16 kHz). */
+static int cardmatch_open_card(int card, unsigned channels, unsigned rate)
 {
     char path[128];
     snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0c", card);
@@ -159,9 +161,9 @@ static int cardmatch_open_card(int card)
     hw.masks[0].bits[3 / 32] = 1u << (3 % 32);   /* RW_INTERLEAVED */
     memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
     hw.masks[1].bits[2 / 32] = 1u << (2 % 32);   /* S16_LE */
-    hw.intervals[2].min = hw.intervals[2].max = MIC_CAP_CHANNELS;
+    hw.intervals[2].min = hw.intervals[2].max = channels;
     hw.intervals[2].integer = 1;
-    hw.intervals[3].min = hw.intervals[3].max = MIC_CAP_RATE;
+    hw.intervals[3].min = hw.intervals[3].max = rate;
     hw.intervals[3].integer = 1;
     hw.intervals[9].min = 960;
     hw.intervals[9].max = 0xFFFFFFFFU;
@@ -197,7 +199,7 @@ static int cardmatch_open_playback_card(ctm_controller_t *c, int card)
      * the lag the cap was made for. */
     struct snd_pcm_hw_params hw;
     int hw_errno = 0;
-    if (ds5_playback_hw_params(fd, card, &hw, &hw_errno) < 0 ||
+    if (ds5_playback_hw_params(fd, card, c->alsa_channels, c->alsa_rate, &hw, &hw_errno) < 0 ||
         ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) < 0) {
         ctl_log(c, "cardmatch: card=%d hw_params failed (errno=%d)", card, errno);
         close(fd);
@@ -303,7 +305,7 @@ static int cardmatch_run_probe(ctm_controller_t *c)
     int n = 0;
     for (int card = 0; card < CARDMATCH_MAX_CARDS && n < CARDMATCH_MAX_CARDS; ++card) {
         if (!cardmatch_is_dualsense(card)) continue;
-        int fd = cardmatch_open_card(card);
+        int fd = cardmatch_open_card(card, MIC_CAP_CHANNELS, MIC_CAP_RATE);
         if (fd < 0) continue;      /* busy: a bridged session holds it */
         slots[n].card = card;
         slots[n].fd = fd;
