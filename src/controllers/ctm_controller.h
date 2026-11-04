@@ -547,6 +547,23 @@ int ctm_controller_will_signal_connect(const ctm_controller_dev_t *dev);
 /* Is the light allowed right now? The same, for a type that paints a lightbar
  * of its own. ⓘ Like the pulse's, it follows the user's switch. */
 int signals_light_on(void);
+/* Is the tone allowed right now? The same, for a type that says in its log why
+ * it played none. */
+int signals_tone_on(void);
+
+/* ⭐ THE BRIDGE TONE ON A PAD'S OWN SPEAKER (2026-11-04), for a type with a
+ * sound card of its own (`sound_card` in its ops) that signals with its own
+ * light and motors: a cabled second-model DS4. `pattern` is 0 for a bridge
+ * (rising), 1 for a handback (falling) and 2 for a refusal (sinking), as
+ * ds4_signal_shape_of numbers them. `wait_out` returns only once the notes
+ * have come out, for a release, whose teardown closes the card next. Returns
+ * 1 when it played, 0 when there was nothing to play them on.
+ * ⚠️ Blocks while it writes, about a quarter of a second: never on the session
+ * thread, which carries the reports. */
+int ctm_controller_speaker_tone(ctm_controller_t *c, int pattern, int wait_out);
+/* Would ctm_controller_speaker_tone play: the pad's own speaker is open and the
+ * tone is switched on. */
+int ctm_controller_speaker_tone_ready(const ctm_controller_t *c);
 
 /* Capture the controller's microphone while it is bridged. ⭐ Only useful for
  * voice chat through the controller itself. ⓘ Defaults on. */

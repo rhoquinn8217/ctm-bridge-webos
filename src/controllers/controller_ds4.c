@@ -569,6 +569,43 @@ int ds4_signal_level(int pattern, long at_ms)
     return ds4_shape_level(s, at_ms);
 }
 
+/* ⭐ THE TONE, ON A CABLE WITH A SPEAKER OF ITS OWN (2026-11-04). rhoquinn8217
+ * asked for a cabled DS4's bridge to sound as every other pad's does. A
+ * second-model DS4's sound card is open from the session's start (`sound_card`
+ * in its ops), so the same two notes go to its speaker, or to the headset when
+ * one is in. ⓘ On a thread of its own, so the light and the pulse start with
+ * the first note: the write holds the speaker until the last frame is queued,
+ * about a quarter of a second. ⓘ A first-model DS4 has no card, and plays the
+ * light and the pulse alone, as before. */
+typedef struct {
+    ctm_controller_t *c;
+    int pattern;        /* 0 a bridge, 1 a handback: ds4_signal_shape_of's numbers */
+    int wait_out;       /* a release: return only once the notes have come out */
+    int played;
+} ds4_tone_job_t;
+
+static void *ds4_tone_thread(void *arg)
+{
+    ds4_tone_job_t *job = (ds4_tone_job_t *)arg;
+    job->played = ctm_controller_speaker_tone(job->c, job->pattern, job->wait_out);
+    return NULL;
+}
+
+/* Start the tone beside the light and the pulse. False when there is none to
+ * play, or no thread to play it on. */
+static bool ds4_tone_start(ds4_tone_job_t *job, pthread_t *th)
+{
+    if (ds4_is_bt(job->c) || !ctm_controller_speaker_tone_ready(job->c)) return false;
+    return pthread_create(th, NULL, ds4_tone_thread, job) == 0;
+}
+
+/* What the log says about the tone. */
+static const char *ds4_tone_said(bool started, const ds4_tone_job_t *job)
+{
+    if (started) return job->played ? "on" : "not played";
+    return signals_tone_on() ? "none (no speaker of its own)" : "off";
+}
+
 /* The connected signal's thread.
  *
  * ⛔⛔ `c` IS SAFE ONLY UNTIL controller_signal_end RETURNS TRUE. Plug-out waits
@@ -593,10 +630,17 @@ static void *ds4_connected_thread(void *arg)
     ctm_controller_t *c = (ctm_controller_t *)arg;
     const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
+    ds4_tone_job_t tone = { c, 0, 0, 0 };
+    pthread_t tone_th;
+    const bool toning = ds4_tone_start(&tone, &tone_th);
     ds4_signal_run_t run;
-    ds4_signal_play(c, bt, &k_ds4_connected, drives, true, &run);
-    ctl_log(c, "signal: connected -- green %s, pulse %s: %d report(s), %d failed, %ldms%s",
+    memset(&run, 0, sizeof(run));
+    if (drives) ds4_signal_play(c, bt, &k_ds4_connected, drives, true, &run);
+    /* ⛔ Joined before the end below: the tone writes through `c` too. */
+    if (toning) pthread_join(tone_th, NULL);
+    ctl_log(c, "signal: connected -- green %s, pulse %s, tone %s: %d report(s), %d failed, %ldms%s",
             (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
+            ds4_tone_said(toning, &tone),
             run.sent, run.failed, run.took_ms, run.cut ? ", cut short by a release" : "");
 
     uint32_t kept = controller_signal_kept(c);
@@ -639,8 +683,8 @@ static void ds4_signal_connected(ctm_controller_t *c)
         ctl_log(c, "signal: connected -- light and pulse ride the tone on Bluetooth, not drawn here");
         return;
     }
-    if (!ds4_signal_drives()) {
-        ctl_log(c, "signal: connected -- light and rumble are switched off, nothing played");
+    if (!ds4_signal_drives() && !ctm_controller_speaker_tone_ready(c)) {
+        ctl_log(c, "signal: connected -- light and rumble are switched off and there is no tone, nothing played");
         return;
     }
     if (!controller_signal_begin(c)) {
@@ -657,7 +701,8 @@ static void ds4_signal_connected(ctm_controller_t *c)
     }
 }
 
-/* signal_unplugging: three quick yellow flashes and a pulse as the pad comes back. When:
+/* signal_unplugging: three quick yellow flashes and a pulse as the pad comes back,
+ * and the falling notes on a pad with a speaker of its own. When:
  * plug-out, before the session stops and the node closes, with any connected
  * signal already stopped and waited for.
  *
@@ -683,19 +728,28 @@ static void ds4_signal_unplugging(ctm_controller_t *c, ctm_unplug_reason_t why)
     }
     const bool bt = ds4_is_bt(c);
     const uint8_t drives = ds4_signal_drives();
-    if (!drives) {
-        ctl_log(c, "signal: %s -- light and rumble are switched off, nothing played", what);
+    /* The falling notes, waited out: the card closes as this returns. */
+    ds4_tone_job_t tone = { c, 1, 1, 0 };
+    pthread_t tone_th;
+    const bool toning = ds4_tone_start(&tone, &tone_th);
+    if (!drives && !toning) {
+        ctl_log(c, "signal: %s -- light and rumble are switched off and the tone is %s, nothing played",
+                what, ds4_tone_said(false, &tone));
         return;
     }
     ds4_signal_run_t run;
-    ds4_signal_play(c, bt, &k_ds4_released, drives, false, &run);
-    if ((drives & DS4_OUT_LIGHT) && !run.failed) {
-        if (ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
-        else ++run.failed;
+    memset(&run, 0, sizeof(run));
+    if (drives) {
+        ds4_signal_play(c, bt, &k_ds4_released, drives, false, &run);
+        if ((drives & DS4_OUT_LIGHT) && !run.failed) {
+            if (ds4_signal_write(c, bt, DS4_OUT_LIGHT, 0, 0, 0, 0) == 0) ++run.sent;
+            else ++run.failed;
+        }
     }
-    ctl_log(c, "signal: %s -- yellow flashes %s, pulse %s: %d report(s), %d failed, %ldms",
+    if (toning) pthread_join(tone_th, NULL);
+    ctl_log(c, "signal: %s -- yellow flashes %s, pulse %s, tone %s: %d report(s), %d failed, %ldms",
             what, (drives & DS4_OUT_LIGHT) ? "on" : "off", (drives & DS4_OUT_MOTORS) ? "on" : "off",
-            run.sent, run.failed, run.took_ms);
+            ds4_tone_said(toning, &tone), run.sent, run.failed, run.took_ms);
 }
 
 /* patch_output: while the TV's own signal holds the pad -- one is playing, or

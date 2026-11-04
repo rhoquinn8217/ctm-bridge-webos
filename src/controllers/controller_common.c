@@ -1006,6 +1006,7 @@ static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
 int signals_rumble_on(void) { return g_sig_rumble; }
 int signals_light_on(void)  { return g_sig_light; }
+int signals_tone_on(void)   { return g_sig_tone; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
@@ -3477,6 +3478,65 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c);
 #include "signal_route.inl"
 
 #include "ctm_feedback.inl"
+
+/* The two notes for a card of any format. */
+#include "speaker_tone.inl"
+
+/* ⭐ THE BRIDGE TONE ON A PAD'S OWN SPEAKER, for a type with a sound card of
+ * its own that signals with its own light and motors: a cabled second-model
+ * DS4 (2026-11-04, rhoquinn8217: its bridge should sound as every other pad's
+ * does). The same two notes, rising, falling or sinking (wired_sig_hz), at the
+ * card's own format.
+ *
+ * ⓘ Through write_iso_audio_waiting, as the DualSense's tone is: it waits its
+ * turn for the speaker and holds it until the last frame is queued, so game
+ * audio is dropped meanwhile rather than mixed into the notes.
+ * ⭐ `wait_out` waits for the notes to come out of the speaker, for a release:
+ * its teardown closes the card straight afterwards (🔗 the end of
+ * feedback_play, on why this waits rather than drains). */
+int ctm_controller_speaker_tone(ctm_controller_t *c, int pattern, int wait_out)
+{
+    if (!ctm_controller_speaker_tone_ready(c)) return 0;
+    if (c->alsa_rate == 0 || c->alsa_channels == 0) return 0;
+    const btsig_pattern_t p = pattern == 1 ? BTSIG_HANDED_BACK
+                            : pattern == 2 ? BTSIG_REFUSED
+                                           : BTSIG_HANDING_OVER;
+    speaker_tone_t t;
+    for (int n = 0; n < 2; ++n) {
+        t.hz[n] = wired_sig_hz(p, n);
+        t.level[n] = wired_sig_level(t.hz[n]);
+    }
+    t.note_ms = FEEDBACK_MS;
+    t.gap_ms = FEEDBACK_GAP_MS;
+    t.peak = FEEDBACK_TONE_LEVEL;
+    unsigned long frames = 0;
+    int16_t *buf = speaker_tone_render(&t, c->alsa_rate, c->alsa_channels, &frames);
+    if (!buf) return 0;
+    write_iso_audio_waiting(c, (const uint8_t *)buf,
+                            (uint32_t)(frames * c->alsa_channels * sizeof(int16_t)));
+    free(buf);
+
+    if (wait_out) {
+        /* What the card still holds, and a margin for it to come out. The
+         * whole tone, if the card cannot say. */
+        long left_ms = (long)(frames * 1000ul / c->alsa_rate);
+        snd_pcm_sframes_t delay = 0;
+        pthread_mutex_lock(&c->alsa_mutex);
+        if (c->alsa_fd >= 0 && ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_DELAY, &delay) == 0 && delay >= 0) {
+            left_ms = (long)((unsigned long)delay * 1000ul / c->alsa_rate);
+        }
+        pthread_mutex_unlock(&c->alsa_mutex);
+        const long wait_ms = left_ms + 40;
+        struct timespec ts = { (time_t)(wait_ms / 1000), (wait_ms % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    return 1;
+}
+
+int ctm_controller_speaker_tone_ready(const ctm_controller_t *c)
+{
+    return c && c->ops && c->ops->sound_card && c->alsa_fd >= 0 && ctm_sig_tone_on();
+}
 
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
                      const uint8_t *report_desc, uint32_t report_desc_len,
