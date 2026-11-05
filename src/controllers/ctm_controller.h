@@ -656,6 +656,21 @@ bool ctm_controller_unplug_requested(const ctm_controller_t *c);
 typedef void (*ctm_controller_unplug_cb)(ctm_controller_t *c);
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb);
 
+/* ⭐ Told when a pad is about to leave USB and come straight back, because the
+ * PC asked its DS4Dongle to reconnect (2026-11-04), so the app can take it
+ * again when it returns. Invoked on the pad's session thread with its device,
+ * just before the request reaches the dongle; the handler must only note it. */
+typedef void (*ctm_controller_return_cb)(const ctm_controller_dev_t *dev);
+void ctm_controller_set_return_cb(ctm_controller_return_cb cb);
+
+/* ⭐ The volume of a pad's own sound card (a type with `sound_card`), set to
+ * what the PC asked for: its speaker level with nothing in the headphone jack,
+ * its headset level with something in it. Writes only on a change. */
+void ctm_controller_own_card_volume(ctm_controller_t *c);
+/* Something is in the pad's headphone jack, or not, as its input reports say.
+ * Sets the other level when it changes. */
+void ctm_controller_set_jack(ctm_controller_t *c, int in);
+
 /* ⭐ Told when a bridged keyboard presses the streaming overlay's shortcut,
  * Ctrl+Alt+Shift+S, which its own grab keeps from the app. When: the keyboard's
  * input thread, so the app hands the work to its main thread. */

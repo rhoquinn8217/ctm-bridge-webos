@@ -138,6 +138,21 @@ static bool ds4_pad_report(const uint8_t *data, size_t len, size_t *off, int *pa
     return false;
 }
 
+/* ⭐ IS ANYTHING IN THE HEADPHONE JACK (2026-11-04), from a cabled report's
+ * status byte [30]: 1 yes, 0 no, -1 when this is not a whole cabled report.
+ * Its low nibble is the battery, 0x10 the pad's own cable, and 0x20 and 0x40
+ * the headphones and the microphone of a plug. ⚠️ Which of the two is which
+ * differs between write-ups, and a headset with a microphone sets both (0x69
+ * read off a pad with one, through a DS4Dongle, 2026-11-03). Either means
+ * something is plugged in, which is all a level needs. */
+#define DS4_USB_STATUS      30
+#define DS4_USB_STATUS_JACK 0x60
+static int ds4_usb_jack_in(const uint8_t *data, size_t len)
+{
+    if (!data || len < DS4_USB_INPUT_LEN || data[0] != DS4_USB_INPUT_ID) return -1;
+    return (data[DS4_USB_STATUS] & DS4_USB_STATUS_JACK) ? 1 : 0;
+}
+
 /* The unbridge chord: TWO fingers on the touchpad AND the touchpad pressed
  * down, the same chord a DualSense uses.
  *

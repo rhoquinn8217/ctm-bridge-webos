@@ -294,6 +294,26 @@ static void ds4_bt_set_settings(ctm_controller_t *c, const tv_bridge_worker_sett
     ds4_bt_send_audio(c, s);
 }
 
+/* ⭐ THE CABLED DS4'S LEVELS (2026-11-04): on its own sound card, whose volume
+ * a cabled DS4 (a DS4Dongle's, here) turns into the pad's own. The speaker's
+ * with nothing in the jack, the headset's with something in it
+ * (ctm_controller_own_card_volume). */
+static void ds4_usb_set_settings(ctm_controller_t *c, const tv_bridge_worker_settings_t *s)
+{
+    (void)s;
+    ctm_controller_own_card_volume(c);
+}
+
+/* The chord, as every DS4's, and the jack, which only a cabled report carries
+ * where this reads it. ⓘ ctm_controller_set_jack acts on a change only, so a
+ * report 250 times a second costs a comparison. */
+static void ds4_usb_on_input_report(ctm_controller_t *c, const uint8_t *data, size_t len)
+{
+    ds4_on_input_report(c, data, len);
+    const int jack = ds4_usb_jack_in(data, len);
+    if (jack >= 0) ctm_controller_set_jack(c, jack);
+}
+
 /* ⓘ Defined further down, beside the cabled pad's signal machinery they
  * share. Declared here because the Bluetooth table comes first in this file
  * and now uses them too. */
@@ -891,7 +911,8 @@ const ctm_controller_ops_t controller_ds4_usb_ops = {
     .sound_card = &ds4_usb_sound_card,
     .matches = ds4_usb_matches,
     .read_pad_mac = ds4_usb_read_pad_mac,
-    .on_input_report = ds4_on_input_report,
+    .on_input_report = ds4_usb_on_input_report,
+    .set_settings = ds4_usb_set_settings,
     .blank_input = ds4_blank_input,
     .read_right_stick = held_stick_ds4,
     .read_nav = held_nav_ds4,
