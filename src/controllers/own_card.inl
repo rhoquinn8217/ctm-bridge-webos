@@ -6,17 +6,38 @@
  * This finds a card by its USB id instead, which snd-usb-audio writes as
  * "054c:09cc" in /proc/asound/cardN/usbid, and sets the card's volume.
  *
- * ⚠️ Two cabled pads of one model share an id, so the id alone cannot tell
- * their cards apart: the opener takes the first such card it can open (a card
- * another pad plays through is busy), as the DualSense's scan once did. One
- * cabled DS4 at a time is what has been tested.
+ * ⭐⭐ AND ON THE PAD'S OWN USB DEVICE, NOT BY ITS ID ALONE (2026-11-04, a
+ * review before the merge). Two pads of one model share an id, and a pad with
+ * no sound card can have that id too: a GameSir in PlayStation mode is a
+ * 054c:09cc with no card. Taking the first card with the id gave the first pad
+ * bridged another pad's card: its sound played in the other pad's headset, and
+ * the other pad's microphone went to the PC as its own. ➡️ A card is this
+ * pad's only when it is on the pad's own USB device: its usbbus is the bus and
+ * device sysfs gives for the pad's hidraw node, or, where sysfs cannot be read,
+ * its name ends "at <the node's USB path>,". When neither can tell, no card is
+ * taken.
  *
  * Its own file so tests/test_own_card.c can drive it against a scratch folder:
- * OWN_CARD_USBID_FMT and OWN_CARD_CONTROL_FMT are the paths, defined first by
- * a test. */
+ * the OWN_CARD_*_FMT paths are defined first by a test. */
+
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #ifndef OWN_CARD_USBID_FMT
 #define OWN_CARD_USBID_FMT "/proc/asound/card%d/usbid"
+#endif
+#ifndef OWN_CARD_USBBUS_FMT
+#define OWN_CARD_USBBUS_FMT "/proc/asound/card%d/usbbus"
+#endif
+#ifndef OWN_CARD_STREAM_FMT
+#define OWN_CARD_STREAM_FMT "/proc/asound/card%d/stream0"
+#endif
+#ifndef OWN_CARD_SYSFS_CHAR_FMT
+#define OWN_CARD_SYSFS_CHAR_FMT "/sys/dev/char/%u:%u"
 #endif
 #ifndef OWN_CARD_CONTROL_FMT
 #define OWN_CARD_CONTROL_FMT "/dev/snd/controlC%d"
@@ -37,6 +58,96 @@ static int own_card_usbid_is(int card, unsigned vid, unsigned pid)
     const int got = fscanf(f, "%x:%x", &v, &p);
     fclose(f);
     return got == 2 && v == vid && p == pid;
+}
+
+/* One number from <dir>/<name>, as sysfs writes busnum and devnum. */
+static int own_card_read_uint(const char *dir, const char *name, unsigned *out)
+{
+    char path[PATH_MAX + 16];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    const int got = fscanf(f, "%u", out);
+    fclose(f);
+    return got == 1;
+}
+
+/* The USB bus and device a character device is on, as "BBB/DDD", the way
+ * /proc/asound/cardN/usbbus prints them. Read from the node's sysfs folder and
+ * the folders above it, up to the first with a busnum and a devnum: that is the
+ * USB device, since neither its interface nor the HID device below it has them.
+ * 0 when sysfs has no such folder. */
+static int own_card_busdev_of_char(unsigned maj, unsigned min, char *out, size_t out_len)
+{
+    if (!out || out_len == 0) return 0;
+    out[0] = '\0';
+    char link[128];
+    char dir[PATH_MAX];
+    snprintf(link, sizeof(link), OWN_CARD_SYSFS_CHAR_FMT, maj, min);
+    if (!realpath(link, dir)) return 0;
+    for (int up = 0; up < 12; ++up) {
+        unsigned bus = 0, dev = 0;
+        if (own_card_read_uint(dir, "busnum", &bus) && own_card_read_uint(dir, "devnum", &dev)) {
+            snprintf(out, out_len, "%03u/%03u", bus, dev);
+            return 1;
+        }
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) return 0;
+        *slash = '\0';
+    }
+    return 0;
+}
+
+/* Is card `card` on the USB device `busdev`, "001/005"? */
+static int own_card_usbbus_is(int card, const char *busdev)
+{
+    if (!busdev || !busdev[0]) return 0;
+    char path[96];
+    snprintf(path, sizeof(path), OWN_CARD_USBBUS_FMT, card);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[32] = "";
+    const int got = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    if (!got) return 0;
+    line[strcspn(line, "\r\n")] = '\0';
+    return strcmp(line, busdev) == 0;
+}
+
+/* The USB path in a HID node's physical path: "usb-generic-ehci.0-1.1.1" out
+ * of "usb-generic-ehci.0-1.1.1/input3". 0 for a node that is not on USB. */
+static int own_card_usb_path_of_phys(const char *phys, char *out, size_t out_len)
+{
+    if (!out || out_len == 0) return 0;
+    out[0] = '\0';
+    if (!phys || strncmp(phys, "usb-", 4) != 0) return 0;
+    const char *end = strstr(phys, "/input");
+    const size_t n = end ? (size_t)(end - phys) : strlen(phys);
+    if (n == 0 || n >= out_len) return 0;
+    memcpy(out, phys, n);
+    out[n] = '\0';
+    return 1;
+}
+
+/* Is card `card` on the USB path `usb_path`, by its name? The first line of
+ * its stream0 reads "<name> at <USB path>, full speed : USB Audio", and the
+ * comma after the path says the path is whole. ⚠️ The kernel cuts a card's name
+ * at 79 characters, so behind deep hubs the comma can be lost, and then this
+ * cannot tell: 0, and no card. */
+static int own_card_on_usb_path(int card, const char *usb_path)
+{
+    if (!usb_path || !usb_path[0]) return 0;
+    char path[96];
+    snprintf(path, sizeof(path), OWN_CARD_STREAM_FMT, card);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[256] = "";
+    const int got = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    if (!got) return 0;
+    char want[128];
+    snprintf(want, sizeof(want), " at %s,", usb_path);
+    return strstr(line, want) != NULL;
 }
 
 /* ⭐⭐ SET THE CARD'S PLAYBACK VOLUME, AS A COMPUTER DOES WHEN THE PAD IS

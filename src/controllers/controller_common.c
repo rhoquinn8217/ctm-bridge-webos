@@ -637,17 +637,35 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
 
 /* Open a type's own sound card for playback (ops->sound_card), in its own
  * format. The card is the one this controller was matched to, or, before it
- * has one, the first card with the pad's USB id that it can open: a card
- * another pad already plays through answers busy (O_NONBLOCK), and the open
- * moves on. Returns the fd, and the card through `out_card`; -1 when there is
- * none, which for a first-model DS4 is always. */
+ * has one, the card with the pad's USB id on the pad's own USB device
+ * (own_card.inl): by the bus and device sysfs gives for its node, or else by
+ * the USB path in the card's name. Returns the fd, and the card through
+ * `out_card`; -1 when there is none, which for a first-model DS4 is always. */
 static int open_own_card_playback(ctm_controller_t *c, int *out_card)
 {
+    char busdev[16] = "";
+    char usb_path[64] = "";
+    struct stat st;
+    const int by_bus = stat(c->dev.path, &st) == 0 && S_ISCHR(st.st_mode) &&
+                       own_card_busdev_of_char(major(st.st_rdev), minor(st.st_rdev),
+                                               busdev, sizeof(busdev));
+    const int by_path = !by_bus && own_card_usb_path_of_phys(c->hid_phys, usb_path, sizeof(usb_path));
+    if (!by_bus && !by_path) {
+        alsa_log("[alsa-open]", "no own card for %s: neither its USB device (sysfs) nor its USB path (phys=\"%s\") could be read",
+                 c->dev.path, c->hid_phys);
+        return -1;
+    }
+    const char *where = by_bus ? busdev : usb_path;
     char path[64];
     const int first = (c->matched_card >= 0) ? c->matched_card : 0;
     const int last  = (c->matched_card >= 0) ? c->matched_card : OWN_CARD_MAX_CARDS - 1;
     for (int card = first; card <= last; card++) {
         if (!own_card_usbid_is(card, c->vid_num, c->pid_num)) continue;
+        if (by_bus ? !own_card_usbbus_is(card, busdev) : !own_card_on_usb_path(card, usb_path)) {
+            alsa_log("[alsa-open]", "card=%d has the id of %s but is not on its USB device (%s): left alone",
+                     card, c->dev.path, where);
+            continue;
+        }
         snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
         int fd = open(path, O_WRONLY | O_NONBLOCK);
         if (fd < 0) {
@@ -666,9 +684,9 @@ static int open_own_card_playback(ctm_controller_t *c, int *out_card)
             close(fd);
             continue;
         }
-        alsa_log("[alsa-hwparams]", "card=%d period_frames=%u buffer_frames=%u (own card of %s, %u ch at %u Hz)",
+        alsa_log("[alsa-hwparams]", "card=%d period_frames=%u buffer_frames=%u (own card of %s, %u ch at %u Hz, USB %s)",
                  card, (unsigned)hw.intervals[5].max, (unsigned)hw.intervals[9].max,
-                 c->dev.path, c->alsa_channels, c->alsa_rate);
+                 c->dev.path, c->alsa_channels, c->alsa_rate, where);
         if (out_card) *out_card = card;
         return fd;
     }
@@ -1357,7 +1375,8 @@ static void *mic_capture_thread(void *arg)
     if (mic_card >= 0) {
         fd = cardmatch_open_card(mic_card, chans, c->mic_rate);
         if (fd < 0) {
-            mic_cap_log("%s card=%d identified but not openable, falling back to scan",
+            mic_cap_log(c->ops->speaks_ds5 ? "%s card=%d identified but not openable, falling back to scan"
+                                           : "%s card=%d identified but not openable: no scan for this type, the microphone stays off",
                         node, mic_card);
             mic_card = -1;
         } else {
@@ -3712,19 +3731,22 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
     } else {
         if (c->ops->sound_card) {
             /* ⭐ A TYPE WITH A SOUND CARD OF ITS OWN (2026-11-03): a cabled
-             * second-model DS4. The speaker opener finds the card by the pad's
-             * USB id, once per bridge as a DualSense's is found (a reconnect
-             * keeps it), and the microphone starts on that card. A first-model
-             * DS4 has none, and the opener says so. ⓘ No tone: a DS4's
-             * signals are its own, below. */
-            pthread_mutex_lock(&g_cardmatch_lock);
+             * second-model DS4. The speaker opener finds the card on the pad's
+             * own USB device, once per bridge as a DualSense's is found (a
+             * reconnect keeps it), and the microphone starts on that card. A
+             * first-model DS4 has none, and the opener says so. ⓘ No tone: a
+             * DS4's signals are its own, below.
+             * ⭐ NOT UNDER g_cardmatch_lock (2026-11-04, a review before the
+             * merge). That lock is the DualSense's card match, and nothing here
+             * reads its notes or probes: with it, a DS4 waited out a DualSense's
+             * first probe, about three seconds, and a DualSense the DS4's
+             * open. */
             pthread_mutex_lock(&c->alsa_mutex);
             if (c->alsa_fd < 0) {
                 ctm_controller_open_alsa_playback(c);
             }
             pthread_mutex_unlock(&c->alsa_mutex);
             if (c->matched_card >= 0) mic_capture_start(c);
-            pthread_mutex_unlock(&g_cardmatch_lock);
         } else {
             ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
         }
