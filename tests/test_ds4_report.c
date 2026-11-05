@@ -357,9 +357,32 @@ static void test_pairing_info(void)
        strcmp(mac, "01:00:00:00:00:00") == 0, "one non-zero byte is enough");
 }
 
+/* ⭐ The headphone jack, from a cabled report's status byte (2026-11-04). */
+static void test_jack(void)
+{
+    printf("\nthe headphone jack\n");
+    uint8_t r[sizeof(k_live)];
+    memcpy(r, k_live, sizeof(r));
+    ok(k_live[30] == 0x1b, "the live pad's status: battery 0x0b and its own cable 0x10");
+    ok(ds4_usb_jack_in(r, sizeof(r)) == 0, "nothing in its jack");
+    r[30] = 0x69;
+    ok(ds4_usb_jack_in(r, sizeof(r)) == 1, "a headset with a microphone, as read through a DS4Dongle");
+    r[30] = 0x3b;
+    ok(ds4_usb_jack_in(r, sizeof(r)) == 1, "0x20 alone is a plug");
+    r[30] = 0x5b;
+    ok(ds4_usb_jack_in(r, sizeof(r)) == 1, "and so is 0x40 alone");
+    r[30] = 0x9f;
+    ok(ds4_usb_jack_in(r, sizeof(r)) == 0, "the battery, the cable and the top bit are not the jack");
+    uint8_t bt[DS4_BT_INPUT_LEN];
+    bt_from_live(bt);
+    ok(ds4_usb_jack_in(bt, sizeof(bt)) == -1, "a Bluetooth report is not read here");
+    ok(ds4_usb_jack_in(k_live, 31) == -1, "nor a cabled report cut short");
+}
+
 int main(void)
 {
     test_live_report();
+    test_jack();
     test_chord_usb();
     test_chord_bt();
     test_blank_live();

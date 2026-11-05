@@ -260,6 +260,14 @@ struct ctm_controller {
     unsigned alsa_rate;
     unsigned mic_channels;
     unsigned mic_rate;
+    /* A type with a card of its own: the level last written to that card's
+     * volume, -1 for none, and whether something is in the pad's headphone
+     * jack, which decides whether the speaker's level or the headset's is the
+     * one wanted. Under own_volume_mutex: the session thread sets the levels
+     * and the input thread sees the jack change. */
+    int own_volume_pct;
+    int jack_in;
+    pthread_mutex_t own_volume_mutex;
     /* Set by the matcher: no valid note existed for this node when it ran,
      * which is the first bridge since the cable went in. The first audio
      * stream after that is dead for the speaker; see ctm_feedback.inl. */
@@ -693,6 +701,54 @@ static int open_own_card_playback(ctm_controller_t *c, int *out_card)
     return -1;
 }
 
+/* ⭐ THE LEVEL A CARD OF ITS OWN WANTS (2026-11-04): the PC's speaker_volume
+ * with nothing in the pad's jack, its headset_volume with something in it,
+ * as a Bluetooth DS4 plays them. The top until the PC has sent any: the ds4
+ * defaults in ui_bridge.c are bytes for the Bluetooth report, not levels.
+ * ⓘ A DS4 has one volume for both, so the jack picks which of the two it is.
+ * Under own_volume_mutex. */
+static int own_card_wanted_pct(ctm_controller_t *c)
+{
+    tv_bridge_worker_settings_t s;
+    pthread_mutex_lock(&c->settings_mutex);
+    s = c->settings;
+    pthread_mutex_unlock(&c->settings_mutex);
+    if (!s.host_audio_set) return 100;
+    const unsigned pct = c->jack_in ? s.headset_volume_percent : s.speaker_volume_percent;
+    return pct > 100 ? 100 : (int)pct;
+}
+
+void ctm_controller_own_card_volume(ctm_controller_t *c)
+{
+    if (!c || !c->ops || !c->ops->sound_card) return;
+    pthread_mutex_lock(&c->own_volume_mutex);
+    const int card = c->matched_card;
+    const int pct = own_card_wanted_pct(c);
+    if (card >= 0 && c->alsa_fd >= 0 && pct != c->own_volume_pct) {
+        char said[200];
+        own_card_volume_set(card, pct, 0, said, sizeof(said));
+        ctl_log(c, "alsa: its own card's volume %d%% (%s, %s): %s", pct,
+                c->jack_in ? "the headset's" : "the speaker's",
+                c->jack_in ? "something in the jack" : "nothing in the jack", said);
+        c->own_volume_pct = pct;
+    }
+    pthread_mutex_unlock(&c->own_volume_mutex);
+}
+
+void ctm_controller_set_jack(ctm_controller_t *c, int in)
+{
+    if (!c) return;
+    in = in ? 1 : 0;
+    pthread_mutex_lock(&c->own_volume_mutex);
+    const int changed = c->jack_in != in;
+    c->jack_in = in;
+    pthread_mutex_unlock(&c->own_volume_mutex);
+    if (changed) {
+        ctl_log(c, "jack: %s", in ? "something plugged in" : "empty");
+        ctm_controller_own_card_volume(c);
+    }
+}
+
 /* How long past the audio's own duration to keep offering it before giving up
  * on a device that will not take it. Bounds a stall; it does not police timing. */
 #define ISO_WRITE_GRACE_US 250000
@@ -877,6 +933,27 @@ static ctm_controller_unplug_cb g_unplug_cb;
 void ctm_controller_set_unplug_cb(ctm_controller_unplug_cb cb)
 {
     g_unplug_cb = cb;
+}
+
+/* Told when a pad is about to leave and come straight back: see
+ * ctm_controller_set_return_cb in ctm_controller.h. */
+static ctm_controller_return_cb g_return_cb;
+
+void ctm_controller_set_return_cb(ctm_controller_return_cb cb)
+{
+    g_return_cb = cb;
+}
+
+/* ⭐ A DS4DONGLE ASKED TO RECONNECT (2026-11-04). DS5-USBIP changes a
+ * DS4Dongle's settings with its feature report 0xF6, and function 0x03 of it
+ * makes the dongle leave USB and come back, which ends this bridge. A setting
+ * that changes what the dongle offers USB (its sound card, with nothing in the
+ * jack) takes effect only that way, and rhoquinn8217 asked for it at once, with
+ * the bridge coming back by itself. So the app is told to take the pad again
+ * when it returns. ⓘ Only a type with a card of its own: the dongle's DS4. */
+static int feature_set_is_reconnect(const ctm_controller_t *c, const uint8_t *payload, uint32_t len)
+{
+    return c && c->ops && c->ops->sound_card && len >= 2 && payload[0] == 0xF6 && payload[1] == 0x03;
 }
 
 /* Told when a bridged keyboard presses the overlay's shortcut; see
@@ -3364,6 +3441,11 @@ static void handle_message(ctm_controller_t *c, ctmb_host_config_t *host_cfg,
         if (h->payload_len > 0 && h->payload_len <= MAX_REPORT) {
             uint8_t feature[MAX_REPORT];
             memcpy(feature, payload, h->payload_len);
+            /* ⓘ Before the write: the pad may be gone by the time it returns. */
+            if (feature_set_is_reconnect(c, payload, h->payload_len)) {
+                ctl_log(c, "the dongle is asked to reconnect: the app takes it again when it returns");
+                if (g_return_cb) g_return_cb(&c->dev);
+            }
             int fd = feature_fd_for(c, h->request_id);
             const uint64_t asked_us = now_us();
             pthread_mutex_lock(&c->hid_mutex);
@@ -4135,6 +4217,8 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->alsa_rate = own ? own->play_rate : DS5_AUDIO_RATE;
     c->mic_channels = own ? own->mic_channels : MIC_CAP_CHANNELS;
     c->mic_rate = own ? own->mic_rate : MIC_CAP_RATE;
+    c->own_volume_pct = -1;
+    c->jack_in = 0;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
@@ -4148,6 +4232,7 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     pthread_mutex_init(&c->status_mutex, NULL);
     pthread_mutex_init(&c->signal_mutex, NULL);
     pthread_mutex_init(&c->alsa_mutex, NULL);
+    pthread_mutex_init(&c->own_volume_mutex, NULL);
     pthread_cond_init(&c->signal_idle, NULL);
     return c;
 }
@@ -4266,9 +4351,15 @@ void ctm_controller_open_alsa_playback(ctm_controller_t *c)
         }
         c->matched_card = card;
         char said[200];
-        own_card_volume_up(card, said, sizeof(said));
-        ctl_log(c, "alsa: opened its own card %d for ISO passthrough (fd=%d, %u ch at %u Hz); volume: %s",
-                card, c->alsa_fd, c->alsa_channels, c->alsa_rate, said);
+        /* ⓘ The PC's level once it has sent one, the top until then; written
+         * so the card sends it either way (own_card_volume_set). */
+        pthread_mutex_lock(&c->own_volume_mutex);
+        const int pct = own_card_wanted_pct(c);
+        own_card_volume_set(card, pct, 1, said, sizeof(said));
+        c->own_volume_pct = pct;
+        pthread_mutex_unlock(&c->own_volume_mutex);
+        ctl_log(c, "alsa: opened its own card %d for ISO passthrough (fd=%d, %u ch at %u Hz); volume %d%%: %s",
+                card, c->alsa_fd, c->alsa_channels, c->alsa_rate, pct, said);
         return;
     }
     c->alsa_fd = open_ds5_alsa_playback(c->dev.path, c->matched_card);
@@ -4471,6 +4562,7 @@ void ctm_controller_destroy(ctm_controller_t *c)
     pthread_mutex_destroy(&c->status_mutex);
     pthread_mutex_destroy(&c->signal_mutex);
     pthread_mutex_destroy(&c->alsa_mutex);
+    pthread_mutex_destroy(&c->own_volume_mutex);
     pthread_cond_destroy(&c->signal_idle);
     free(c->enum_payload);
     free(c->type_ctx);

@@ -202,6 +202,17 @@ int main(void)
     ok(!own_card_on_usb_path(6, "usb-generic-ehci.0-1.1.1.2"),
        "a name the kernel cut before its comma cannot say: no card");
 
+    /* ⭐ THE PC'S LEVEL ON THE CARD'S OWN RANGE (2026-11-04): a DS4Dongle's
+     * "PCM Playback Volume" runs 0 to 72 on the C1. */
+    printf("\na level, as the card's own value\n");
+    ok(own_card_level(0, 72, 100) == 72, "100 is the top");
+    ok(own_card_level(0, 72, 0) == 0, "0 is the bottom");
+    ok(own_card_level(0, 72, 50) == 36, "50 is half way");
+    ok(own_card_level(0, 72, 1) == 1, "1 rounds to the first step, not to nothing");
+    ok(own_card_level(-10, 10, 50) == 0, "a range that starts below zero");
+    ok(own_card_level(5, 5, 50) == 5, "a range of one value");
+    ok(own_card_level(0, 72, 150) == 72 && own_card_level(0, 72, -5) == 0, "and nothing past either end");
+
     remove_card(2);
     remove_card(3);
     remove_card(4);

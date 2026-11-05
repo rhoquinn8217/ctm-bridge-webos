@@ -150,6 +150,15 @@ static int own_card_on_usb_path(int card, const char *usb_path)
     return strstr(line, want) != NULL;
 }
 
+/* `percent` of a control's range from `lo` to `hi`, rounded: 0 is `lo`, 100
+ * is `hi`. */
+static long own_card_level(long lo, long hi, int percent)
+{
+    if (percent <= 0 || hi <= lo) return lo;
+    if (percent >= 100) return hi;
+    return lo + ((hi - lo) * (long)percent + 50) / 100;
+}
+
 /* ⭐⭐ SET THE CARD'S PLAYBACK VOLUME, AS A COMPUTER DOES WHEN THE PAD IS
  * PLUGGED IN. Measured on the C1 2026-11-03 through a DS4Dongle: every tone
  * written to its card was silent until the card's volume had been set once
@@ -163,12 +172,21 @@ static int own_card_on_usb_path(int card, const char *usb_path)
  * and it read the top when the card appeared: a single write of the top
  * would send nothing at all.
  *
- * Every "Playback Volume" control goes to its top and every "Playback Switch"
- * on (unmuted). Writes what it did into `said`, for the session's log line. */
-static void own_card_volume_up(int card, char *said, size_t said_len)
+ * ⭐ AT A LEVEL, SINCE THE DS4'S AUDIO SETTINGS (2026-11-04): `percent` of
+ * the control's own range, so 100 is its top and 0 its bottom with the switch
+ * off. The dongle turns the card's value into the pad's volume byte linearly,
+ * one step a decibel, as a Bluetooth DS4's percent becomes its byte.
+ * ⓘ `force` makes the first of the two writes above, for the first time a
+ * card is set; a later change sends itself, being a change.
+ *
+ * Every "Playback Volume" control and every "Playback Switch" is set. Writes
+ * what it did into `said`, for the session's log line. */
+static void own_card_volume_set(int card, int percent, int force, char *said, size_t said_len)
 {
     if (!said || said_len == 0) return;
     said[0] = '\0';
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
     char path[64];
     snprintf(path, sizeof(path), OWN_CARD_CONTROL_FMT, card);
     const int fd = open(path, O_RDWR);
@@ -211,16 +229,19 @@ static void own_card_volume_up(int card, char *said, size_t said_len)
         v.id = info.id;
 
         int rc;
-        long top = 1;
+        long value = percent > 0 ? 1 : 0;
         if (is_switch && info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN) {
-            for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = 1;
+            for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = value;
             rc = ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v);
         } else if (is_volume && info.type == SNDRV_CTL_ELEM_TYPE_INTEGER) {
-            top = info.value.integer.max;
-            const long below = (top > info.value.integer.min) ? top - 1 : top;
-            for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = below;
-            (void)ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v);
-            for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = top;
+            const long lo = info.value.integer.min, hi = info.value.integer.max;
+            value = own_card_level(lo, hi, percent);
+            if (force) {
+                const long beside = (value > lo) ? value - 1 : (value < hi) ? value + 1 : value;
+                for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = beside;
+                (void)ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v);
+            }
+            for (unsigned ch = 0; ch < count; ++ch) v.value.integer.value[ch] = value;
             rc = ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v);
         } else {
             continue;
@@ -228,11 +249,18 @@ static void own_card_volume_up(int card, char *said, size_t said_len)
         ++touched;
         if (at < said_len) {
             const int n = snprintf(said + at, said_len - at, "%s%s=%ld%s",
-                                   at ? ", " : "", name, top,
+                                   at ? ", " : "", name, value,
                                    rc < 0 ? " (refused)" : "");
             if (n > 0) at += (size_t)n;
         }
     }
     close(fd);
     if (!touched) snprintf(said, said_len, "no playback volume control on the card");
+}
+
+/* The top, written so the card sends it: the volume a card is opened at
+ * until the PC has said what it wants. */
+static void own_card_volume_up(int card, char *said, size_t said_len)
+{
+    own_card_volume_set(card, 100, 1, said, said_len);
 }
