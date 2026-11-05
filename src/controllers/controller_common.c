@@ -253,6 +253,13 @@ struct ctm_controller {
      * it and seeing which card falls silent. -1 until answered, and -1 stays
      * if the answer could not be trusted -- see ctm_cardmatch.inl. */
     int matched_card;
+    /* The formats this controller's sound card is opened with: a DualSense's
+     * (4 channels out, 2 in, both at 48 kHz) unless its type brings a card of
+     * its own (ops->sound_card). Set once, at create. */
+    unsigned alsa_channels;
+    unsigned alsa_rate;
+    unsigned mic_channels;
+    unsigned mic_rate;
     /* Set by the matcher: no valid note existed for this node when it ran,
      * which is the first bridge since the cable went in. The first audio
      * stream after that is dead for the speaker; see ctm_feedback.inl. */
@@ -417,18 +424,30 @@ static void alsa_log(const char *tag, const char *fmt, ...)
     fclose(f);
 }
 
-/* The speaker's hardware parameters, set on an open playback handle: four
- * channels of S16_LE at 48000, and a buffer capped at 4800 frames with the
- * unbounded request as the fallback. Returns what HW_PARAMS returned, its
- * errno in `*out_errno`, and what the kernel chose in `*out`.
+/* A DualSense's speaker side: four channels of 16-bit audio at 48 kHz, which
+ * is what its device is configured for at open. Frames are what it counts in,
+ * so an arriving chunk is divided by the channels to get them, and the rate
+ * reads a count of frames back as a duration. ⓘ A type with a card of its own
+ * brings its own pair (ops->sound_card); each controller keeps the pair it was
+ * opened with, alsa_channels and alsa_rate. */
+#define DS5_AUDIO_CHANNELS 4
+#define DS5_AUDIO_RATE     48000
+
+/* The speaker's hardware parameters, set on an open playback handle:
+ * `channels` of S16_LE at `rate` (a DualSense's are 4 at 48000), and a buffer
+ * capped at 4800 frames with the unbounded request as the fallback. Returns
+ * what HW_PARAMS returned, its errno in `*out_errno`, and what the kernel chose
+ * in `*out`.
  *
- * ⛔⛔ ONE COPY FOR BOTH SPEAKER OPENERS (code review, 2026-10-05). The
+ * ⛔⛔ ONE COPY FOR EVERY SPEAKER OPENER (code review, 2026-10-05). The
  * opener that moves a speaker to its pad's own card (ctm_cardmatch.inl) set
  * these through a hand copy made before the cap, so a speaker moved there
  * got the second-long buffer back. tests/test_speaker_buffer_cap.c fails if
- * a playback open sets them any other way. */
-static int ds5_playback_hw_params(int fd, int card, struct snd_pcm_hw_params *out,
-                                  int *out_errno)
+ * a playback open sets them any other way.
+ * ⓘ The cap is in frames, so at a DS4's 32 kHz it is 150 ms rather than 100:
+ * room, not delay, since the delay is what the buffer is FILLED to. */
+static int ds5_playback_hw_params(int fd, int card, unsigned channels, unsigned rate,
+                                  struct snd_pcm_hw_params *out, int *out_errno)
 {
     struct snd_pcm_hw_params hw;
     memset(&hw, 0, sizeof(hw));
@@ -446,11 +465,11 @@ static int ds5_playback_hw_params(int fd, int card, struct snd_pcm_hw_params *ou
     /* FORMAT: S16_LE(2) only */
     memset(&hw.masks[1], 0, sizeof(hw.masks[1]));
     hw.masks[1].bits[2 / 32] = 1u << (2 % 32);
-    /* CHANNELS: exactly 4 */
-    hw.intervals[2].min = hw.intervals[2].max = 4;
+    /* CHANNELS: exactly `channels` (a DualSense: 4) */
+    hw.intervals[2].min = hw.intervals[2].max = channels;
     hw.intervals[2].integer = 1;
-    /* RATE: exactly 48000 */
-    hw.intervals[3].min = hw.intervals[3].max = 48000;
+    /* RATE: exactly `rate` (a DualSense: 48000) */
+    hw.intervals[3].min = hw.intervals[3].max = rate;
     hw.intervals[3].integer = 1;
     /* PERIOD_SIZE: let the kernel choose what suits the hardware.
      * A hardcoded 48-frame period once mismatched the host's 480-frame
@@ -587,7 +606,8 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
         }
         struct snd_pcm_hw_params hw;
         int hw_errno = 0;
-        int hw_rc = ds5_playback_hw_params(fd, card, &hw, &hw_errno);
+        int hw_rc = ds5_playback_hw_params(fd, card, DS5_AUDIO_CHANNELS, DS5_AUDIO_RATE,
+                                           &hw, &hw_errno);
         int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
         int prep_errno = (hw_rc >= 0 && prep_rc < 0) ? errno : 0;
         if (hw_rc < 0 || prep_rc < 0) {
@@ -611,13 +631,68 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
     return -1;
 }
 
-/* Four channels of 16-bit audio, which is what the device was configured for
- * at open. Frames are what it counts in, so an arriving chunk is divided by
- * this to get them. */
-#define DS5_AUDIO_CHANNELS 4
-/* The rate the device was configured for at open, so a count of frames can be
- * read back as a duration. */
-#define DS5_AUDIO_RATE     48000
+/* A pad's own sound card that is not a DualSense's: found by its USB id, and
+ * its volume set (2026-11-03). */
+#include "own_card.inl"
+
+/* Open a type's own sound card for playback (ops->sound_card), in its own
+ * format. The card is the one this controller was matched to, or, before it
+ * has one, the card with the pad's USB id on the pad's own USB device
+ * (own_card.inl): by the bus and device sysfs gives for its node, or else by
+ * the USB path in the card's name. Returns the fd, and the card through
+ * `out_card`; -1 when there is none, which for a first-model DS4 is always. */
+static int open_own_card_playback(ctm_controller_t *c, int *out_card)
+{
+    char busdev[16] = "";
+    char usb_path[64] = "";
+    struct stat st;
+    const int by_bus = stat(c->dev.path, &st) == 0 && S_ISCHR(st.st_mode) &&
+                       own_card_busdev_of_char(major(st.st_rdev), minor(st.st_rdev),
+                                               busdev, sizeof(busdev));
+    const int by_path = !by_bus && own_card_usb_path_of_phys(c->hid_phys, usb_path, sizeof(usb_path));
+    if (!by_bus && !by_path) {
+        alsa_log("[alsa-open]", "no own card for %s: neither its USB device (sysfs) nor its USB path (phys=\"%s\") could be read",
+                 c->dev.path, c->hid_phys);
+        return -1;
+    }
+    const char *where = by_bus ? busdev : usb_path;
+    char path[64];
+    const int first = (c->matched_card >= 0) ? c->matched_card : 0;
+    const int last  = (c->matched_card >= 0) ? c->matched_card : OWN_CARD_MAX_CARDS - 1;
+    for (int card = first; card <= last; card++) {
+        if (!own_card_usbid_is(card, c->vid_num, c->pid_num)) continue;
+        if (by_bus ? !own_card_usbbus_is(card, busdev) : !own_card_on_usb_path(card, usb_path)) {
+            alsa_log("[alsa-open]", "card=%d has the id of %s but is not on its USB device (%s): left alone",
+                     card, c->dev.path, where);
+            continue;
+        }
+        snprintf(path, sizeof(path), "/dev/snd/pcmC%dD0p", card);
+        int fd = open(path, O_WRONLY | O_NONBLOCK);
+        if (fd < 0) {
+            alsa_log("[alsa-open]", "card=%d (own card of %s) open failed errno=%d",
+                     card, c->dev.path, errno);
+            continue;
+        }
+        struct snd_pcm_hw_params hw;
+        int hw_errno = 0;
+        const int hw_rc = ds5_playback_hw_params(fd, card, c->alsa_channels, c->alsa_rate,
+                                                 &hw, &hw_errno);
+        const int prep_rc = (hw_rc >= 0) ? ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, NULL) : -1;
+        if (hw_rc < 0 || prep_rc < 0) {
+            alsa_log("[alsa-open]", "card=%d (own card of %s) not opened: hw_params rc=%d errno=%d, prepare rc=%d",
+                     card, c->dev.path, hw_rc, hw_errno, prep_rc);
+            close(fd);
+            continue;
+        }
+        alsa_log("[alsa-hwparams]", "card=%d period_frames=%u buffer_frames=%u (own card of %s, %u ch at %u Hz, USB %s)",
+                 card, (unsigned)hw.intervals[5].max, (unsigned)hw.intervals[9].max,
+                 c->dev.path, c->alsa_channels, c->alsa_rate, where);
+        if (out_card) *out_card = card;
+        return fd;
+    }
+    return -1;
+}
+
 /* How long past the audio's own duration to keep offering it before giving up
  * on a device that will not take it. Bounds a stall; it does not police timing. */
 #define ISO_WRITE_GRACE_US 250000
@@ -655,8 +730,11 @@ static uint64_t now_us(void);
 static void write_iso_audio_locked(ctm_controller_t *c, const uint8_t *pcm, uint32_t len)
 {
     if (!c || c->alsa_fd < 0 || !pcm || len == 0) return;
+    if (c->alsa_channels == 0 || c->alsa_rate == 0) return;
 
-    const size_t frame_bytes = DS5_AUDIO_CHANNELS * sizeof(int16_t);
+    /* The format the device was opened with: a DualSense's 4 channels at
+     * 48 kHz, or its type's own (a DS4's 2 at 32 kHz). */
+    const size_t frame_bytes = (size_t)c->alsa_channels * sizeof(int16_t);
     const unsigned long total = (unsigned long)(len / frame_bytes);
     if (total == 0) return;
 
@@ -680,7 +758,7 @@ static void write_iso_audio_locked(ctm_controller_t *c, const uint8_t *pcm, uint
      * 480 frames against a 4800-frame ring, so they are taken whole and the
      * loop runs exactly once, as the single write did. */
     const uint64_t deadline_us = now_us()
-                               + (uint64_t)total * 1000000ull / DS5_AUDIO_RATE
+                               + (uint64_t)total * 1000000ull / c->alsa_rate
                                + ISO_WRITE_GRACE_US;
     unsigned long done = 0;
     int rc = 0;
@@ -946,6 +1024,7 @@ static int ctm_sig_light_on(void)  { return g_sig_light; }
 static int ctm_sig_rumble_on(void) { return g_sig_rumble; }
 int signals_rumble_on(void) { return g_sig_rumble; }
 int signals_light_on(void)  { return g_sig_light; }
+int signals_tone_on(void)   { return g_sig_tone; }
 static int ctm_sig_tone_on(void)   { return g_sig_tone; }
 
 static int ctm_input_is_held(void)
@@ -1259,7 +1338,7 @@ static int open_ds5_alsa_capture(int *out_card, const char *want_node)
 /* Defined in ctm_cardmatch.inl, which is included further down because it
  * needs hid_write_report. Declared here so the capture thread can open the
  * card the probe identified rather than scanning for one. */
-static int cardmatch_open_card(int card);
+static int cardmatch_open_card(int card, unsigned channels, unsigned rate);
 
 /* When the capture recovers and how long it waits first: mic_recover.inl
  * (code review, 2026-10-05). */
@@ -1283,18 +1362,30 @@ static void *mic_capture_thread(void *arg)
      * free DualSense card, which is how a controller ends up reading someone
      * else's microphone. */
     int mic_card = c->matched_card;
+    /* The format the card is read in: a DualSense's 2 channels at 48 kHz, or
+     * its type's own (a DS4's headset mic, 1 at 16 kHz). Read 10 ms at a time,
+     * which is the host's request size: 480 frames for a DualSense. */
+    const unsigned chans = c->mic_channels;
+    const unsigned frames = c->mic_rate / 100;
     int fd = -1;
+    if (chans == 0 || frames == 0) {
+        mic_cap_log("%s thread exiting: no microphone format for this controller", node);
+        return NULL;
+    }
     if (mic_card >= 0) {
-        fd = cardmatch_open_card(mic_card);
+        fd = cardmatch_open_card(mic_card, chans, c->mic_rate);
         if (fd < 0) {
-            mic_cap_log("%s card=%d identified but not openable, falling back to scan",
+            mic_cap_log(c->ops->speaks_ds5 ? "%s card=%d identified but not openable, falling back to scan"
+                                           : "%s card=%d identified but not openable: no scan for this type, the microphone stays off",
                         node, mic_card);
             mic_card = -1;
         } else {
             mic_cap_log("%s card=%d opened by identity, not by scan", node, mic_card);
         }
     }
-    if (fd < 0) {
+    /* ⓘ The scan finds DualSense cards only, so a type with a card of its own
+     * has no second way in: its card was found by its USB id or not at all. */
+    if (fd < 0 && c->ops->speaks_ds5) {
         fd = open_ds5_alsa_capture(&mic_card, node);
     }
     if (fd < 0) {
@@ -1329,7 +1420,7 @@ static void *mic_capture_thread(void *arg)
      * behaviour -- the fault could not exist until a second thread did.
      *
      * Allocated per thread and freed on exit. */
-    int16_t *buf = (int16_t *)malloc(sizeof(int16_t) * MIC_CAP_FRAMES * MIC_CAP_CHANNELS);
+    int16_t *buf = (int16_t *)malloc(sizeof(int16_t) * frames * chans);
     if (!buf) {
         mic_cap_log("capture buffer allocation failed; thread exiting");
         close(fd);
@@ -1395,7 +1486,7 @@ static void *mic_capture_thread(void *arg)
         struct snd_xferi xfer;
         memset(&xfer, 0, sizeof(xfer));
         xfer.buf = buf;
-        xfer.frames = MIC_CAP_FRAMES;
+        xfer.frames = frames;
         int rc = why ? -1 : ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
         if (rc < 0 && !why) {
             read_errno = errno;
@@ -1443,7 +1534,7 @@ static void *mic_capture_thread(void *arg)
             mic_cap_log("%s card=%d self-heal: %s errno=%d consec=%d retry=%d, reopening",
                         node, mic_card, why, read_errno, rec.consec_fail, rec.retry_streak);
             close(fd);
-            fd = mic_card >= 0 ? cardmatch_open_card(mic_card) : -1;
+            fd = mic_card >= 0 ? cardmatch_open_card(mic_card, chans, c->mic_rate) : -1;
             if (fd < 0) {
                 mic_cap_log("%s self-heal: reopen of card=%d FAILED, thread stopping", node, mic_card);
                 break;
@@ -1506,8 +1597,10 @@ static void *mic_capture_thread(void *arg)
          *
          * ➡️ If noise cancellation is ever switched off again, both capsules go
          * live and this becomes a no-op that copies the louder onto the
-         * quieter, which is harmless. */
-        {
+         * quieter, which is harmless.
+         * ⓘ A pad with one microphone channel (a DS4's headset) has no second
+         * capsule to copy, so this is for a pair only. */
+        if (chans == 2) {
             int16_t peak0 = 0, peak1 = 0;
             for (long i = 0; i < got; i++) {
                 int16_t a0 = buf[i * MIC_CAP_CHANNELS + 0];
@@ -1536,7 +1629,7 @@ static void *mic_capture_thread(void *arg)
          * tear anything down. The transport takes its own lock, so sending
          * from this thread cannot interleave with the input reader. */
         {
-            size_t bytes = (size_t)got * MIC_CAP_CHANNELS * sizeof(int16_t);
+            size_t bytes = (size_t)got * chans * sizeof(int16_t);
             /* ⛔⛔ ONLY ONCE THE CONNECTION'S OPENING EXCHANGE IS DONE (code
              * review, 2026-10-05). Audio sent before HELLO lands where the
              * listener expects a hello, and it closes the connection. This
@@ -1558,8 +1651,8 @@ static void *mic_capture_thread(void *arg)
             }
         }
         for (long i = 0; i < got; i++) {
-            int16_t a = buf[i * MIC_CAP_CHANNELS + 0];
-            int16_t b = buf[i * MIC_CAP_CHANNELS + 1];
+            int16_t a = buf[i * chans + 0];
+            int16_t b = (chans > 1) ? buf[i * chans + 1] : 0;
             if (a < 0) a = (int16_t)-a;
             if (b < 0) b = (int16_t)-b;
             if (a > peak_ch0) peak_ch0 = a;
@@ -3405,6 +3498,65 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c);
 
 #include "ctm_feedback.inl"
 
+/* The two notes for a card of any format. */
+#include "speaker_tone.inl"
+
+/* ⭐ THE BRIDGE TONE ON A PAD'S OWN SPEAKER, for a type with a sound card of
+ * its own that signals with its own light and motors: a cabled second-model
+ * DS4 (2026-11-04, rhoquinn8217: its bridge should sound as every other pad's
+ * does). The same two notes, rising, falling or sinking (wired_sig_hz), at the
+ * card's own format.
+ *
+ * ⓘ Through write_iso_audio_waiting, as the DualSense's tone is: it waits its
+ * turn for the speaker and holds it until the last frame is queued, so game
+ * audio is dropped meanwhile rather than mixed into the notes.
+ * ⭐ `wait_out` waits for the notes to come out of the speaker, for a release:
+ * its teardown closes the card straight afterwards (🔗 the end of
+ * feedback_play, on why this waits rather than drains). */
+int ctm_controller_speaker_tone(ctm_controller_t *c, int pattern, int wait_out)
+{
+    if (!ctm_controller_speaker_tone_ready(c)) return 0;
+    if (c->alsa_rate == 0 || c->alsa_channels == 0) return 0;
+    const btsig_pattern_t p = pattern == 1 ? BTSIG_HANDED_BACK
+                            : pattern == 2 ? BTSIG_REFUSED
+                                           : BTSIG_HANDING_OVER;
+    speaker_tone_t t;
+    for (int n = 0; n < 2; ++n) {
+        t.hz[n] = wired_sig_hz(p, n);
+        t.level[n] = wired_sig_level(t.hz[n]);
+    }
+    t.note_ms = FEEDBACK_MS;
+    t.gap_ms = FEEDBACK_GAP_MS;
+    t.peak = FEEDBACK_TONE_LEVEL;
+    unsigned long frames = 0;
+    int16_t *buf = speaker_tone_render(&t, c->alsa_rate, c->alsa_channels, &frames);
+    if (!buf) return 0;
+    write_iso_audio_waiting(c, (const uint8_t *)buf,
+                            (uint32_t)(frames * c->alsa_channels * sizeof(int16_t)));
+    free(buf);
+
+    if (wait_out) {
+        /* What the card still holds, and a margin for it to come out. The
+         * whole tone, if the card cannot say. */
+        long left_ms = (long)(frames * 1000ul / c->alsa_rate);
+        snd_pcm_sframes_t delay = 0;
+        pthread_mutex_lock(&c->alsa_mutex);
+        if (c->alsa_fd >= 0 && ioctl(c->alsa_fd, SNDRV_PCM_IOCTL_DELAY, &delay) == 0 && delay >= 0) {
+            left_ms = (long)((unsigned long)delay * 1000ul / c->alsa_rate);
+        }
+        pthread_mutex_unlock(&c->alsa_mutex);
+        const long wait_ms = left_ms + 40;
+        struct timespec ts = { (time_t)(wait_ms / 1000), (wait_ms % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    return 1;
+}
+
+int ctm_controller_speaker_tone_ready(const ctm_controller_t *c)
+{
+    return c && c->ops && c->ops->sound_card && c->alsa_fd >= 0 && ctm_sig_tone_on();
+}
+
 static int handshake(ctm_controller_t *c, const ctmb_device_caps_t *caps,
                      const uint8_t *report_desc, uint32_t report_desc_len,
                      ctmb_host_config_t *host_cfg)
@@ -3577,7 +3729,27 @@ static void run_session(ctm_controller_t *c, const ctmb_device_caps_t *caps,
         feedback_play_connected(c);
         pthread_mutex_unlock(&g_cardmatch_lock);
     } else {
-        ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
+        if (c->ops->sound_card) {
+            /* ⭐ A TYPE WITH A SOUND CARD OF ITS OWN (2026-11-03): a cabled
+             * second-model DS4. The speaker opener finds the card on the pad's
+             * own USB device, once per bridge as a DualSense's is found (a
+             * reconnect keeps it), and the microphone starts on that card. A
+             * first-model DS4 has none, and the opener says so. ⓘ No tone: a
+             * DS4's signals are its own, below.
+             * ⭐ NOT UNDER g_cardmatch_lock (2026-11-04, a review before the
+             * merge). That lock is the DualSense's card match, and nothing here
+             * reads its notes or probes: with it, a DS4 waited out a DualSense's
+             * first probe, about three seconds, and a DualSense the DS4's
+             * open. */
+            pthread_mutex_lock(&c->alsa_mutex);
+            if (c->alsa_fd < 0) {
+                ctm_controller_open_alsa_playback(c);
+            }
+            pthread_mutex_unlock(&c->alsa_mutex);
+            if (c->matched_card >= 0) mic_capture_start(c);
+        } else {
+            ctl_log(c, "not a DualSense: no sound card, microphone or tone for this device");
+        }
         /* ⭐ A type with a signal of its own starts it here, where the
          * DualSense's starts -- a cabled DS4's light and rumble. It returns at
          * once; the signal plays on its own thread. */
@@ -3957,6 +4129,12 @@ ctm_controller_t *ctm_controller_create(const ctm_controller_dev_t *dev)
     c->btsig_primed = 0;
     c->matched_card = -1;
     c->card_fresh = 0;
+    /* A DualSense's formats, unless the type brings a card of its own. */
+    const ctm_sound_card_t *own = c->ops ? c->ops->sound_card : NULL;
+    c->alsa_channels = own ? own->play_channels : DS5_AUDIO_CHANNELS;
+    c->alsa_rate = own ? own->play_rate : DS5_AUDIO_RATE;
+    c->mic_channels = own ? own->mic_channels : MIC_CAP_CHANNELS;
+    c->mic_rate = own ? own->mic_rate : MIC_CAP_RATE;
     /* The defaults stop being an assertion about what the settings are and
      * become the starting values. Anything the host sets replaces them, so the
      * first open behaves exactly as before and a reopen no longer reverts. */
@@ -4076,6 +4254,23 @@ void ctm_controller_send_speaker_init(ctm_controller_t *c)
 void ctm_controller_open_alsa_playback(ctm_controller_t *c)
 {
     if (!c || c->alsa_fd >= 0) return;
+    /* ⭐ A type with a card of its own (a cabled second-model DS4) opens that,
+     * in its own format, and sets its volume. ⛔ None of the DualSense's below
+     * applies: its init report is a DualSense output report. */
+    if (c->ops && c->ops->sound_card) {
+        int card = -1;
+        c->alsa_fd = open_own_card_playback(c, &card);
+        if (c->alsa_fd < 0) {
+            ctl_log(c, "alsa: no sound card of its own found (speaker and microphone stay off)");
+            return;
+        }
+        c->matched_card = card;
+        char said[200];
+        own_card_volume_up(card, said, sizeof(said));
+        ctl_log(c, "alsa: opened its own card %d for ISO passthrough (fd=%d, %u ch at %u Hz); volume: %s",
+                card, c->alsa_fd, c->alsa_channels, c->alsa_rate, said);
+        return;
+    }
     c->alsa_fd = open_ds5_alsa_playback(c->dev.path, c->matched_card);
     if (c->alsa_fd < 0) {
         ctl_log(c, "alsa: DS5 playback open failed (wired audio unavailable)");

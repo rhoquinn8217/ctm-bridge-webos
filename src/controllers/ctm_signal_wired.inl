@@ -205,7 +205,7 @@ static int wired_sig_find_card_locked(const char *node, int *fresh)
     int n = 0;
     for (int card = 0; card < CARDMATCH_MAX_CARDS && n < CARDMATCH_MAX_CARDS; ++card) {
         if (!cardmatch_is_dualsense(card)) continue;
-        int fd = cardmatch_open_card(card);
+        int fd = cardmatch_open_card(card, MIC_CAP_CHANNELS, MIC_CAP_RATE);
         if (fd < 0) continue;              /* busy: a bridged session holds it */
         slots[n].card = card;
         slots[n].fd = fd;
