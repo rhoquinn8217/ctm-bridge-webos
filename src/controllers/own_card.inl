@@ -150,6 +150,36 @@ static int own_card_on_usb_path(int card, const char *usb_path)
     return strstr(line, want) != NULL;
 }
 
+/* ⭐⭐ THE PAD'S OWN CARD, ASKED BEFORE IT IS BRIDGED (2026-11-05). The card, of
+ * cards 0 to 7, with the USB id `vid`:`pid` on the pad's own USB device: by its
+ * usbbus when sysfs gives the device of the hidraw `node`, or else by the USB
+ * path in the node's HID `phys`, as open_own_card_playback finds it. -1 for
+ * none, and nothing is opened.
+ * ⓘ For Auto Bridge, which ticks a DS4 by itself only when it has one
+ * (rhoquinn8217, 2026-11-05: "Only ones with sound card."): a second-model
+ * DS4 on a cable and the DS4Dongle do; a first-model DS4, any pad on
+ * Bluetooth, and a GameSir in PlayStation mode, which answers as a
+ * second-model DS4 with no card behind it, do not. */
+static int own_card_of_node(const char *node, const char *phys, unsigned vid, unsigned pid)
+{
+    char busdev[16] = "";
+    char usb_path[64] = "";
+    struct stat st;
+    const int by_bus = node && stat(node, &st) == 0 && S_ISCHR(st.st_mode) &&
+                       own_card_busdev_of_char(major(st.st_rdev), minor(st.st_rdev),
+                                               busdev, sizeof(busdev));
+    if (!by_bus && !own_card_usb_path_of_phys(phys, usb_path, sizeof(usb_path))) {
+        return -1;
+    }
+    for (int card = 0; card < OWN_CARD_MAX_CARDS; card++) {
+        if (!own_card_usbid_is(card, vid, pid)) continue;
+        if (by_bus ? own_card_usbbus_is(card, busdev) : own_card_on_usb_path(card, usb_path)) {
+            return card;
+        }
+    }
+    return -1;
+}
+
 /* `percent` of a control's range from `lo` to `hi`, rounded: 0 is `lo`, 100
  * is `hi`. */
 static long own_card_level(long lo, long hi, int percent)
