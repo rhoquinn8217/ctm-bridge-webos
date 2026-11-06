@@ -202,6 +202,43 @@ int main(void)
     ok(!own_card_on_usb_path(6, "usb-generic-ehci.0-1.1.1.2"),
        "a name the kernel cut before its comma cannot say: no card");
 
+    /* ⭐ THE PAD'S OWN CARD, ASKED BEFORE A BRIDGE (2026-11-05): what Auto
+     * Bridge reads to tick a DS4 by itself. The node is /dev/null, the one
+     * character device every Linux has, linked in the scratch sysfs to a USB
+     * device as a hidraw node is. */
+    printf("\nthe pad's own card, asked before it is bridged\n");
+    struct stat null_st;
+    if (stat("/dev/null", &null_st) == 0 && S_ISCHR(null_st.st_mode)) {
+        char link[512], target[512];
+        snprintf(link, sizeof(link), "%s/sys/dev/char/%u:%u", g_dir,
+                 major(null_st.st_rdev), minor(null_st.st_rdev));
+        snprintf(target, sizeof(target),
+                 "%s/sys/devices/usb1/1-1/1-1.1.1/1-1.1.1:1.3/0003:054C:09CC.0005/hidraw/hidraw0", g_dir);
+        if (symlink(target, link) != 0) printf("  (could not link %s: errno=%d)\n", link, errno);
+        ok(own_card_of_node("/dev/null", "", 0x054c, 0x09cc) == 2,
+           "a second-model DS4's card, by the USB device sysfs gives for its node");
+        ok(own_card_of_node("/dev/null", "", 0x054c, 0x05c4) == -1,
+           "a first-model DS4's id has no card on that device");
+        /* A GameSir in PlayStation mode: Sony's id, on a USB device with no card. */
+        make_dirs("sys/devices/usb1/1-1/1-1.3/1-1.3:1.0/0003:054C:09CC.0060/hidraw/hidraw5");
+        write_rel("sys/devices/usb1/1-1/1-1.3/busnum", "1\n");
+        write_rel("sys/devices/usb1/1-1/1-1.3/devnum", "7\n");
+        unlink(link);
+        snprintf(target, sizeof(target),
+                 "%s/sys/devices/usb1/1-1/1-1.3/1-1.3:1.0/0003:054C:09CC.0060/hidraw/hidraw5", g_dir);
+        if (symlink(target, link) != 0) printf("  (could not link %s: errno=%d)\n", link, errno);
+        ok(own_card_of_node("/dev/null", "usb-generic-ehci.0-1.1.1/input3", 0x054c, 0x09cc) == -1,
+           "a GameSir answering as a second-model DS4 has none, and the path does not second-guess sysfs");
+    } else {
+        printf("  (no /dev/null to stand in for a node: the sysfs half is not checked)\n");
+    }
+    ok(own_card_of_node(g_dir, "usb-generic-ehci.0-1.1.1/input3", 0x054c, 0x09cc) == 2,
+       "where the node is no device sysfs knows, the card named for its USB path");
+    ok(own_card_of_node(NULL, "usb-generic-ehci.0-1.3/input0", 0x054c, 0x09cc) == -1,
+       "the GameSir on the C1's port 1.3 (2026-11-05), by its path: no card");
+    ok(own_card_of_node(NULL, "a0:5a:5e:48:54:7d", 0x054c, 0x09cc) == -1,
+       "a pad on Bluetooth has none");
+
     /* ⭐ THE PC'S LEVEL ON THE CARD'S OWN RANGE (2026-11-04): a DS4Dongle's
      * "PCM Playback Volume" runs 0 to 72 on the C1. */
     printf("\na level, as the card's own value\n");

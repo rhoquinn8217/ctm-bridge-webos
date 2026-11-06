@@ -643,6 +643,12 @@ static int open_ds5_alsa_playback(const char *want_node, int prefer_card)
  * its volume set (2026-11-03). */
 #include "own_card.inl"
 
+/* ⭐ The pad's own sound card, asked before it is bridged (ctm_controller.h). */
+int ctm_controller_own_card_of(const char *node, const char *phys, unsigned vid, unsigned pid)
+{
+    return own_card_of_node(node, phys, vid, pid);
+}
+
 /* Open a type's own sound card for playback (ops->sound_card), in its own
  * format. The card is the one this controller was matched to, or, before it
  * has one, the card with the pad's USB id on the pad's own USB device

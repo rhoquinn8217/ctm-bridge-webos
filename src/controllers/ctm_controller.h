@@ -671,6 +671,14 @@ void ctm_controller_own_card_volume(ctm_controller_t *c);
  * Sets the other level when it changes. */
 void ctm_controller_set_jack(ctm_controller_t *c, int in);
 
+/* ⭐ THE PAD'S OWN SOUND CARD, ASKED BEFORE IT IS BRIDGED (2026-11-05): the card
+ * with the USB id `vid`:`pid` on the USB device its hidraw `node` is on (or,
+ * where sysfs cannot be read, the one its HID `phys` names), or -1 for none.
+ * A second-model DS4 on a cable and the DS4Dongle have one; a first-model DS4,
+ * any pad on Bluetooth and a GameSir answering as a second-model DS4 do not.
+ * Reads a few small files under /proc and /sys and opens no card. */
+int ctm_controller_own_card_of(const char *node, const char *phys, unsigned vid, unsigned pid);
+
 /* ⭐ Told when a bridged keyboard presses the streaming overlay's shortcut,
  * Ctrl+Alt+Shift+S, which its own grab keeps from the app. When: the keyboard's
  * input thread, so the app hands the work to its main thread. */
